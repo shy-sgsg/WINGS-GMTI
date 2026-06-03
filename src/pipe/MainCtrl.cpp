@@ -1,4 +1,5 @@
 #include "MainCtrl.h"
+#include "dbs/DbsFusion.hpp"
 #include "trackModule.hpp"
 #include "PipeStruDef.h"
 
@@ -239,11 +240,25 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile)
 
     std::vector<GMTIOutput> periodResults;
     const std::vector<std::vector<double>> emptyPos;
-    if (!host->gmti_proc_.processPeriodsParallel(periodList,
-                                                 host->cfg_,
-                                                 host->cfg_.INFO_Type ? emptyPos : posMatrix,
-                                                 periodResults)) {
+    FusionGroupContext fusionCtx;
+    const std::vector<std::vector<double>> &posSource = host->cfg_.INFO_Type ? emptyPos : posMatrix;
+    const bool processOk = host->cfg_.enable_dbs_fusion
+        ? host->gmti_proc_.processPeriodsParallelFusion(periodList,
+                                                        host->cfg_,
+                                                        posSource,
+                                                        fusionCtx,
+                                                        periodResults)
+        : host->gmti_proc_.processPeriodsParallel(periodList,
+                                                  host->cfg_,
+                                                  posSource,
+                                                  periodResults);
+    if (!processOk) {
         std::cerr << "[ERR] GMTI period processing failed" << std::endl;
+    }
+    if (host->cfg_.enable_dbs_fusion && processOk) {
+        if (!runDbsFusionImaging(fusionCtx, host->cfg_, true)) {
+            std::cerr << "[ERR] DBS fusion imaging failed" << std::endl;
+        }
     }
 
     std::vector<double> MT_acc;

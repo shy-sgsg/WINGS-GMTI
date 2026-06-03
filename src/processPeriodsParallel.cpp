@@ -2,6 +2,7 @@
 // 并行派发多个 period 到多个独立的 GMTIProcessor 实例（单 GPU，多 stream/多 workspace）
 
 #include "GMTIProcessor.hpp"
+#include "dbs/DbsFusion.hpp"
 #include <thread>
 #include <atomic>
 #include <memory>
@@ -131,7 +132,7 @@ bool GMTIProcessor::processPeriodsParallel(const std::vector<int> &periodList,
     const size_t N = periodList.size();
     results.clear();
     results.resize(N);
-    std::vector<bool> ok(N, false);
+    std::vector<char> ok(N, 0);
 
     std::atomic_size_t next_idx(0);
 
@@ -149,7 +150,7 @@ bool GMTIProcessor::processPeriodsParallel(const std::vector<int> &periodList,
                 GMTIOutput out;
                 bool s = worker->processOnePeriod(per, cfg, posRaw, out);
                 results[i] = std::move(out);
-                ok[i] = s;
+                ok[i] = s ? 1 : 0;
                 std::cout << "[parallel] period " << per << " done by worker " << w << " -> " << (s?"OK":"FAIL") << std::endl;
             }
         });
@@ -158,8 +159,111 @@ bool GMTIProcessor::processPeriodsParallel(const std::vector<int> &periodList,
     for (auto &t : threads) if (t.joinable()) t.join();
 
     // 汇总结果一致性检查
-    bool all_ok = std::all_of(ok.begin(), ok.end(), [](bool v){return v;});
+    bool all_ok = std::all_of(ok.begin(), ok.end(), [](char v){return v != 0;});
     if (!all_ok) std::cerr << "Warning: some periods failed in parallel processing." << std::endl;
 
     return all_ok;
+}
+
+bool GMTIProcessor::processPeriodsParallelFusion(const std::vector<int> &periodList,
+                                                 const Config &cfg,
+                                                 const std::vector<std::vector<double>> &posRaw,
+                                                 FusionGroupContext &ctx)
+{
+    if (periodList.empty()) return true;
+
+    ctx.reset(periodList);
+
+    size_t freeBytes = 0, totalBytes = 0;
+    cudaError_t cerr = cudaMemGetInfo(&freeBytes, &totalBytes);
+    if (cerr != cudaSuccess) {
+        std::cerr << "cudaMemGetInfo failed: " << cudaGetErrorString(cerr) << std::endl;
+        return false;
+    }
+
+    const size_t requested = periodList.size();
+    const size_t HARD_CAP = 8;
+    const size_t instances = std::max<size_t>(1, std::min(requested, HARD_CAP));
+    const size_t pulseDec = static_cast<size_t>(std::max(1, cfg.pulse_dec));
+    const size_t rdRows = (static_cast<size_t>(std::max(0, cfg.pulse_num)) + pulseDec - 1) / pulseDec;
+    const size_t rdCols = static_cast<size_t>(std::max(0, cfg.rg_len));
+    const double rdCacheGiB = static_cast<double>(periodList.size()) * static_cast<double>(rdRows) *
+                              static_cast<double>(rdCols) * static_cast<double>(sizeof(float)) /
+                              (1024.0 * 1024.0 * 1024.0);
+    std::cout << "[fusion] group start: periods=" << periodList.size()
+              << " workers=" << instances
+              << " cuda_free=" << (static_cast<double>(freeBytes) / (1024.0 * 1024.0 * 1024.0))
+              << "GiB/" << (static_cast<double>(totalBytes) / (1024.0 * 1024.0 * 1024.0))
+              << "GiB pulse_num=" << cfg.pulse_num
+              << " pulse_dec=" << cfg.pulse_dec
+              << " rg_len=" << cfg.rg_len
+              << " estimated_dbs_amp_cache~" << rdCacheGiB << "GiB" << std::endl;
+
+    std::vector<std::unique_ptr<GMTIProcessor>> workers;
+    workers.reserve(instances);
+    for (size_t i = 0; i < instances; ++i) {
+        workers.emplace_back(new GMTIProcessor());
+        if (!workers.back()->initFFTPlans(cfg)) {
+            return false;
+        }
+        if (!workers.back()->initcuFFTPlans(cfg)) {
+            return false;
+        }
+    }
+
+    std::atomic_size_t next_idx(0);
+    std::vector<char> ok(periodList.size(), 0);
+    std::vector<std::thread> threads;
+    threads.reserve(instances);
+
+    for (size_t w = 0; w < instances; ++w) {
+        threads.emplace_back([w, &workers, &periodList, &cfg, &posRaw, &ctx, &ok, &next_idx]() {
+            GMTIProcessor *worker = workers[w].get();
+            while (true) {
+                const size_t slot = next_idx.fetch_add(1);
+                if (slot >= periodList.size()) break;
+                const int per = periodList[slot];
+                const bool s = worker->processOnePeriodFusionCache(per, cfg, posRaw, slot, ctx);
+                ok[slot] = s ? 1 : 0;
+                std::cout << "[fusion] period " << per << " slot " << slot
+                          << " done by worker " << w << " -> " << (s ? "OK" : "FAIL") << std::endl;
+            }
+        });
+    }
+
+    for (auto &t : threads) if (t.joinable()) t.join();
+
+    const bool all_ok = std::all_of(ok.begin(), ok.end(), [](char v){ return v != 0; });
+    if (!all_ok) {
+        return false;
+    }
+
+    double biasDeg = 0.0;
+    if (!estimateBeamPointingBiasByCenterBeams(periodList, ctx.beam_meta, biasDeg)) {
+        std::cerr << "[fusion] estimateBeamPointingBiasByCenterBeams failed" << std::endl;
+        return false;
+    }
+    if (!applyBeamPointingBiasToFusionContext(biasDeg, ctx)) {
+        std::cerr << "[fusion] applyBeamPointingBiasToFusionContext failed" << std::endl;
+        return false;
+    }
+
+    std::cout << "[fusion] beam_pointing_bias=" << biasDeg << " deg" << std::endl;
+    return true;
+}
+
+bool GMTIProcessor::processPeriodsParallelFusion(const std::vector<int> &periodList,
+                                                 const Config &cfg,
+                                                 const std::vector<std::vector<double>> &posRaw,
+                                                 FusionGroupContext &ctx,
+                                                 std::vector<GMTIOutput> &results)
+{
+    if (!processPeriodsParallelFusion(periodList, cfg, posRaw, ctx)) {
+        return false;
+    }
+    if (!relocateFusionDetections(ctx, cfg, results)) {
+        std::cerr << "[fusion] relocateFusionDetections failed" << std::endl;
+        return false;
+    }
+    return true;
 }

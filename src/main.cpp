@@ -9,6 +9,7 @@
 #include <limits>
 #include "config_structs.hpp" // 含 Config / GMTIOutput::Plane / Result 等声明
 #include "GMTIProcessor.hpp"  // 你的处理类头文件
+#include "dbs/DbsFusion.hpp"
 #include "trackModule.hpp"
 #include "pesudoTargetGen.hpp" // 伪目标生成函数声明
 
@@ -120,9 +121,19 @@ int main(int argc, char **argv)
     // 并行处理所有 period（在单 GPU 上通过多个 GMTIProcessor 实例并发运行）
     // FFT/cuFFT plan 在 processPeriodsParallel 内为每个 worker 单独初始化
     std::vector<GMTIOutput> periodResults;
-    if (!proc.processPeriodsParallel(periodList, cfg, cfg.INFO_Type ? std::vector<std::vector<double>>() : posMatrix, periodResults)) {
+    FusionGroupContext fusionCtx;
+    const std::vector<std::vector<double>> posSource = cfg.INFO_Type ? std::vector<std::vector<double>>() : posMatrix;
+    const bool processOk = cfg.enable_dbs_fusion
+        ? proc.processPeriodsParallelFusion(periodList, cfg, posSource, fusionCtx, periodResults)
+        : proc.processPeriodsParallel(periodList, cfg, posSource, periodResults);
+    if (!processOk) {
         std::cerr << "[ERR] 并行处理部分 period 失败（见日志）。\n";
         // 继续尝试从成功的结果中收集 MT
+    }
+    if (cfg.enable_dbs_fusion && processOk) {
+        if (!runDbsFusionImaging(fusionCtx, cfg, true)) {
+            std::cerr << "[ERR] DBS 融合成像输出失败。\n";
+        }
     }
     
     // 按输入 periodList 的顺序收集 MT 以保证确定性

@@ -3,12 +3,12 @@
     <GMTI_parameter>
         <GMTI_data>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID15_8H15M_GMTI0</GMTI_data>
         <GMTI_data2>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID15_8H15M_GMTI1</GMTI_data2>
-        <result_add>/home/shy/AIR/小长/GMTI_Data/Mission068/result_cudav2</result_add>
+        <result_add>/home/shy/AIR/小长/GMTI_Data/Mission068/result_final</result_add>
         <Plane_POS>/home/shy/AIR/小长/GMTI_Data/Mission068/RTIPOS/RTIPOS_ID15.out</Plane_POS>
         <reffunc_add>/home/shy/AIR/小长/GMTI_Data/Mission068/RefFun_Br50MHz_Tr38us_Len4096.dat</reffunc_add>
         <isSeparated>separate</isSeparated>
-        <INFO_Type>0</INFO_Type>
-        <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/M68ID15.bin</GMTI_data_new>
+        <INFO_Type>1</INFO_Type>
+        <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/M68ID16.bin</GMTI_data_new>
         <pipe_root_path>/home/shy/pipe_test</pipe_root_path>
         <estimate_error_angle>0</estimate_error_angle>
         <wavepos_parallel>1</wavepos_parallel>

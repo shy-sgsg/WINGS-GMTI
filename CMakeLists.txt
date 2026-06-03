@@ -91,6 +91,14 @@ find_package(Threads REQUIRED)
 # TinyXML2 (needed by trackModule tool)
 
 # ===== 源码配置 =====
+set(DBS_FUSION_SRC
+  src/dbs/DbsStitcher.cpp
+  src/dbs/buildMosaic.cpp
+  src/dbs/lodepng.cpp
+  src/dbs/stitcher_kernel.cu
+  src/dbs/stitcher_kernel_texarray.cu
+)
+
 set(SRC
   src/main.cpp
   src/alignFFTAndDBS.cpp
@@ -98,7 +106,8 @@ set(SRC
   src/computeDynamicSupportDomain.cpp
   src/detectAndLocating.cpp
   src/loadXML.cpp
-  src/NewProtocolReader.cpp
+  src/dbs/DbsFusion.cpp
+  src/dbs/NewProtocolReader.cpp
   src/processOnePeriod.cpp
   src/processPeriodsParallel.cpp
   src/pulseCompression.cpp
@@ -117,6 +126,7 @@ set(SRC
   src/tinyxmlparser.cpp
   # ★ 确保这里的路径和你实际的文件名一致
   src/gpu_kernels.cu
+  ${DBS_FUSION_SRC}
 )
 
 # 生成可执行文件
@@ -139,7 +149,8 @@ target_sources(compare_range PRIVATE
   src/computeDynamicSupportDomain.cpp
   src/detectAndLocating.cpp
   src/loadXML.cpp
-  src/NewProtocolReader.cpp
+  src/dbs/DbsFusion.cpp
+  src/dbs/NewProtocolReader.cpp
   src/processOnePeriod.cpp
   src/processPeriodsParallel.cpp
   src/pulseCompression.cpp
@@ -156,6 +167,7 @@ target_sources(compare_range PRIVATE
   src/tinyxmlerror.cpp
   src/tinyxmlparser.cpp
   src/gpu_kernels.cu
+  ${DBS_FUSION_SRC}
 )
 
 add_executable(convert_old_echo_to_new_format
@@ -244,7 +256,8 @@ set(GMTI_PIPE_SRC
   src/computeDynamicSupportDomain.cpp
   src/detectAndLocating.cpp
   src/loadXML.cpp
-  src/NewProtocolReader.cpp
+  src/dbs/DbsFusion.cpp
+  src/dbs/NewProtocolReader.cpp
   src/processOnePeriod.cpp
   src/processPeriodsParallel.cpp
   src/pulseCompression.cpp
@@ -262,6 +275,7 @@ set(GMTI_PIPE_SRC
   src/tinyxmlerror.cpp
   src/tinyxmlparser.cpp
   src/gpu_kernels.cu
+  ${DBS_FUSION_SRC}
 )
 
 add_executable(GMTI_pipe_core ${GMTI_PIPE_SRC})

@@ -8,6 +8,7 @@
 #include <cuComplex.h>
 #include <cufft.h>
 #include "config_structs.hpp"
+#include "dbs/DbsFusionTypes.hpp"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -127,6 +128,11 @@ public:
     // 处理一个周期的数据
     bool processOnePeriod(int periodIdx, const Config &cfg, const std::vector<std::vector<double>> &posRaw, GMTIOutput &out);
     bool processOnePeriod3(int periodIdx, const Config &cfg, const std::vector<std::vector<double>> &posRaw, GMTIOutput &out);
+    bool processOnePeriodFusionCache(int periodIdx,
+                                     const Config &cfg,
+                                     const std::vector<std::vector<double>> &posRaw,
+                                     size_t slot,
+                                     FusionGroupContext &ctx);
 
     // 写入结果到文件
     bool writeResult(const std::vector<double> &res, const Config &cfg);
@@ -182,6 +188,15 @@ public:
                                 const Config &cfg,
                                 const std::vector<std::vector<double>> &posRaw,
                                 std::vector<GMTIOutput> &results);
+    bool processPeriodsParallelFusion(const std::vector<int> &periodList,
+                                      const Config &cfg,
+                                      const std::vector<std::vector<double>> &posRaw,
+                                      FusionGroupContext &ctx);
+    bool processPeriodsParallelFusion(const std::vector<int> &periodList,
+                                      const Config &cfg,
+                                      const std::vector<std::vector<double>> &posRaw,
+                                      FusionGroupContext &ctx,
+                                      std::vector<GMTIOutput> &results);
 
     // Compute dataset-level squint by reading the center period(s) and
     // estimating fd_ctr from center-window data. Returns true on success
@@ -511,6 +526,14 @@ private:
 
     // --- 第四阶段：DBS 中心化 ---
     bool cuda_stage_dbs_async(float fa2, size_t Na, size_t Nr);
+
+    bool exportDbsCacheAfterRecenter(const Config& cfg,
+                                     const FusionBeamMeta& beamMeta,
+                                     size_t slot,
+                                     size_t Na,
+                                     size_t Nr,
+                                     RDData& rd,
+                                     MetaPack& meta);
 
     // --- 第五阶段：数据下载与同步 ---
     bool cuda_download_sync(std::vector<std::complex<float>> &out1,

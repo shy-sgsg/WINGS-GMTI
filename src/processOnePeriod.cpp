@@ -15,7 +15,7 @@
 #include "geo/geoProj.hpp"
 #include "rotation_xy.hpp"
 #include "unwrap_fd.hpp"
-#include "NewProtocolReader.hpp"
+#include "dbs/NewProtocolReader.hpp"
 
 using cudacd = cuFloatComplex;
 using cd = std::complex<float>;
@@ -966,6 +966,401 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     return true; // 所有处理成功，返回 true
 }
 
+bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
+                                                const Config &cfg_,
+                                                const std::vector<std::vector<double>> &posRaw,
+                                                size_t slot,
+                                                FusionGroupContext &ctx)
+{
+    Config cfg = cfg_;
+    std::vector<std::complex<double>> data1, data2;
+    std::vector<double> utc;
+    std::vector<std::vector<double>> echoPosRaw;
+    double theta_sq = 0.0;
+
+    bool readSuccess = false;
+    if (cfg.INFO_Type) {
+        readSuccess = readPulseBlockNewProtocol(cfg, periodIdx, data1, data2, utc, theta_sq, echoPosRaw);
+    } else {
+        readSuccess = readPulseBlock(cfg, periodIdx, data1, data2, utc, theta_sq);
+    }
+    if (!readSuccess) {
+        return false;
+    }
+
+    if (!cfg.isPC) {
+        if (!pulseCompression(data1, data2, cfg)) {
+            return false;
+        }
+    } else {
+        const int Lraw = cfg.pulse_len;
+        const int W = cfg.pulse_num;
+        const int M1 = cfg.rg_len;
+        const int Lraw2M = Lraw / M1;
+        std::vector<std::complex<double>> rc_out((size_t)W * M1);
+        for (int k = 0; k < W; ++k) {
+            for (int m = 0; m < M1; ++m) {
+                rc_out[(size_t)k * M1 + m] = data1[(size_t)k * Lraw + m * Lraw2M];
+            }
+        }
+        data1.swap(rc_out);
+
+        rc_out.assign((size_t)W * M1, std::complex<double>(0.0, 0.0));
+        for (int k = 0; k < W; ++k) {
+            for (int m = 0; m < M1; ++m) {
+                rc_out[(size_t)k * M1 + m] = data2[(size_t)k * Lraw + m * Lraw2M];
+            }
+        }
+        data2.swap(rc_out);
+    }
+
+    cfg.fs = cfg.fs * cfg.rg_len / cfg.pulse_len;
+    cfg.pulse_len = cfg.rg_len;
+
+    const int W_orig = cfg.pulse_num;
+    const int M = cfg.rg_len;
+    const int dec = cfg.pulse_dec;
+    if (dec <= 0 || W_orig % dec != 0) {
+        return false;
+    }
+    const int W_new = W_orig / dec;
+    if (W_new != W_orig) {
+        std::vector<std::complex<double>> tmp((size_t)W_new * M);
+        for (int k_new = 0; k_new < W_new; ++k_new) {
+            const size_t out_base = (size_t)k_new * M;
+            const size_t in_base = (size_t)(dec * k_new) * M;
+            for (int m = 0; m < M; ++m) {
+                std::complex<double> acc = 0.0;
+                for (int d = 0; d < dec; ++d) {
+                    acc += data1[in_base + (size_t)d * M + m];
+                }
+                tmp[out_base + m] = acc;
+            }
+        }
+        data1.swap(tmp);
+
+        tmp.assign((size_t)W_new * M, std::complex<double>(0.0, 0.0));
+        for (int k_new = 0; k_new < W_new; ++k_new) {
+            const size_t out_base = (size_t)k_new * M;
+            const size_t in_base = (size_t)(dec * k_new) * M;
+            for (int m = 0; m < M; ++m) {
+                std::complex<double> acc = 0.0;
+                for (int d = 0; d < dec; ++d) {
+                    acc += data2[in_base + (size_t)d * M + m];
+                }
+                tmp[out_base + m] = acc;
+            }
+        }
+        data2.swap(tmp);
+
+        std::vector<double> utc_tmp(W_new);
+        for (int k_new = 0; k_new < W_new; ++k_new) {
+            double acc = 0.0;
+            for (int d = 0; d < dec; ++d) {
+                acc += utc[dec * k_new + d];
+            }
+            utc_tmp[k_new] = acc / static_cast<double>(dec);
+        }
+        utc.swap(utc_tmp);
+        cfg.pulse_num = W_new;
+        cfg.PRF = cfg.PRF / dec;
+    }
+
+    double utc_mean = 0.0;
+    for (double t : utc) {
+        utc_mean += t;
+    }
+    if (!utc.empty()) {
+        utc_mean /= static_cast<double>(utc.size());
+    }
+    for (double &t : utc) {
+        if (utc_mean - t > 0.6) {
+            t += 1.0;
+        } else if (utc_mean - t < -0.6) {
+            t -= 1.0;
+        }
+    }
+
+    const double coef = cfg.calib_coef;
+    for (auto &v : data2) {
+        v *= coef;
+    }
+
+    GMTIOutput::Plane plane;
+    if (cfg.Loc) {
+        const std::vector<std::vector<double>> &planePosSource = cfg.INFO_Type ? echoPosRaw : posRaw;
+        if (!extractPlanePos(utc, planePosSource, cfg, plane)) {
+            return false;
+        }
+    } else {
+        plane.V = 40.0 / 3.6;
+        plane.E = plane.N = 0.0;
+        plane.H = cfg.MT_nowz;
+        plane.V_angle = 0.0;
+    }
+
+    std::vector<double> faAxis;
+    double fa_ctr = 0.0;
+    const double angle_deg = GMTIProcessor::estimateSquintAngleDeg(data1, plane, cfg);
+    const double theta_deg = angle_deg + theta_sq;
+    if (!computeDoppler(data1, 1, cfg, faAxis, fa_ctr, plane.V, theta_deg)) {
+        return false;
+    }
+
+    int az_center = 0, az_st = 0, az_ed = 0, rg_st = 0, rg_ed = 0;
+    double fd_st = 0.0, fd_ed = 0.0, BW_az = 0.0;
+    if (!computeDynamicSupportDomain(faAxis, fa_ctr, plane, cfg,
+                                     az_center, az_st, az_ed,
+                                     fd_st, fd_ed, BW_az,
+                                     rg_st, rg_ed)) {
+        return false;
+    }
+    cfg.az_center = az_center;
+    cfg.az_st = az_st;
+    cfg.az_ed = az_ed;
+    cfg.rg_st = rg_st;
+    cfg.rg_ed = rg_ed;
+
+    const double baseline = cfg.d_channel;
+    const double delta_t = (plane.V > 0.0) ? (baseline / plane.V) : 0.0;
+    const int skipInt_theory = static_cast<int>(std::round(delta_t * cfg.PRF));
+    const int skipInt = 1;
+
+    const size_t Na = static_cast<size_t>(cfg.pulse_num);
+    const size_t Nr = static_cast<size_t>(cfg.rg_len);
+    std::vector<std::complex<float>> data1_f(Na * Nr);
+    std::vector<std::complex<float>> data2_f(Na * Nr);
+    for (size_t i = 0; i < data1_f.size(); ++i) {
+        data1_f[i] = std::complex<float>(static_cast<float>(data1[i].real()), static_cast<float>(data1[i].imag()));
+        data2_f[i] = std::complex<float>(static_cast<float>(data2[i].real()), static_cast<float>(data2[i].imag()));
+    }
+
+    if (!cuda_upload_async(data1_f, data2_f, Na, Nr)) {
+        return false;
+    }
+    if (!cuda_stage_align_async(0, Na, Nr)) {
+        return false;
+    }
+    if (!cuda_stage_fft_async(Na, Nr)) {
+        return false;
+    }
+    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), Na, Nr)) {
+        return false;
+    }
+
+    FusionBeamMeta beamMeta;
+    beamMeta.beam_index = periodIdx;
+    beamMeta.slot = static_cast<int>(slot);
+    beamMeta.theta_sq = theta_sq;
+    beamMeta.theta_true = theta_sq;
+    beamMeta.fd_ctr_wrapped = fa_ctr;
+    beamMeta.fd_ctr_unwrapped = fa_ctr;
+    beamMeta.utc_mid = utc.empty() ? 0.0 : utc[utc.size() / 2];
+    beamMeta.plane = plane;
+    beamMeta.PRF = cfg.PRF;
+    beamMeta.fc_hz = cfg.fc;
+    beamMeta.lambda = (cfg.lambda > 0.0) ? cfg.lambda : (C / cfg.fc);
+
+    if (!exportDbsCacheAfterRecenter(cfg, beamMeta, slot, Na, Nr, ctx.rd, ctx.meta)) {
+        return false;
+    }
+
+    if (!cuda_stage_align_async(skipInt, Na, Nr)) {
+        return false;
+    }
+    if (!cuda_stage_fft_async(Na, Nr)) {
+        return false;
+    }
+    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), Na, Nr)) {
+        return false;
+    }
+
+    const double thre_rg = 0.1 * M_PI;
+    std::vector<float> phi_fit;
+    std::vector<double> phi_diss_phase;
+    std::vector<int> phi_diss_range;
+    if (!rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
+        return false;
+    }
+    cuda_apply_rg_correction_async(phi_fit, Na, Nr);
+
+    std::array<double, 2> p_38;
+    if (!clutter_cancel_38_paper_1_p38_cuda(
+            faAxis,
+            cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
+            cfg,
+            p_38)) {
+        return false;
+    }
+
+    std::vector<float> phase_map;
+    if (!cuda_download_phase_map(phase_map, Na * Nr)) {
+        return false;
+    }
+
+    if (!cuda_stage_align_async(skipInt_theory, Na, Nr)) {
+        return false;
+    }
+    if (!cuda_stage_fft_async(Na, Nr)) {
+        return false;
+    }
+    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), Na, Nr)) {
+        return false;
+    }
+    if (!rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
+        return false;
+    }
+    cuda_apply_rg_correction_async(phi_fit, Na, Nr);
+
+    std::array<double, 2> p_38_csi;
+    std::vector<double> ph_trace;
+    std::vector<double> fa_cut;
+    std::vector<std::complex<double>> csi_trace;
+    if (!clutter_cancel_38_paper_1_cuda(
+            faAxis,
+            cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
+            cfg,
+            csi_trace, p_38_csi, ph_trace, fa_cut)) {
+        return false;
+    }
+
+    const int band_st = std::max(0, std::min(az_st, cfg.pulse_num - 1));
+    const int band_ed = std::max(0, std::min(az_ed, cfg.pulse_num - 1));
+    std::vector<float> mydata;
+    std::vector<std::complex<float>> CSI_out;
+    bool cfar_ok = dpca_cfar2_fast_cuda(CSI_out, band_st, band_ed,
+                                        cfg.pf, 4, 16, "GO", cfg, mydata);
+    if (!cfar_ok) {
+        std::vector<std::complex<float>> F1_f, F2_f;
+        if (!cuda_download_sync(F1_f, F2_f, Na * Nr)) {
+            return false;
+        }
+        if (!cuda_download_csi_sync(CSI_out, Na * Nr)) {
+            return false;
+        }
+
+        std::vector<std::complex<double>> detect_data(F2_f.size());
+        for (size_t i = 0; i < F2_f.size(); ++i) {
+            detect_data[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
+        }
+        if (band_st <= band_ed) {
+            for (int r = band_st; r <= band_ed; ++r) {
+                const size_t off = static_cast<size_t>(r) * Nr;
+                for (size_t c = 0; c < Nr; ++c) {
+                    const auto v = CSI_out[off + c];
+                    detect_data[off + c] = std::complex<double>(v.real(), v.imag());
+                }
+            }
+        }
+
+        std::vector<double> mydata_d;
+        std::vector<int> prow_cpu, pcol_cpu;
+        cfar_ok = dpca_cfar2_fast(detect_data, cfg.pf, 4, 16, "GO",
+                                  cfg, mydata_d, prow_cpu, pcol_cpu);
+        if (cfar_ok) {
+            mydata.assign(mydata_d.begin(), mydata_d.end());
+        }
+    }
+    if (!cfar_ok) {
+        return false;
+    }
+
+    std::vector<int> prow_new, pcol_new;
+    std::vector<float> refined_mydata;
+    std::vector<float> phase_std_list;
+    bool cluster_ok = cluster_filter_gap_phase_cuda(mydata, phase_map, cfg.min_points, 2, 0.2f,
+                                                    cfg, refined_mydata, prow_new, pcol_new,
+                                                    phase_std_list);
+    if (!cluster_ok) {
+        std::vector<double> mydata_d(mydata.begin(), mydata.end());
+        std::vector<double> phase_map_d(phase_map.begin(), phase_map.end());
+        std::vector<double> refined_mydata_d;
+        std::vector<double> phase_std_list_d;
+        cluster_ok = cluster_filter_gap_phase(mydata_d, phase_map_d, cfg.min_points, 2, 0.2,
+                                              cfg, refined_mydata_d, prow_new, pcol_new,
+                                              phase_std_list_d);
+        if (cluster_ok) {
+            refined_mydata.assign(refined_mydata_d.begin(), refined_mydata_d.end());
+            phase_std_list.assign(phase_std_list_d.begin(), phase_std_list_d.end());
+        }
+    }
+    if (!cluster_ok) {
+        return false;
+    }
+
+    GMTIOutput::Detect targetSel;
+    bool targetDetection = target_select_cuda(prow_new, pcol_new, cfg, targetSel);
+    if (!targetDetection) {
+        std::vector<std::complex<float>> F1_f, F2_f;
+        if (!cuda_download_sync(F1_f, F2_f, Na * Nr)) {
+            return false;
+        }
+        std::vector<std::complex<double>> F1(F1_f.size()), F2(F2_f.size());
+        for (size_t i = 0; i < F1_f.size(); ++i) {
+            F1[i] = std::complex<double>(F1_f[i].real(), F1_f[i].imag());
+            F2[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
+        }
+        targetDetection = target_select(F1, F2, prow_new, pcol_new, cfg, targetSel);
+    }
+    if (!targetDetection) {
+        return false;
+    }
+
+    beamMeta.phase_slope = p_38[0];
+    beamMeta.phase_intercept = p_38[1];
+    beamMeta.az_center = az_center;
+
+    if (slot < ctx.detections.size()) {
+        auto &raw = ctx.detections[slot];
+        raw.clear();
+        raw.reserve(targetSel.prow.size());
+        const double ref_phase = faAxis[static_cast<size_t>(az_center)] * p_38[0] + p_38[1];
+        for (size_t i = 0; i < targetSel.prow.size(); ++i) {
+            const int r = targetSel.prow[i];
+            const int c = targetSel.pcol[i];
+            if (r < 0 || c < 0 || r >= static_cast<int>(Na) || c >= static_cast<int>(Nr)) {
+                continue;
+            }
+            const size_t off = static_cast<size_t>(r) * Nr + static_cast<size_t>(c);
+            double dphi = static_cast<double>(phase_map[off]);
+            double diff = dphi - ref_phase;
+            if (diff > M_PI) {
+                diff -= 2.0 * M_PI;
+            }
+            if (diff < -M_PI) {
+                diff += 2.0 * M_PI;
+            }
+            dphi = ref_phase + diff;
+
+            const double af_wrapped = (std::abs(p_38[0]) < 1e-12)
+                ? ((r < static_cast<int>(faAxis.size())) ? faAxis[static_cast<size_t>(r)] : fa_ctr)
+                : ((dphi - p_38[1]) / p_38[0]);
+
+            DetectionRaw d;
+            d.beam_index = periodIdx;
+            d.slot = static_cast<int>(slot);
+            d.prow = r;
+            d.pcol = c;
+            d.range_m = cfg.Rg.empty() ? (cfg.R_min + static_cast<double>(c) * cfg.R_bin)
+                                       : cfg.Rg[static_cast<size_t>(c)];
+            d.af_wrapped = af_wrapped;
+            d.phase = dphi;
+            d.amplitude = (i < refined_mydata.size()) ? static_cast<double>(refined_mydata[i]) : 0.0;
+            d.utc_mid = beamMeta.utc_mid;
+            raw.push_back(d);
+        }
+    }
+
+    if (slot < ctx.beam_meta.size()) {
+        ctx.beam_meta[slot] = beamMeta;
+    }
+    if (slot < ctx.done.size()) {
+        ctx.done[slot] = 1;
+    }
+
+    return true;
+}
+
 bool GMTIProcessor::extractPlanePos(const std::vector<double> &t_utc,
                                     const std::vector<std::vector<double>> &POS, // [POS_num][17]
                                     const Config &cfg,
@@ -1287,6 +1682,70 @@ bool GMTIProcessor::cuda_download_sync(std::vector<cd> &out1, std::vector<cd> &o
 
     // 2. 显式流同步：确保 CPU 下一行代码拿到的 out1/out2 是完整的
     cudaStreamSynchronize(stream_compute_);
+
+    return true;
+}
+
+bool GMTIProcessor::exportDbsCacheAfterRecenter(const Config& cfg,
+                                                const FusionBeamMeta& beamMeta,
+                                                size_t slot,
+                                                size_t Na,
+                                                size_t Nr,
+                                                RDData& rd,
+                                                MetaPack& meta)
+{
+    if (Na == 0 || Nr == 0 || gpu_ptrs_.t1 == nullptr) {
+        return false;
+    }
+    if (slot >= rd.amp.size() || slot >= rd.fd_axis.size() ||
+        slot >= rd.rg_axis.size() || slot >= meta.beams.size()) {
+        return false;
+    }
+
+    const size_t total = Na * Nr;
+    std::vector<std::complex<float>> h_az(total);
+    cudaMemcpyAsync(h_az.data(), gpu_ptrs_.t1, total * sizeof(cd),
+                    cudaMemcpyDeviceToHost, stream_compute_);
+    cudaStreamSynchronize(stream_compute_);
+
+    Image2D<float> amp(static_cast<int>(Na), static_cast<int>(Nr));
+    for (size_t r = 0; r < Na; ++r) {
+        for (size_t c = 0; c < Nr; ++c) {
+            amp.at(static_cast<int>(r), static_cast<int>(c)) =
+                std::abs(h_az[r * Nr + c]);
+        }
+    }
+
+    std::vector<float> fd_axis(Na, 0.0f);
+    const double df = (Na > 1) ? (cfg.PRF / static_cast<double>(Na - 1)) : 0.0;
+    for (size_t r = 0; r < Na; ++r) {
+        fd_axis[r] = static_cast<float>(-0.5 * cfg.PRF + static_cast<double>(r) * df);
+    }
+
+    std::vector<float> rg_axis(Nr, 0.0f);
+    for (size_t c = 0; c < Nr; ++c) {
+        if (c < cfg.Rg.size()) {
+            rg_axis[c] = static_cast<float>(cfg.Rg[c]);
+        } else {
+            rg_axis[c] = static_cast<float>(cfg.R_min + static_cast<double>(c) * cfg.R_bin);
+        }
+    }
+
+    rd.nEff = static_cast<int>(Na);
+    rd.amp[slot] = amp;
+    rd.fd_axis[slot] = fd_axis;
+    rd.rg_axis[slot] = rg_axis;
+
+    MetaPerBeam m;
+    m.vN = static_cast<float>(beamMeta.plane.V * std::sin(beamMeta.plane.V_angle * M_PI / 180.0));
+    m.vE = static_cast<float>(beamMeta.plane.V * std::cos(beamMeta.plane.V_angle * M_PI / 180.0));
+    m.vU = 0.0f;
+    m.x = static_cast<float>(beamMeta.plane.E);
+    m.y = static_cast<float>(beamMeta.plane.N);
+    m.z = static_cast<float>(beamMeta.plane.H);
+    m.fd_ctr = static_cast<float>(beamMeta.fd_ctr_wrapped);
+    m.angle_deg = static_cast<float>(beamMeta.theta_sq);
+    meta.beams[slot] = m;
 
     return true;
 }

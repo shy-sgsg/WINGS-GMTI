@@ -84,6 +84,10 @@ struct Config {
     // ★ 新增：是否启用波位并行处理（true 表示并行，false 表示逐波位顺序处理）
     bool wavepos_parallel = true;
     bool enable_dbs_fusion = false;
+    double dbs_out_res_m = 1.0; // DBS 成像输出分辨率，对应 XML raw_fenbianlv
+    int dbs_beam_skip = 1;      // DBS 波位跳过数，对应 XML n_tiaoguo
+    int dbs_range_skip = 1;     // DBS 距离抽样步长，对应 XML len_tiaoguo
+    int dbs_interp_mode = 1;    // DBS 拼图插值模式，1=最近邻，2=双线性
 
     // ★ 新增：是否估计误差角（false 时直接使用 XML 中的 squint_angle）
     bool estimate_error_angle = true;

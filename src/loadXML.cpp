@@ -6,6 +6,7 @@
 #include <sstream>
 #include <cctype>
 #include <regex>
+#include <algorithm>
 #include "rangeCompress.hpp"
 
 // 读取 XML 配置文件并填充到 Config 结构体中
@@ -165,6 +166,25 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     const std::string enableDbsFusionStr = getTextContent(param->FirstChildElement("enable_dbs_fusion"));
     if (!enableDbsFusionStr.empty()) {
         cfg.enable_dbs_fusion = (enableDbsFusionStr == "true" || enableDbsFusionStr == "1");
+    }
+
+    {
+        const std::string rawFenbianlvStr = getTextContent(param->FirstChildElement("raw_fenbianlv"));
+        if (!rawFenbianlvStr.empty()) {
+            cfg.dbs_out_res_m = std::stod(rawFenbianlvStr);
+        }
+        const std::string nTiaoguoStr = getTextContent(param->FirstChildElement("n_tiaoguo"));
+        if (!nTiaoguoStr.empty()) {
+            cfg.dbs_beam_skip = std::max(1, std::stoi(nTiaoguoStr));
+        }
+        const std::string lenTiaoguoStr = getTextContent(param->FirstChildElement("len_tiaoguo"));
+        if (!lenTiaoguoStr.empty()) {
+            cfg.dbs_range_skip = std::max(1, std::stoi(lenTiaoguoStr));
+        }
+        const std::string interpModeStr = getTextContent(param->FirstChildElement("dbs_interp_mode"));
+        if (!interpModeStr.empty()) {
+            cfg.dbs_interp_mode = std::stoi(interpModeStr);
+        }
     }
 
     const std::string estimateErrorAngleStr = getTextContent(param->FirstChildElement("estimate_error_angle"));
