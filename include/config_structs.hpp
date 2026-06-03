@@ -83,6 +83,7 @@ struct Config {
 
     // ★ 新增：是否启用波位并行处理（true 表示并行，false 表示逐波位顺序处理）
     bool wavepos_parallel = true;
+    bool enable_dbs_fusion = false;
 
     // ★ 新增：是否估计误差角（false 时直接使用 XML 中的 squint_angle）
     bool estimate_error_angle = true;

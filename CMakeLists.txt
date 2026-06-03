@@ -98,6 +98,7 @@ set(SRC
   src/computeDynamicSupportDomain.cpp
   src/detectAndLocating.cpp
   src/loadXML.cpp
+  src/NewProtocolReader.cpp
   src/processOnePeriod.cpp
   src/processPeriodsParallel.cpp
   src/pulseCompression.cpp
@@ -138,6 +139,7 @@ target_sources(compare_range PRIVATE
   src/computeDynamicSupportDomain.cpp
   src/detectAndLocating.cpp
   src/loadXML.cpp
+  src/NewProtocolReader.cpp
   src/processOnePeriod.cpp
   src/processPeriodsParallel.cpp
   src/pulseCompression.cpp
@@ -242,6 +244,7 @@ set(GMTI_PIPE_SRC
   src/computeDynamicSupportDomain.cpp
   src/detectAndLocating.cpp
   src/loadXML.cpp
+  src/NewProtocolReader.cpp
   src/processOnePeriod.cpp
   src/processPeriodsParallel.cpp
   src/pulseCompression.cpp

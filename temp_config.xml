@@ -12,6 +12,7 @@
         <pipe_root_path>/home/shy/pipe_test</pipe_root_path>
         <estimate_error_angle>0</estimate_error_angle>
         <wavepos_parallel>1</wavepos_parallel>
+        <enable_dbs_fusion>1</enable_dbs_fusion>
         <iq_compose>I+jQ</iq_compose>
         <isPC>0</isPC>
         <hasRefFunc>0</hasRefFunc>

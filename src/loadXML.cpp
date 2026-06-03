@@ -162,6 +162,11 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
         cfg.wavepos_parallel = (waveposParallelStr == "true" || waveposParallelStr == "1");
     }
 
+    const std::string enableDbsFusionStr = getTextContent(param->FirstChildElement("enable_dbs_fusion"));
+    if (!enableDbsFusionStr.empty()) {
+        cfg.enable_dbs_fusion = (enableDbsFusionStr == "true" || enableDbsFusionStr == "1");
+    }
+
     const std::string estimateErrorAngleStr = getTextContent(param->FirstChildElement("estimate_error_angle"));
     if (!estimateErrorAngleStr.empty()) {
         cfg.estimate_error_angle = (estimateErrorAngleStr == "true" || estimateErrorAngleStr == "1");
