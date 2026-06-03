@@ -1,0 +1,115 @@
+cmake_minimum_required(VERSION 3.18)
+project(GMTI_core LANGUAGES CXX)
+
+# ===== 编译选项（兼容老 GCC）=====
+# g++4.5/4.6 用 -std=gnu++0x；>=4.7 用 -std=gnu++11
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS 4.7)
+    set(CXX_STD_FLAG "-std=gnu++0x")
+  else()
+    set(CXX_STD_FLAG "-std=gnu++11")
+  endif()
+else()
+  set(CXX_STD_FLAG "-std=gnu++11")
+endif()
+
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+add_compile_options(${CXX_STD_FLAG} -Wall -Wextra -Wpedantic)
+
+# ===== 开关 =====
+option(ENABLE_OPENMP     "Enable OpenMP parallelization" OFF)
+option(ENABLE_DEBUG_LOG  "Force define DEBUG macro for verbose logging" OFF)
+
+# ===== 手动查找 FFTW3（double）+ 可选线程库 =====
+# 常见库: fftw3, fftw3_threads；头仍是 fftw3.h
+find_library(FFTW3_LIB
+  NAMES fftw3
+  PATHS /usr/lib64 /usr/lib /usr/local/lib
+)
+find_library(FFTW3_THREADS_LIB
+  NAMES fftw3_threads
+  PATHS /usr/lib64 /usr/lib /usr/local/lib
+)
+find_path(FFTW_INC
+  NAMES fftw3.h
+  PATHS /usr/include /usr/local/include
+)
+if (NOT FFTW3_LIB OR NOT FFTW_INC)
+  message(FATAL_ERROR "FFTW3 (double) not found. Hint: sudo yum install fftw fftw-devel")
+endif()
+if (FFTW3_THREADS_LIB)
+  message(STATUS "FFTW3 threads found: ${FFTW3_THREADS_LIB}")
+else()
+  message(STATUS "FFTW3 threads not found; building without fftw3_threads")
+endif()
+message(STATUS "FFTW3: lib=${FFTW3_LIB}, inc=${FFTW_INC}")
+
+# ===== 线程库（pthread / 供 fftw3_threads 使用）=====
+find_package(Threads REQUIRED)
+
+# ===== 源码 =====
+set(SRC
+  src/main.cpp
+  src/alignFFTAndDBS.cpp
+  src/clutter_CSI.cpp
+  src/computeDynamicSupportDomain.cpp
+  src/detectAndLocating.cpp
+  src/loadXML.cpp
+  src/processOnePeriod.cpp
+  src/pulseCompression.cpp
+  src/rg_correct.cpp
+  src/writeresults.cpp
+  src/kalman_track.cpp
+  src/extractUTC.cpp
+  src/makeLists.cpp
+  src/tinystr.cpp
+  src/tinyxml.cpp
+  src/tinyxmlerror.cpp
+  src/tinyxmlparser.cpp
+)
+
+add_executable(GMTI_core ${SRC})
+target_include_directories(GMTI_core PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
+  ${FFTW_INC}
+)
+
+# ===== OpenMP（仅用 -fopenmp，能用则加）=====
+if (ENABLE_OPENMP AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-fopenmp" HAS_OMP)
+  if (HAS_OMP)
+    target_compile_options(GMTI_core PRIVATE -fopenmp)
+    target_link_libraries(GMTI_core PRIVATE -fopenmp)
+    message(STATUS "OpenMP enabled via -fopenmp")
+  else()
+    message(WARNING "Compiler doesn't accept -fopenmp; building without OpenMP")
+  endif()
+endif()
+
+# ===== 链接 =====
+target_link_libraries(GMTI_core
+  PRIVATE
+    ${FFTW3_LIB}
+    Threads::Threads
+)
+if (FFTW3_THREADS_LIB)
+  target_link_libraries(GMTI_core PRIVATE ${FFTW3_THREADS_LIB})
+endif()
+
+# ===== 宏定义：DEBUG / NDEBUG =====
+if (ENABLE_DEBUG_LOG)
+  target_compile_definitions(GMTI_core PRIVATE DEBUG)
+else()
+  target_compile_definitions(GMTI_core PRIVATE
+    $<$<CONFIG:Debug>:DEBUG>
+    $<$<CONFIG:Release>:NDEBUG>
+    $<$<CONFIG:RelWithDebInfo>:NDEBUG>
+    $<$<CONFIG:MinSizeRel>:NDEBUG>
+  )
+endif()
+
+# ===== 调试友好 =====
+target_compile_options(GMTI_core PRIVATE
+  $<$<CONFIG:Debug>:-O0 -g3 -fno-omit-frame-pointer>
+)
