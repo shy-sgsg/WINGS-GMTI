@@ -6,7 +6,6 @@
 #include <stdexcept>
 #include "dbs/lodepng.h" // PNG写出
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <string>
@@ -22,19 +21,6 @@
 #include "dbs/rotation_xy.hpp"
 
 static inline float c0() { return 299792458.0f; }
-
-static size_t dbs_max_mosaic_pixels()
-{
-  const char *env = std::getenv("DBS_MAX_MOSAIC_PIXELS");
-  if (env && *env)
-  {
-    char *end = nullptr;
-    const unsigned long long v = std::strtoull(env, &end, 10);
-    if (end != env && v > 0)
-      return static_cast<size_t>(v);
-  }
-  return 60000000ULL;
-}
 
 DbsStitcher::DbsStitcher()
 {
@@ -446,7 +432,7 @@ bool DbsStitcher::estimateMosaicExtent(const Config &cfg, const RDData &RD, cons
   double nxD = axis_count(spanX, dx);
   double nyD = axis_count(spanY, dx);
   double pixD = nxD * nyD;
-  const size_t maxPixels = dbs_max_mosaic_pixels();
+  const size_t maxPixels = std::max<size_t>(1, cfg.dbs_max_mosaic_pixels);
   if (!std::isfinite(nxD) || !std::isfinite(nyD) || !std::isfinite(pixD) ||
       nxD <= 0.0 || nyD <= 0.0)
   {
@@ -467,7 +453,7 @@ bool DbsStitcher::estimateMosaicExtent(const Config &cfg, const RDData &RD, cons
               << "spanX=" << spanX << "m spanY=" << spanY << "m out_res=" << oldDx
               << "m pixels~" << static_cast<unsigned long long>(oldPixD)
               << ". Auto coarsen output resolution to " << dx
-              << "m. Set DBS_MAX_MOSAIC_PIXELS to override the cap (current "
+              << "m. Set XML <dbs_max_mosaic_pixels> to override the cap (current "
               << maxPixels << ")." << std::endl;
   }
 
@@ -607,12 +593,45 @@ bool DbsStitcher::writeProducts(const Config &cfg,
   for (size_t i = 0; i < u8.size(); ++i)
     u8[i] = (unsigned char)(out16.buf[i] >> 8); // /256
 
-  std::string outpath;
+  auto make_product_path = [&](int index, const char *ext) -> std::string {
+    std::string d = cfg.result_add;
+    if (!d.empty() && d.back() != '/' && d.back() != '\\')
+      d.push_back('/');
+    char fname[16];
+    std::snprintf(fname, sizeof(fname), "GMTI%02d.%s", index, ext);
+    return d + fname;
+  };
+
   int idx = 0;
-  if (!nextGMTIFileNamePNG(cfg.result_add, outpath, idx))
+  if (cfg.result_file_id > 0 && cfg.result_file_id <= 99)
   {
-    return false; // 或者回退到固定文件名
+    std::string d = cfg.result_add;
+    if (!d.empty() && d.back() != '/' && d.back() != '\\')
+      d.push_back('/');
+    if (!mkdir_p(d))
+    {
+      std::cerr << "writeProducts: 创建目录失败: " << d << "\n";
+      return false;
+    }
+    idx = cfg.result_file_id;
   }
+  else
+  {
+    std::string png_probe, txt_probe;
+    int png_idx = 0, txt_idx = 0;
+    if (!nextGMTIFileNamePNG(cfg.result_add, png_probe, png_idx))
+      return false;
+    if (!nextGMTIFileNameTxt(cfg.result_add, txt_probe, txt_idx))
+      return false;
+    idx = std::max(png_idx, txt_idx);
+    if (idx > 99)
+    {
+      std::cerr << "writeProducts: 已达到 99 个文件，无法继续编号。\n";
+      return false;
+    }
+  }
+
+  std::string outpath = make_product_path(idx, "png");
 
   if (!write_png_gray8(outpath, &u8[0], (unsigned)out16.cols, (unsigned)out16.rows))
     return false;
@@ -624,12 +643,7 @@ bool DbsStitcher::writeProducts(const Config &cfg,
   proj_xy_to_ll(b.maxX, b.minY, B2, L2);
   proj_xy_to_ll(b.minX, b.maxY, B3, L3);
 
-  outpath.clear();
-  idx = 0;
-  if (!nextGMTIFileNameTxt(cfg.result_add, outpath, idx))
-  {
-    return false; // 或者回退到固定文件名
-  }
+  outpath = make_product_path(idx, "txt");
 
   std::ofstream cfs(outpath.c_str(), std::ios::binary);
   if (!cfs)

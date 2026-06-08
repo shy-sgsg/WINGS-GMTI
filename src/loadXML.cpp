@@ -7,6 +7,7 @@
 #include <cctype>
 #include <regex>
 #include <algorithm>
+#include <stdexcept>
 #include "rangeCompress.hpp"
 
 // 读取 XML 配置文件并填充到 Config 结构体中
@@ -40,7 +41,6 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
         return false; // 如果没有找到 GMTI_parameter 元素，返回 false
     }
 
-    // 提取文本内容的辅助函数
     auto getTextContent = [](TiXmlElement *element) -> std::string
     {
         if (element && element->GetText())
@@ -48,6 +48,152 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
             return element->GetText();
         }
         return "";
+    };
+
+    auto trimText = [](const std::string& text) -> std::string
+    {
+        size_t first = 0;
+        while (first < text.size() && std::isspace(static_cast<unsigned char>(text[first]))) {
+            ++first;
+        }
+        size_t last = text.size();
+        while (last > first && std::isspace(static_cast<unsigned char>(text[last - 1]))) {
+            --last;
+        }
+        return text.substr(first, last - first);
+    };
+
+    auto getOptionalText = [&](const char *name) -> std::string
+    {
+        return trimText(getTextContent(param->FirstChildElement(name)));
+    };
+
+    auto getRequiredText = [&](const char *name) -> std::string
+    {
+        const std::string text = getOptionalText(name);
+        if (text.empty()) {
+            std::ostringstream oss;
+            oss << "[XML][ERR] Missing required field <" << name << "> in " << xmlFile;
+            throw std::runtime_error(oss.str());
+        }
+        return text;
+    };
+
+    auto parseRequiredInt = [&](const char *name) -> int
+    {
+        const std::string text = getRequiredText(name);
+        try {
+            size_t pos = 0;
+            const int value = std::stoi(text, &pos);
+            if (pos != text.size()) {
+                throw std::invalid_argument("trailing characters");
+            }
+            return value;
+        } catch (const std::exception& e) {
+            std::ostringstream oss;
+            oss << "[XML][ERR] Invalid integer field <" << name << ">=\"" << text
+                << "\" in " << xmlFile << ": " << e.what();
+            throw std::runtime_error(oss.str());
+        }
+    };
+
+    auto parseRequiredDouble = [&](const char *name) -> double
+    {
+        const std::string text = getRequiredText(name);
+        try {
+            size_t pos = 0;
+            const double value = std::stod(text, &pos);
+            if (pos != text.size()) {
+                throw std::invalid_argument("trailing characters");
+            }
+            return value;
+        } catch (const std::exception& e) {
+            std::ostringstream oss;
+            oss << "[XML][ERR] Invalid numeric field <" << name << ">=\"" << text
+                << "\" in " << xmlFile << ": " << e.what();
+            throw std::runtime_error(oss.str());
+        }
+    };
+
+    auto parseOptionalInt = [&](const char *name, int current) -> int
+    {
+        const std::string text = getOptionalText(name);
+        if (text.empty()) {
+            return current;
+        }
+        try {
+            size_t pos = 0;
+            const int value = std::stoi(text, &pos);
+            if (pos != text.size()) {
+                throw std::invalid_argument("trailing characters");
+            }
+            return value;
+        } catch (const std::exception& e) {
+            std::ostringstream oss;
+            oss << "[XML][ERR] Invalid optional integer field <" << name << ">=\"" << text
+                << "\" in " << xmlFile << ": " << e.what();
+            throw std::runtime_error(oss.str());
+        }
+    };
+
+    auto parseOptionalDouble = [&](const char *name, double current) -> double
+    {
+        const std::string text = getOptionalText(name);
+        if (text.empty()) {
+            return current;
+        }
+        try {
+            size_t pos = 0;
+            const double value = std::stod(text, &pos);
+            if (pos != text.size()) {
+                throw std::invalid_argument("trailing characters");
+            }
+            return value;
+        } catch (const std::exception& e) {
+            std::ostringstream oss;
+            oss << "[XML][ERR] Invalid optional numeric field <" << name << ">=\"" << text
+                << "\" in " << xmlFile << ": " << e.what();
+            throw std::runtime_error(oss.str());
+        }
+    };
+
+    auto parseOptionalSizeT = [&](const char *name, size_t current) -> size_t
+    {
+        const std::string text = getOptionalText(name);
+        if (text.empty()) {
+            return current;
+        }
+        try {
+            size_t pos = 0;
+            const unsigned long long value = std::stoull(text, &pos);
+            if (pos != text.size()) {
+                throw std::invalid_argument("trailing characters");
+            }
+            return value > 0 ? static_cast<size_t>(value) : current;
+        } catch (const std::exception& e) {
+            std::ostringstream oss;
+            oss << "[XML][ERR] Invalid optional size field <" << name << ">=\"" << text
+                << "\" in " << xmlFile << ": " << e.what();
+            throw std::runtime_error(oss.str());
+        }
+    };
+
+    auto parseOptionalBool = [&](const char *name, bool current) -> bool
+    {
+        const std::string text = getOptionalText(name);
+        if (text.empty()) {
+            return current;
+        }
+        if (text == "true" || text == "1") {
+            return true;
+        }
+        if (text == "false" || text == "0") {
+            return false;
+        }
+        std::ostringstream oss;
+        oss << "[XML][ERR] Invalid boolean field <" << name << ">=\"" << text
+            << "\" in " << xmlFile << ". Expected true/false/1/0.";
+        throw std::runtime_error(oss.str());
     };
 
     auto parseIntList = [](const std::string& text) -> std::vector<int>
@@ -63,7 +209,14 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
                 }
             }
             if (!trimmed.empty()) {
-                values.push_back(std::stoi(trimmed));
+                try {
+                    values.push_back(std::stoi(trimmed));
+                } catch (const std::exception& e) {
+                    std::ostringstream oss;
+                    oss << "[XML][ERR] Invalid integer in <track_idx_range>: \""
+                        << trimmed << "\": " << e.what();
+                    throw std::runtime_error(oss.str());
+                }
             }
         }
         return values;
@@ -95,163 +248,150 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
         return values;
     };
 
-    // 从 XML 读取并填充 cfg 结构体
-    cfg.GMTI_Data_add = getTextContent(param->FirstChildElement("GMTI_data"));
-    cfg.GMTI_Data_add2 = getTextContent(param->FirstChildElement("GMTI_data2"));
-    cfg.GMTI_Data_new = getTextContent(param->FirstChildElement("GMTI_data_new"));
-    cfg.result_add = getTextContent(param->FirstChildElement("result_add"));
+    try {
+    cfg.GMTI_Data_add = getOptionalText("GMTI_data");
+    cfg.GMTI_Data_add2 = getOptionalText("GMTI_data2");
+    cfg.GMTI_Data_new = getOptionalText("GMTI_data_new");
+    cfg.result_add = getRequiredText("result_add");
     {
-        const std::string pipeRootPath = getTextContent(param->FirstChildElement("pipe_root_path"));
+        const std::string pipeRootPath = getOptionalText("pipe_root_path");
         if (!pipeRootPath.empty()) {
             cfg.pipe_root_path = pipeRootPath;
         }
     }
-    cfg.Plane_POS_add = getTextContent(param->FirstChildElement("Plane_POS"));
-    cfg.CAR_POS_add = getTextContent(param->FirstChildElement("CAR_POS"));
-    cfg.reffunc_add = getTextContent(param->FirstChildElement("reffunc_add"));
-    cfg.channel_mode = getTextContent(param->FirstChildElement("isSeparated"));
-    cfg.INFO_Type = std::stoi(getTextContent(param->FirstChildElement("INFO_Type")));
-    cfg.iq_compose = getTextContent(param->FirstChildElement("iq_compose"));
+    cfg.Plane_POS_add = getOptionalText("Plane_POS");
+    cfg.CAR_POS_add = getOptionalText("CAR_POS");
+    cfg.reffunc_add = getOptionalText("reffunc_add");
+    cfg.channel_mode = getRequiredText("isSeparated");
+    cfg.INFO_Type = parseRequiredInt("INFO_Type");
+    cfg.iq_compose = getOptionalText("iq_compose");
 
     // 解析数字字段并填充到结构体中
-    cfg.isPC = std::stoi(getTextContent(param->FirstChildElement("isPC")));
-    cfg.hasRefFunc = std::stoi(getTextContent(param->FirstChildElement("hasRefFunc")));
-    cfg.info_len = std::stoi(getTextContent(param->FirstChildElement("info_len")));
-    cfg.pulse_len = std::stoi(getTextContent(param->FirstChildElement("pulse_len")));
-    cfg.rg_len = std::stoi(getTextContent(param->FirstChildElement("rg_len")));
-    cfg.pulse_num = std::stoi(getTextContent(param->FirstChildElement("pulse_num")));
-    cfg.pulse_dec = std::stoi(getTextContent(param->FirstChildElement("pulse_dec")));
-    cfg.fc = std::stod(getTextContent(param->FirstChildElement("fc"))) * 1e9;  // 转换为赫兹
-    cfg.Br = std::stod(getTextContent(param->FirstChildElement("Br"))) * 1e6;  // 转换为赫兹
-    cfg.fs = std::stod(getTextContent(param->FirstChildElement("fs"))) * 1e6;  // 转换为赫兹
-    cfg.Tr = std::stod(getTextContent(param->FirstChildElement("Tr"))) * 1e-6; // 转换为秒
-    cfg.PRF = std::stod(getTextContent(param->FirstChildElement("PRF")));
-    cfg.az_count = std::stoi(getTextContent(param->FirstChildElement("az_count")));
-    cfg.week = std::stoi(getTextContent(param->FirstChildElement("week_offset")));
-    cfg.d_channel = std::stod(getTextContent(param->FirstChildElement("d_chan")));
-    cfg.pf = std::stod(getTextContent(param->FirstChildElement("pf")));
-    cfg.R_min = std::stod(getTextContent(param->FirstChildElement("Rmin")));
-    cfg.L0 = std::stod(getTextContent(param->FirstChildElement("ref_lon")));
-    cfg.MT_nowz = std::stod(getTextContent(param->FirstChildElement("ref_H")));
-    cfg.secBias = std::stoi(getTextContent(param->FirstChildElement("secBias")));
-    cfg.skip_az_num = std::stoi(getTextContent(param->FirstChildElement("skip_pulses")));
-    cfg.calib_coef = std::stod(getTextContent(param->FirstChildElement("calib_coef")));
+    cfg.isPC = parseRequiredInt("isPC");
+    cfg.hasRefFunc = parseRequiredInt("hasRefFunc");
+    cfg.info_len = parseRequiredInt("info_len");
+    cfg.pulse_len = parseRequiredInt("pulse_len");
+    cfg.rg_len = parseRequiredInt("rg_len");
+    cfg.pulse_num = parseRequiredInt("pulse_num");
+    cfg.read_pulse_num = parseOptionalInt("read_pulse_num", cfg.read_pulse_num);
+    cfg.read_pulse_offset = parseOptionalInt("read_pulse_offset", cfg.read_pulse_offset);
+    cfg.pulse_dec = parseRequiredInt("pulse_dec");
+    cfg.fc = parseRequiredDouble("fc") * 1e9;  // 转换为赫兹
+    cfg.Br = parseRequiredDouble("Br") * 1e6;  // 转换为赫兹
+    cfg.fs = parseRequiredDouble("fs") * 1e6;  // 转换为赫兹
+    cfg.Tr = parseRequiredDouble("Tr") * 1e-6; // 转换为秒
+    cfg.PRF = parseRequiredDouble("PRF");
+    cfg.az_count = parseRequiredInt("az_count");
+    cfg.beamwidth_deg = parseOptionalDouble("boshu", cfg.beamwidth_deg);
+    cfg.loc_beam_gate_deg = parseOptionalDouble("loc_beam_gate_deg", cfg.loc_beam_gate_deg);
+    cfg.week = parseRequiredInt("week_offset");
+    cfg.d_channel = parseRequiredDouble("d_chan");
+    cfg.pf = parseRequiredDouble("pf");
+    cfg.R_min = parseRequiredDouble("Rmin");
+    cfg.L0 = parseRequiredDouble("ref_lon");
+    cfg.MT_nowz = parseRequiredDouble("ref_H");
+    cfg.secBias = parseRequiredInt("secBias");
+    cfg.skip_az_num = parseRequiredInt("skip_pulses");
+    cfg.calib_coef = parseRequiredDouble("calib_coef");
 
     if (cfg.GMTI_Data_new.empty()) {
         cfg.GMTI_Data_new = cfg.GMTI_Data_add;
     }
 
-    cfg.wavepos_st = std::stoi(getTextContent(param->FirstChildElement("wavepos_st")));
-    cfg.wavepos_ed = std::stoi(getTextContent(param->FirstChildElement("wavepos_ed")));
-    cfg.wavepos_skip = std::stoi(getTextContent(param->FirstChildElement("wavepos_skip")));
-    cfg.min_points = std::stoi(getTextContent(param->FirstChildElement("min_points")));
-    cfg.min_len = std::stoi(getTextContent(param->FirstChildElement("min_len")));
+    cfg.wavepos_st = parseRequiredInt("wavepos_st");
+    cfg.wavepos_ed = parseRequiredInt("wavepos_ed");
+    cfg.wavepos_skip = parseRequiredInt("wavepos_skip");
+    cfg.scan_min_deg = parseOptionalDouble("scan_min_deg", cfg.scan_min_deg);
+    cfg.scan_max_deg = parseOptionalDouble("scan_max_deg", cfg.scan_max_deg);
+    cfg.min_points = parseRequiredInt("min_points");
+    cfg.min_len = parseRequiredInt("min_len");
 
-    cfg.rg_st = std::stoi(getTextContent(param->FirstChildElement("rg_st")));
-    cfg.rg_ed = std::stoi(getTextContent(param->FirstChildElement("rg_ed")));
-    cfg.squint_side = std::stoi(getTextContent(param->FirstChildElement("squint_side")));
+    cfg.rg_st = parseRequiredInt("rg_st");
+    cfg.rg_ed = parseRequiredInt("rg_ed");
+    cfg.squint_side = parseRequiredInt("squint_side");
 
-    cfg.roi_ll_deg[0] = std::stod(getTextContent(param->FirstChildElement("roi_lat1")));
-    cfg.roi_ll_deg[1] = std::stod(getTextContent(param->FirstChildElement("roi_lng1")));
-    cfg.roi_ll_deg[2] = std::stod(getTextContent(param->FirstChildElement("roi_Ry1")));
-    cfg.roi_ll_deg[3] = std::stod(getTextContent(param->FirstChildElement("roi_Rx1")));
+    cfg.roi_ll_deg[0] = parseRequiredDouble("roi_lat1");
+    cfg.roi_ll_deg[1] = parseRequiredDouble("roi_lng1");
+    cfg.roi_ll_deg[2] = parseRequiredDouble("roi_Ry1");
+    cfg.roi_ll_deg[3] = parseRequiredDouble("roi_Rx1");
 
-    cfg.wavepos_use_roi = (getTextContent(param->FirstChildElement("wavepos_use_roi")) == "true");
+    cfg.wavepos_use_roi = parseOptionalBool("wavepos_use_roi", cfg.wavepos_use_roi);
 
-    const std::string waveposParallelStr = getTextContent(param->FirstChildElement("wavepos_parallel"));
-    if (!waveposParallelStr.empty()) {
-        cfg.wavepos_parallel = (waveposParallelStr == "true" || waveposParallelStr == "1");
-    }
+    cfg.wavepos_parallel = parseOptionalBool("wavepos_parallel", cfg.wavepos_parallel);
 
-    const std::string enableDbsFusionStr = getTextContent(param->FirstChildElement("enable_dbs_fusion"));
-    if (!enableDbsFusionStr.empty()) {
-        cfg.enable_dbs_fusion = (enableDbsFusionStr == "true" || enableDbsFusionStr == "1");
-    }
+    cfg.enable_dbs_fusion = parseOptionalBool("enable_dbs_fusion", cfg.enable_dbs_fusion);
 
     {
-        const std::string rawFenbianlvStr = getTextContent(param->FirstChildElement("raw_fenbianlv"));
-        if (!rawFenbianlvStr.empty()) {
-            cfg.dbs_out_res_m = std::stod(rawFenbianlvStr);
-        }
-        const std::string nTiaoguoStr = getTextContent(param->FirstChildElement("n_tiaoguo"));
-        if (!nTiaoguoStr.empty()) {
-            cfg.dbs_beam_skip = std::max(1, std::stoi(nTiaoguoStr));
-        }
-        const std::string lenTiaoguoStr = getTextContent(param->FirstChildElement("len_tiaoguo"));
-        if (!lenTiaoguoStr.empty()) {
-            cfg.dbs_range_skip = std::max(1, std::stoi(lenTiaoguoStr));
-        }
-        const std::string interpModeStr = getTextContent(param->FirstChildElement("dbs_interp_mode"));
-        if (!interpModeStr.empty()) {
-            cfg.dbs_interp_mode = std::stoi(interpModeStr);
-        }
+        cfg.dbs_out_res_m = parseOptionalDouble("raw_fenbianlv", cfg.dbs_out_res_m);
+        cfg.dbs_beam_skip = std::max(1, parseOptionalInt("n_tiaoguo", cfg.dbs_beam_skip));
+        cfg.dbs_range_skip = std::max(1, parseOptionalInt("len_tiaoguo", cfg.dbs_range_skip));
+        cfg.dbs_interp_mode = parseOptionalInt("dbs_interp_mode", cfg.dbs_interp_mode);
+        cfg.dbs_max_mosaic_pixels = parseOptionalSizeT("dbs_max_mosaic_pixels",
+                                                       cfg.dbs_max_mosaic_pixels);
     }
 
-    const std::string estimateErrorAngleStr = getTextContent(param->FirstChildElement("estimate_error_angle"));
-    if (!estimateErrorAngleStr.empty()) {
-        cfg.estimate_error_angle = (estimateErrorAngleStr == "true" || estimateErrorAngleStr == "1");
-    }
+    cfg.estimate_error_angle = parseOptionalBool("estimate_error_angle", cfg.estimate_error_angle);
 
-    cfg.lat_st = std::stod(getTextContent(param->FirstChildElement("lat_st")));
-    cfg.lat_ed = std::stod(getTextContent(param->FirstChildElement("lat_ed")));
-    cfg.lon_st = std::stod(getTextContent(param->FirstChildElement("lon_st")));
-    cfg.lon_ed = std::stod(getTextContent(param->FirstChildElement("lon_ed")));
-    {
-        const std::string squintAngleStr = getTextContent(param->FirstChildElement("squint_angle"));
-        if (!squintAngleStr.empty()) {
-            cfg.squint_angle = std::stod(squintAngleStr);
-        }
-    }
+    cfg.lat_st = parseRequiredDouble("lat_st");
+    cfg.lat_ed = parseRequiredDouble("lat_ed");
+    cfg.lon_st = parseRequiredDouble("lon_st");
+    cfg.lon_ed = parseRequiredDouble("lon_ed");
+    cfg.squint_angle = parseOptionalDouble("squint_angle", cfg.squint_angle);
 
     // 可选调试配置：节点缺失时使用结构体默认值
-    const std::string mtSortByUtcStr = getTextContent(param->FirstChildElement("mt_sort_by_utc"));
-    if (!mtSortByUtcStr.empty()) {
-        cfg.mt_sort_by_utc = (mtSortByUtcStr == "true" || mtSortByUtcStr == "1");
-    }
+    cfg.mt_sort_by_utc = parseOptionalBool("mt_sort_by_utc", cfg.mt_sort_by_utc);
+    cfg.track_debug_level = parseOptionalInt("track_debug_level", cfg.track_debug_level);
+    cfg.track_debug_frames = parseOptionalInt("track_debug_frames", cfg.track_debug_frames);
+    cfg.track_debug_points = parseOptionalInt("track_debug_points", cfg.track_debug_points);
+    cfg.track_idx_window = parseOptionalInt("track_idx_window", cfg.track_idx_window);
+    cfg.track_truth_threshold = parseOptionalInt("track_truth_threshold", cfg.track_truth_threshold);
 
-    const std::string trackDebugLevelStr = getTextContent(param->FirstChildElement("track_debug_level"));
-    if (!trackDebugLevelStr.empty()) {
-        cfg.track_debug_level = std::stoi(trackDebugLevelStr);
-    }
-
-    const std::string trackDebugFramesStr = getTextContent(param->FirstChildElement("track_debug_frames"));
-    if (!trackDebugFramesStr.empty()) {
-        cfg.track_debug_frames = std::stoi(trackDebugFramesStr);
-    }
-
-    const std::string trackDebugPointsStr = getTextContent(param->FirstChildElement("track_debug_points"));
-    if (!trackDebugPointsStr.empty()) {
-        cfg.track_debug_points = std::stoi(trackDebugPointsStr);
-    }
-
-    const std::string trackIdxWindowStr = getTextContent(param->FirstChildElement("track_idx_window"));
-    if (!trackIdxWindowStr.empty()) {
-        cfg.track_idx_window = std::stoi(trackIdxWindowStr);
-    }
-
-    const std::string trackTruthThresholdStr = getTextContent(param->FirstChildElement("track_truth_threshold"));
-    if (!trackTruthThresholdStr.empty()) {
-        cfg.track_truth_threshold = std::stoi(trackTruthThresholdStr);
-    }
-
-    const std::string trackIdxRangeStr = getTextContent(param->FirstChildElement("track_idx_range"));
+    const std::string trackIdxRangeStr = getOptionalText("track_idx_range");
     if (!trackIdxRangeStr.empty()) {
         cfg.track_idx_range = parseIntList(trackIdxRangeStr);
     }
 
-    const std::string trackGateStr = getTextContent(param->FirstChildElement("track_gate_m"));
-    if (!trackGateStr.empty()) {
-        cfg.track_gate_m = std::stod(trackGateStr);
-    }
-
-    const std::string trackVmaxStr = getTextContent(param->FirstChildElement("track_v_max"));
-    if (!trackVmaxStr.empty()) {
-        cfg.track_v_max = std::stod(trackVmaxStr);
-    }
+    cfg.track_gate_m = parseOptionalDouble("track_gate_m", cfg.track_gate_m);
+    cfg.track_v_max = parseOptionalDouble("track_v_max", cfg.track_v_max);
 
     if (cfg.track_idx_range.empty()) {
         const int trackId = extractFileId(cfg.GMTI_Data_new.empty() ? cfg.GMTI_Data_add : cfg.GMTI_Data_new);
-        cfg.track_idx_range = buildTrackIdxRange(trackId, cfg.track_idx_window);
+        if (trackId > 0) {
+            cfg.result_file_id = trackId;
+        } else {
+            std::string nextPath;
+            int nextId = -1;
+            if (!nextGMTIFileName(cfg.result_add, nextPath, nextId)) {
+                std::cerr << "[XML][ERR] Cannot allocate incremental GMTI result id from result_add: "
+                          << cfg.result_add << std::endl;
+                return false;
+            }
+            cfg.result_file_id = nextId;
+            std::cout << "[XML][WARN] Cannot extract file id from echo path. Use next result id "
+                      << nextId << " for GMTI result and track window." << std::endl;
+        }
+        cfg.track_idx_range = buildTrackIdxRange(cfg.result_file_id, cfg.track_idx_window);
+    }
+    if (cfg.result_file_id <= 0) {
+        const int trackId = extractFileId(cfg.GMTI_Data_new.empty() ? cfg.GMTI_Data_add : cfg.GMTI_Data_new);
+        if (trackId > 0) {
+            cfg.result_file_id = trackId;
+        } else {
+            std::string nextPath;
+            int nextId = -1;
+            if (!nextGMTIFileName(cfg.result_add, nextPath, nextId)) {
+                std::cerr << "[XML][ERR] Cannot allocate incremental GMTI result id from result_add: "
+                          << cfg.result_add << std::endl;
+                return false;
+            }
+            cfg.result_file_id = nextId;
+            std::cout << "[XML][WARN] Cannot extract file id from echo path. Use next result id "
+                      << nextId << " for GMTI result." << std::endl;
+        }
+    }
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        return false;
     }
 
     return true; // 如果一切顺利，返回 true
@@ -339,8 +479,8 @@ bool GMTIProcessor::openEchoFiles(const Config &cfg, std::ifstream &fid1, std::i
 
 bool GMTIProcessor::readPulseBlock(const Config& cfg,
                                    int beamskip,
-                                   std::vector<std::complex<double>>& data1,
-                                   std::vector<std::complex<double>>& data2,
+                                   std::vector<std::complex<float>>& data1,
+                                   std::vector<std::complex<float>>& data2,
                                    std::vector<double>& utc,
                                    double& theta_sq)
 {
@@ -348,13 +488,13 @@ bool GMTIProcessor::readPulseBlock(const Config& cfg,
     const char* filepath = cfg.GMTI_Data_add2.c_str();
     std::vector<double> fw_angle_deg;
 
-    if(!readBeamRaw(cfg, filepath, beamskip, data2, fw_angle_deg, utc)) {
+    if(!readBeamRawFloat(cfg, filepath, beamskip, data2, fw_angle_deg, utc)) {
         std::cerr << "读取回波数据失败" << std::endl;
         return false;
     }
 
     const char* filepath2 = cfg.GMTI_Data_add.c_str();
-    if(!readBeamRaw(cfg, filepath2, beamskip, data1, fw_angle_deg, utc)) {
+    if(!readBeamRawFloat(cfg, filepath2, beamskip, data1, fw_angle_deg, utc)) {
         std::cerr << "读取回波数据失败" << std::endl;
         return false;
     }

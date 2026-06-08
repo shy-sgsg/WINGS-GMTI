@@ -24,4 +24,7 @@ struct GMTIResult {
     double utcGlobal;
 };
 
+class TrackManager;
+
 std::vector<GMTIDetection> trackModule(const Config& cfg);
+std::vector<GMTIDetection> trackModule(const Config& cfg, TrackManager* manager);

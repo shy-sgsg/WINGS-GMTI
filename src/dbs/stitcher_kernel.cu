@@ -4,6 +4,40 @@
 #include <math.h>
 #include <stdio.h>
 
+__device__ inline float sample2D_linear(
+    const float* amp,
+    int width,
+    int height,
+    float x,
+    float y)
+{
+    if (!amp || width <= 1 || height <= 1) {
+        return 0.0f;
+    }
+    if (x < 0.0f || y < 0.0f || x > (float)(width - 1) || y > (float)(height - 1)) {
+        return 0.0f;
+    }
+
+    x = fmaxf(0.0f, fminf(x, (float)(width - 1)));
+    y = fmaxf(0.0f, fminf(y, (float)(height - 1)));
+
+    int x0 = (int)floorf(x);
+    int y0 = (int)floorf(y);
+    int x1 = (x0 + 1 < width) ? (x0 + 1) : (width - 1);
+    int y1 = (y0 + 1 < height) ? (y0 + 1) : (height - 1);
+    float wx = x - (float)x0;
+    float wy = y - (float)y0;
+
+    float v00 = amp[y0 * width + x0];
+    float v01 = amp[y0 * width + x1];
+    float v10 = amp[y1 * width + x0];
+    float v11 = amp[y1 * width + x1];
+
+    return (1.0f - wy) * (1.0f - wx) * v00
+         + (1.0f - wy) * wx * v01
+         + wy * (1.0f - wx) * v10
+         + wy * wx * v11;
+}
 
 __global__ void buildMosaicFullKernel(
     float* d_amp_mosaic,
@@ -14,9 +48,13 @@ __global__ void buildMosaicFullKernel(
     const BeamDevParams* d_beams,
     int nx, int ny, int B, int M, int nEff,
     float R_min, float R_bin, float lambda, float Height, int flag_base,
+#if DBS_USE_CUDA_TEXTURE_OBJECTS
     bool useTexInterp,
     cudaTextureObject_t texObj,
     int tex_beam_idx)
+#else
+    bool useTexInterp)
+#endif
 {
 
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -33,8 +71,39 @@ __global__ void buildMosaicFullKernel(
     float best_amp = 0.0f;
     uint16_t best_beam_idx = 0;
 
+    if (B > 0) {
+        BeamDevParams bp0 = d_beams[0];
+        float dx0 = x_label - bp0.x;
+        float dy0 = y_label - bp0.y;
+        float c0 = bp0.cos_j;
+        float s0 = bp0.sin_j;
+        float x0 = 0.0f, y0 = 0.0f;
+        switch (bp0.flag)
+        {
+        case 1: x0 = -dx0 * c0 - dy0 * s0; y0 = -dx0 * s0 + dy0 * c0; break;
+        case 2: x0 = dx0 * c0 + dy0 * s0; y0 = dx0 * s0 - dy0 * c0; break;
+        case 3: x0 = -dx0 * c0 + dy0 * s0; y0 = dx0 * s0 + dy0 * c0; break;
+        case 4: x0 = dx0 * c0 - dy0 * s0; y0 = -dx0 * s0 - dy0 * c0; break;
+        case 6: x0 = dx0 * c0 + dy0 * s0; y0 = -dx0 * s0 + dy0 * c0; break;
+        case 5: x0 = -dx0 * c0 - dy0 * s0; y0 = dx0 * s0 - dy0 * c0; break;
+        case 8: x0 = dx0 * c0 - dy0 * s0; y0 = dx0 * s0 + dy0 * c0; break;
+        case 7: x0 = -dx0 * c0 + dy0 * s0; y0 = -dx0 * s0 - dy0 * c0; break;
+        default: x0 = dx0; y0 = dy0; break;
+        }
+        float R_geo0 = sqrtf(x0 * x0 + y0 * y0 + Height * Height);
+        float R_idx0 = (R_geo0 - R_min) / R_bin;
+        if (!(R_idx0 > 0.0f && R_idx0 < (float)(M - 1))) {
+            int out_idx = j * nx + i;
+            d_amp_mosaic[out_idx] = 0.0f;
+            d_which_beam[out_idx] = 0;
+            return;
+        }
+    }
+
     for (int b = 0; b < B; ++b) {
+#if DBS_USE_CUDA_TEXTURE_OBJECTS
         if (useTexInterp && b != tex_beam_idx) continue;
+#endif
         BeamDevParams bp = d_beams[b];
         float dx = x_label - bp.x;
         float dy = y_label - bp.y;
@@ -70,19 +139,15 @@ __global__ void buildMosaicFullKernel(
         if (R_idx >= 0.0f && R_idx < (float)(M - 1) && fd_idx >= 0.0f && fd_idx < (float)(nEff - 1)) {
             float amp_val = 0.0f;
             if (useTexInterp) {
+#if DBS_USE_CUDA_TEXTURE_OBJECTS
                 amp_val = tex2D<float>(texObj, R_idx + 0.5f, fd_idx + 0.5f);
-            } else {
-                int r0 = (int)R_idx;
-                int f0 = (int)fd_idx;
-                float wr = R_idx - r0;
-                float wf = fd_idx - f0;
+#else
                 const float* b_data = d_all_amps + (size_t)bp.offset;
-                float v00 = b_data[f0 * M + r0];
-                float v01 = b_data[f0 * M + (r0 + 1)];
-                float v10 = b_data[(f0 + 1) * M + r0];
-                float v11 = b_data[(f0 + 1) * M + (r0 + 1)];
-                amp_val = (1.0f - wf) * (1.0f - wr) * v00 + (1.0f - wf) * wr * v01
-                        + wf * (1.0f - wr) * v10 + wf * wr * v11;
+                amp_val = sample2D_linear(b_data, M, nEff, R_idx, fd_idx);
+#endif
+            } else {
+                const float* b_data = d_all_amps + (size_t)bp.offset;
+                amp_val = sample2D_linear(b_data, M, nEff, R_idx, fd_idx);
             }
             if (fabsf(amp_val) > fabsf(best_amp)) {
                 best_amp = amp_val;
@@ -121,9 +186,11 @@ void launchBuildMosaicKernel(
             d_grid_x, d_grid_y, (const BeamDevParams*)d_beams,
             nx, ny, B, M, nEff,
             R_min, R_bin, lambda, Height, flag_base,
-            false,
-            0,
+            false
+#if DBS_USE_CUDA_TEXTURE_OBJECTS
+            , 0,
             0 // 非纹理路径，tex_beam_idx=0
+#endif
         );
         err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {

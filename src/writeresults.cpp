@@ -200,12 +200,24 @@ bool GMTIProcessor::writeResult(const std::vector<double> &res, const Config &cf
         put_f64_le(buf, base + 28, target_utc);
     }
 
-    // 目标路径：cfg.result_add 目录下写固定文件名（可按需自定义）
+    // 目标路径：优先使用当前回波文件编号，避免扫描目录自动加一导致关联窗口错位。
     std::string outpath;
     int idx = 0;
-    if (!nextGMTIFileName(cfg.result_add, outpath, idx))
-    {
-        return false; // 或者回退到固定文件名
+    if (cfg.result_file_id > 0 && cfg.result_file_id <= 99) {
+        std::string d = cfg.result_add;
+        if (!d.empty() && d.back() != '/' && d.back() != '\\') {
+            d.push_back('/');
+        }
+        if (!mkdir_p(d)) {
+            std::cerr << "writeResult: 创建目录失败: " << d << "\n";
+            return false;
+        }
+        char fname[16];
+        std::snprintf(fname, sizeof(fname), "GMTI%02d.bin", cfg.result_file_id);
+        outpath = d + fname;
+        idx = cfg.result_file_id;
+    } else if (!nextGMTIFileName(cfg.result_add, outpath, idx)) {
+        return false;
     }
 
     std::ofstream ofs(outpath.c_str(), std::ios::binary);
@@ -222,6 +234,8 @@ bool GMTIProcessor::writeResult(const std::vector<double> &res, const Config &cf
         return false;
     }
     ofs.close();
+    std::cout << "[GMTI] writeResult: 写入当前检测结果 "
+              << outpath << "，目标数: " << n_targets << std::endl;
     return true;
 }
 

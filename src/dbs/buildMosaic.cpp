@@ -8,22 +8,8 @@
 #include "dbs/stitcher_kernel.hpp"
 #include <cuda_runtime.h>
 #include <iostream>
-#include <cstdlib>
 
 #include "dbs/PerfLogger.hpp"
-
-static size_t dbs_max_mosaic_pixels_local()
-{
-  const char *env = std::getenv("DBS_MAX_MOSAIC_PIXELS");
-  if (env && *env)
-  {
-    char *end = nullptr;
-    const unsigned long long v = std::strtoull(env, &end, 10);
-    if (end != env && v > 0)
-      return static_cast<size_t>(v);
-  }
-  return 60000000ULL;
-}
 
 static double bytes_to_gib(size_t bytes)
 {
@@ -298,7 +284,7 @@ bool DbsStitcher::buildMosaicGPU(const Config &cfg,
     return false;
   }
   const size_t Npix = nxSize * nySize;
-  const size_t maxPixels = dbs_max_mosaic_pixels_local();
+  const size_t maxPixels = std::max<size_t>(1, cfg.dbs_max_mosaic_pixels);
   if (Npix > maxPixels)
   {
     std::cerr << "[fusion][dbs][buildGPU] refuse to allocate mosaic: pixels=" << Npix

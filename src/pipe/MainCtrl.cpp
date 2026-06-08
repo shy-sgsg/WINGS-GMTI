@@ -1,21 +1,26 @@
-#include "MainCtrl.h"
+#include "pipe/MainCtrl.h"
 #include "dbs/DbsFusion.hpp"
 #include "trackModule.hpp"
-#include "PipeStruDef.h"
+#include "pipe/PipeStruDef.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <mqueue.h>
+#include <sstream>
 #include <queue>
 #include <regex>
 #include <time.h>
+#include "dbs/lodepng.h"
 
 namespace {
+
+static_assert(sizeof(ResultHeader) == 172U, "ResultHeader must match protocol V1.3 fixed fields");
 
 std::queue<std::string> g_gmtiFileQueue;
 std::mutex g_gmtiFileQueueMutex;
@@ -57,6 +62,13 @@ std::vector<int> buildTrackIdxRange(int id, int window)
     return values;
 }
 
+bool allocateNextResultId(GMTIProcessor& proc, const Config& cfg, int& id)
+{
+    std::string nextPath;
+    id = -1;
+    return proc.nextGMTIFileName(cfg.result_add, nextPath, id) && id > 0;
+}
+
 void clearPendingEchoQueue()
 {
     std::queue<std::string> empty;
@@ -94,15 +106,6 @@ static inline int32_t quant_deg_to_i32(double deg)
     return static_cast<int32_t>(rounded);
 }
 
-static inline uint16_t quant_speed_to_u16(double speed)
-{
-    const double q = std::round(std::max(0.0, speed) / 0.01);
-    if (q > 65535.0) {
-        return 65535;
-    }
-    return static_cast<uint16_t>(q);
-}
-
 static inline void put_u16_le(std::vector<uint8_t>& buf, size_t off, uint16_t value)
 {
     buf[off + 0] = static_cast<uint8_t>(value & 0xFFU);
@@ -122,21 +125,146 @@ static inline void put_i32_le(std::vector<uint8_t>& buf, size_t off, int32_t val
     put_u32_le(buf, off, static_cast<uint32_t>(value));
 }
 
+static inline void put_double_le(std::vector<uint8_t>& buf, size_t off, double value)
+{
+    uint64_t raw = 0;
+    std::memcpy(&raw, &value, sizeof(raw));
+    for (int i = 0; i < 8; ++i) {
+        buf[off + static_cast<size_t>(i)] = static_cast<uint8_t>((raw >> (8 * i)) & 0xFFU);
+    }
+}
+
+static inline uint8_t quant_pixel_pitch(double meters)
+{
+    const double q = std::round(std::max(0.0, meters) / 0.01);
+    if (q > 255.0) {
+        return 255;
+    }
+    return static_cast<uint8_t>(q);
+}
+
 static inline void write_target_packet(std::vector<uint8_t>& pkt, size_t off, const GMTIDetection& det)
 {
     put_u16_le(pkt, off + 0, det.id);
     put_i32_le(pkt, off + 2, quant_deg_to_i32(det.lon));
     put_i32_le(pkt, off + 6, quant_deg_to_i32(det.lat));
-    put_u16_le(pkt, off + 10, quant_speed_to_u16(det.speed));
+    put_double_le(pkt, off + 10, det.range / 1000.0);
+    put_double_le(pkt, off + 18, det.speed);
+    put_double_le(pkt, off + 26, det.direction);
+    pkt[off + 34] = 0;
+}
 
-    uint64_t dir_raw = 0;
-    uint64_t range_raw = 0;
-    std::memcpy(&dir_raw, &det.direction, sizeof(dir_raw));
-    std::memcpy(&range_raw, &det.range, sizeof(range_raw));
-    for (int i = 0; i < 8; ++i) {
-        pkt[off + 12 + static_cast<size_t>(i)] = static_cast<uint8_t>((dir_raw >> (8 * i)) & 0xFFU);
-        pkt[off + 20 + static_cast<size_t>(i)] = static_cast<uint8_t>((range_raw >> (8 * i)) & 0xFFU);
+static std::string makeResultProductPath(const Config& cfg, const char* ext)
+{
+    if (cfg.result_file_id <= 0) {
+        return std::string();
     }
+    std::string dir = cfg.result_add;
+    if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') {
+        dir.push_back('/');
+    }
+    char name[32];
+    std::snprintf(name, sizeof(name), "GMTI%02d.%s", cfg.result_file_id, ext);
+    return dir + name;
+}
+
+static bool loadDbsImageProduct(const Config& cfg, GMTIResultPacket& packet)
+{
+    const std::string pngPath = makeResultProductPath(cfg, "png");
+    if (pngPath.empty()) {
+        return false;
+    }
+
+    std::vector<unsigned char> image;
+    unsigned width = 0;
+    unsigned height = 0;
+    const unsigned err = lodepng::decode(image, width, height, pngPath, LCT_GREY, 8);
+    if (err != 0U) {
+        std::cerr << "[GMTI][WARN] DBS image not available for protocol packet: "
+                  << pngPath << " (" << lodepng_error_text(err) << ")" << std::endl;
+        return false;
+    }
+    if (width > 65535U || height > 65535U) {
+        std::cerr << "[GMTI][WARN] DBS image exceeds protocol dimensions: "
+                  << height << "x" << width << std::endl;
+        return false;
+    }
+
+    packet.image.assign(image.begin(), image.end());
+    packet.image_rows = static_cast<uint16_t>(height);
+    packet.image_cols = static_cast<uint16_t>(width);
+    packet.image_available = !packet.image.empty();
+    return packet.image_available;
+}
+
+static bool loadDbsCornerProduct(const Config& cfg, GMTIResultPacket& packet)
+{
+    const std::string txtPath = makeResultProductPath(cfg, "txt");
+    if (txtPath.empty()) {
+        return false;
+    }
+
+    std::ifstream in(txtPath.c_str());
+    if (!in) {
+        return false;
+    }
+
+    double b[4] = {0.0, 0.0, 0.0, 0.0};
+    double l[4] = {0.0, 0.0, 0.0, 0.0};
+    bool hasB[4] = {false, false, false, false};
+    bool hasL[4] = {false, false, false, false};
+
+    std::string key;
+    char eq = '\0';
+    double value = 0.0;
+    while (in >> key >> eq >> value) {
+        if (key.size() == 2 && (key[0] == 'B' || key[0] == 'L') &&
+            key[1] >= '0' && key[1] <= '3') {
+            const int idx = key[1] - '0';
+            if (key[0] == 'B') {
+                b[idx] = value;
+                hasB[idx] = true;
+            } else {
+                l[idx] = value;
+                hasL[idx] = true;
+            }
+        }
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        if (!hasB[i] || !hasL[i]) {
+            return false;
+        }
+    }
+
+    packet.corner_lat[0] = b[3];
+    packet.corner_lon[0] = l[3];
+    packet.corner_lat[1] = b[0];
+    packet.corner_lon[1] = l[0];
+    packet.corner_lat[2] = b[2];
+    packet.corner_lon[2] = l[2];
+    packet.corner_lat[3] = b[1];
+    packet.corner_lon[3] = l[1];
+    packet.corner_lat[4] = (b[0] + b[1] + b[2] + b[3]) / 4.0;
+    packet.corner_lon[4] = (l[0] + l[1] + l[2] + l[3]) / 4.0;
+    return true;
+}
+
+static GMTIResultPacket buildResultPacketSnapshot(const MainCtrl* host,
+                                                  const std::vector<GMTIDetection>& targets)
+{
+    GMTIResultPacket packet;
+    if (!host) {
+        return packet;
+    }
+
+    packet.targets = targets;
+    packet.result_file_id = host->cfg_.result_file_id;
+    if (host->cfg_.enable_dbs_fusion) {
+        (void)loadDbsImageProduct(host->cfg_, packet);
+        (void)loadDbsCornerProduct(host->cfg_, packet);
+    }
+    return packet;
 }
 
 static bool reopen_result_pipe(MainCtrl* host)
@@ -179,10 +307,18 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile)
 
     if (!echoFile.empty()) {
         host->cfg_.GMTI_Data_new = echoFile;
-        const int trackId = extractFileIdFromPath(echoFile);
-        if (trackId > 0) {
-            host->cfg_.track_idx_range = buildTrackIdxRange(trackId, host->cfg_.track_idx_window);
+        int trackId = extractFileIdFromPath(echoFile);
+        if (trackId <= 0) {
+            if (!allocateNextResultId(host->gmti_proc_, host->cfg_, trackId)) {
+                std::cerr << "[ERR] Cannot allocate incremental GMTI result id from result_add: "
+                          << host->cfg_.result_add << std::endl;
+                return false;
+            }
+            std::cout << "[WARN] Echo filename has no trailing id. Use next result id "
+                      << trackId << " for GMTI result and track window." << std::endl;
         }
+        host->cfg_.result_file_id = trackId;
+        host->cfg_.track_idx_range = buildTrackIdxRange(trackId, host->cfg_.track_idx_window);
     }
 
     if (host->cfg_.track_idx_range.empty()) {
@@ -207,9 +343,10 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile)
     for (int i = 0; i < host->cfg_.rg_len; ++i) {
         host->cfg_.Rg[i] = host->cfg_.R_min + i * host->cfg_.R_bin;
     }
-    host->cfg_.fd_res = host->cfg_.PRF / double(host->cfg_.pulse_num);
+    const int procPulseNum = effectivePulseNum(host->cfg_);
+    host->cfg_.fd_res = host->cfg_.PRF / double(procPulseNum);
     host->cfg_.az_st = 1;
-    host->cfg_.az_ed = host->cfg_.pulse_num;
+    host->cfg_.az_ed = procPulseNum;
     host->cfg_.az_center = (host->cfg_.az_st + host->cfg_.az_ed) / 2;
     host->cfg_.Loc = true;
 
@@ -271,15 +408,28 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile)
         std::cout << "[OK] Period " << periodList[i] << " 完成" << std::endl;
     }
 
+    bool wroteCurrentDetections = false;
     if (!MT_acc.empty()) {
         if (!host->gmti_proc_.writeResult(MT_acc, host->cfg_)) {
             std::cerr << "[ERR] 整周期检测结果写盘失败" << std::endl;
+        } else {
+            wroteCurrentDetections = true;
         }
     } else {
         std::cerr << "[WARN] 本周期无检测目标，跳过检测结果写盘" << std::endl;
     }
 
-    host->latest_gmti_targets_ = trackModule(host->cfg_);
+    if (!wroteCurrentDetections) {
+        std::cout << "[TRACK][WARN] 本周期未写入新的检测结果文件，关联窗口中的当前编号文件可能是旧数据。" << std::endl;
+    }
+    std::vector<GMTIDetection> currentTargets = trackModule(host->cfg_, &host->track_manager_);
+    GMTIResultPacket packet = buildResultPacketSnapshot(host, currentTargets);
+    {
+        std::lock_guard<std::mutex> lock(host->result_mutex_);
+        host->latest_gmti_targets_ = currentTargets;
+        host->pending_result_packets_.push_back(std::move(packet));
+        host->IsResultReady = true;
+    }
     return true;
 }
 
@@ -408,7 +558,7 @@ void* MainCtrl::OnRecvCmdThread(void *param)
             printf("Switch to mode %d\n", cmd.workMode);
         }
 
-        if (!pHost->gmti_config_xml_.empty()) {
+        if (UPDATEXML) {
             if (!pHost->updateXmlFromModeSwitchCmd(cmd, pHost->gmti_config_xml_)) {
                 std::cerr << "Failed to update XML config from ModeSwitchCmd: "
                           << pHost->gmti_config_xml_ << std::endl;
@@ -461,7 +611,13 @@ void* MainCtrl::ProcessDataThread(void* param)
         std::cout << "open file: " << fileName << std::endl;
 
         const bool ok = runGMTIProcessingFlow(pHost, fileName);
-        pHost->IsResultReady = ok;
+        {
+            std::lock_guard<std::mutex> lock(pHost->result_mutex_);
+            pHost->IsResultReady = !pHost->pending_result_packets_.empty();
+        }
+        if (!ok) {
+            std::cerr << "[ERR] GMTI processing failed for echo file: " << fileName << std::endl;
+        }
 
         if (pHost->m_workmode != Mode_GMTI)
         {
@@ -479,19 +635,34 @@ void* MainCtrl::OnResSendThread(void* param)
 
     while(true)
     {
-        if(pHost->IsResultReady == false)
+        GMTIResultPacket packet;
         {
-            sleep(1);
+            std::lock_guard<std::mutex> lock(pHost->result_mutex_);
+            if (pHost->pending_result_packets_.empty()) {
+                pHost->IsResultReady = false;
+            } else {
+                packet = pHost->pending_result_packets_.front();
+                pHost->IsResultReady = true;
+            }
+        }
+
+        if (!pHost->IsResultReady)
+        {
+            usleep(100000);
             continue;
         }
 
         std::cout << "GMTI mode: Sending protocol packet..." << std::endl;
 
         uint32_t packed_len = 0;
-        if (!pHost->packGMTIResults(pHost->m_SendBuf, 40U * 1024U * 1024U, packed_len))
+        if (!pHost->packGMTIResults(packet, pHost->m_SendBuf, 40U * 1024U * 1024U, packed_len))
         {
             std::cerr << "Failed to pack GMTI protocol packet" << std::endl;
-            pHost->IsResultReady = false;
+            std::lock_guard<std::mutex> lock(pHost->result_mutex_);
+            if (!pHost->pending_result_packets_.empty()) {
+                pHost->pending_result_packets_.pop_front();
+            }
+            pHost->IsResultReady = !pHost->pending_result_packets_.empty();
             continue;
         }
 
@@ -500,9 +671,12 @@ void* MainCtrl::OnResSendThread(void* param)
         {
             std::cout << "GMTI protocol packet sent: " << packed_len << " bytes" << std::endl;
             std::lock_guard<std::mutex> lock(pHost->result_mutex_);
+            if (!pHost->pending_result_packets_.empty()) {
+                pHost->pending_result_packets_.pop_front();
+            }
             pHost->latest_gmti_targets_.clear();
             pHost->latest_gmti_targets_.shrink_to_fit();
-            pHost->IsResultReady = false;
+            pHost->IsResultReady = !pHost->pending_result_packets_.empty();
         }
         else
         {
@@ -521,75 +695,102 @@ bool MainCtrl::updateXmlFromModeSwitchCmd(const ModeSwitchCmd& cmd, const std::s
         return false;
     }
 
-    TiXmlElement* root = doc.RootElement();
+    TiXmlElement* root = doc.FirstChildElement("GMTI");
     if (!root)
     {
-        std::cerr << "Invalid XML structure: no root element" << std::endl;
+        std::cerr << "Invalid XML structure: root <GMTI> not found" << std::endl;
         return false;
     }
 
+    TiXmlElement* param = root->FirstChildElement("GMTI_parameter");
+    if (!param)
+    {
+        std::cerr << "Invalid XML structure: <GMTI_parameter> not found" << std::endl;
+        return false;
+    }
+
+    auto setText = [&](const char* name, double value) {
+        TiXmlElement* elem = param->FirstChildElement(name);
+        if (!elem) {
+            elem = new TiXmlElement(name);
+            param->LinkEndChild(elem);
+        }
+        std::ostringstream oss;
+        oss << std::setprecision(15) << value;
+        elem->Clear();
+        elem->LinkEndChild(new TiXmlText(oss.str().c_str()));
+    };
+
+    auto setTextInt = [&](const char* name, int value) {
+        TiXmlElement* elem = param->FirstChildElement(name);
+        if (!elem) {
+            elem = new TiXmlElement(name);
+            param->LinkEndChild(elem);
+        }
+        std::ostringstream oss;
+        oss << value;
+        elem->Clear();
+        elem->LinkEndChild(new TiXmlText(oss.str().c_str()));
+    };
+
     if (cmd.CenterFreq > 0)
     {
-        if (TiXmlElement* fc_elem = root->FirstChildElement("fc")) {
-            fc_elem->SetDoubleAttribute("value", cmd.CenterFreq / 1e9);
-        }
+        setText("fc", cmd.CenterFreq / 1e9);
     }
 
     if (cmd.SamplingRate > 0)
     {
-        if (TiXmlElement* fs_elem = root->FirstChildElement("fs")) {
-            fs_elem->SetDoubleAttribute("value", cmd.SamplingRate / 1e6);
-        }
+        setText("fs", cmd.SamplingRate / 1e6);
     }
 
     if (cmd.prf > 0)
     {
-        if (TiXmlElement* prf_elem = root->FirstChildElement("PRF")) {
-            prf_elem->SetDoubleAttribute("value", cmd.prf);
-        }
+        setText("PRF", cmd.prf);
     }
 
     if (cmd.BandWidth > 0)
     {
-        const double pulse_width = 1.0 / cmd.BandWidth;
-        if (TiXmlElement* tr_elem = root->FirstChildElement("Tr")) {
-            tr_elem->SetDoubleAttribute("value", pulse_width);
-        }
+        setText("Br", cmd.BandWidth / 1e6);
+    }
+
+    if (cmd.PulseWidth > 0)
+    {
+        setText("Tr", cmd.PulseWidth * 1e6);
     }
 
     if (cmd.alt_scene > 0)
     {
-        if (TiXmlElement* alt_elem = root->FirstChildElement("alt_scene")) {
-            alt_elem->SetDoubleAttribute("value", cmd.alt_scene);
-        }
+        setText("alt_scene", cmd.alt_scene);
     }
 
     if (cmd.Rmin > 0)
     {
-        if (TiXmlElement* rmin_elem = root->FirstChildElement("R_min")) {
-            rmin_elem->SetDoubleAttribute("value", cmd.Rmin);
-        }
+        setText("Rmin", cmd.Rmin);
     }
 
     if (cmd.velocity > 0)
     {
-        if (TiXmlElement* v_elem = root->FirstChildElement("v_platform")) {
-            v_elem->SetDoubleAttribute("value", cmd.velocity);
-        }
+        setText("v_platform", cmd.velocity);
+    }
+
+    if (cmd.LookSide == 0 || cmd.LookSide == 1)
+    {
+        setTextInt("squint_side", static_cast<int>(cmd.LookSide));
+    }
+
+    if (cmd.SquintAngle != 0)
+    {
+        setText("squint_angle", cmd.SquintAngle);
     }
 
     if (cmd.targetLon != 0)
     {
-        if (TiXmlElement* lon_elem = root->FirstChildElement("targetLon")) {
-            lon_elem->SetDoubleAttribute("value", cmd.targetLon);
-        }
+        setText("targetLon", cmd.targetLon);
     }
 
     if (cmd.targetLat != 0)
     {
-        if (TiXmlElement* lat_elem = root->FirstChildElement("targetLat")) {
-            lat_elem->SetDoubleAttribute("value", cmd.targetLat);
-        }
+        setText("targetLat", cmd.targetLat);
     }
 
     if (!doc.SaveFile())
@@ -625,9 +826,9 @@ bool MainCtrl::validateGMTIParams()
     return true;
 }
 
-bool MainCtrl::packGMTIResults(char* buffer, size_t buffer_size, uint32_t& packed_len)
+bool MainCtrl::packGMTIResults(const GMTIResultPacket& packet, char* buffer, size_t buffer_size, uint32_t& packed_len)
 {
-    constexpr size_t kTargetPacketSize = 28U;
+    constexpr size_t kTargetPacketSize = 35U;
 
     if (!buffer || buffer_size < sizeof(ResultHeader))
     {
@@ -635,23 +836,22 @@ bool MainCtrl::packGMTIResults(char* buffer, size_t buffer_size, uint32_t& packe
         return false;
     }
 
-    std::vector<GMTIDetection> targets;
-    {
-        std::lock_guard<std::mutex> lock(result_mutex_);
-        targets = latest_gmti_targets_;
-    }
-
-    const size_t target_count = std::min<size_t>(targets.size(), 65535U);
-    const size_t total_bytes = sizeof(ResultHeader) + target_count * kTargetPacketSize;
+    const size_t target_count = std::min<size_t>(packet.targets.size(), 65535U);
+    const size_t image_bytes = packet.image_available ? packet.image.size() : 0U;
+    const size_t total_bytes = sizeof(ResultHeader) + target_count * kTargetPacketSize + image_bytes;
     if (total_bytes > buffer_size) {
         std::cerr << "Buffer overflow: GMTI packet too large" << std::endl;
+        return false;
+    }
+    if (total_bytes > 0xFFFFFFFFULL) {
+        std::cerr << "GMTI packet length exceeds protocol U32 range" << std::endl;
         return false;
     }
 
     std::vector<uint8_t> pkt(total_bytes, 0U);
     ResultHeader header{};
     header.head = 0xAA55;
-    header.msgLen = static_cast<uint32_t>(total_bytes - sizeof(uint16_t) - sizeof(uint32_t));
+    header.msgLen = static_cast<uint32_t>(total_bytes - sizeof(uint16_t) - sizeof(uint8_t));
     header.msgAddr = 0;
     header.msgType = 0;
     header.msgCount = next_result_msg_count_++;
@@ -659,9 +859,9 @@ bool MainCtrl::packGMTIResults(char* buffer, size_t buffer_size, uint32_t& packe
     header.dstId = 0;
     header.cmdType = static_cast<uint8_t>(Mode_GMTI);
     header.cmdCount = static_cast<uint8_t>(header.msgCount & 0xFFU);
-    header.height = 0;
-    header.width = 0;
-    header.availFlag = 0xFFFF;
+    header.height = packet.image_rows;
+    header.width = packet.image_cols;
+    header.availFlag = packet.image_available ? 0xFFFF : 0x0000;
     header.roll = 0;
     header.heading = 0;
     header.pitch = 0;
@@ -681,23 +881,23 @@ bool MainCtrl::packGMTIResults(char* buffer, size_t buffer_size, uint32_t& packe
     header.hRightDown = 0;
     header.hRightTop = 0;
     header.hCenter = 0;
-    header.lonLeftTop = 0;
-    header.lonLeftDown = 0;
-    header.lonRightDown = 0;
-    header.lonRightTop = 0;
-    header.lonCenter = 0;
-    header.latLeftTop = 0;
-    header.latLeftDown = 0;
-    header.latRightDown = 0;
-    header.latRightTop = 0;
-    header.latCenter = 0;
+    header.lonLeftTop = quant_deg_to_i32(packet.corner_lon[0]);
+    header.lonLeftDown = quant_deg_to_i32(packet.corner_lon[1]);
+    header.lonRightDown = quant_deg_to_i32(packet.corner_lon[2]);
+    header.lonRightTop = quant_deg_to_i32(packet.corner_lon[3]);
+    header.lonCenter = quant_deg_to_i32(packet.corner_lon[4]);
+    header.latLeftTop = quant_deg_to_i32(packet.corner_lat[0]);
+    header.latLeftDown = quant_deg_to_i32(packet.corner_lat[1]);
+    header.latRightDown = quant_deg_to_i32(packet.corner_lat[2]);
+    header.latRightTop = quant_deg_to_i32(packet.corner_lat[3]);
+    header.latCenter = quant_deg_to_i32(packet.corner_lat[4]);
     header.rLeftTop = 0;
     header.rLeftDown = 0;
     header.rRightDown = 0;
     header.rRightTop = 0;
     header.rCenter = 0;
     header.reserve1 = 0;
-    header.pixelPitch = 0;
+    header.pixelPitch = quant_pixel_pitch(cfg_.dbs_out_res_m);
     header.LookDownAngle = 0;
     header.SquintAngle = static_cast<uint16_t>(std::lround(std::fabs(cfg_.squint_angle) * 100.0));
     header.LookSide = (cfg_.squint_side == 0) ? 0x00 : 0xFF;
@@ -709,8 +909,12 @@ bool MainCtrl::packGMTIResults(char* buffer, size_t buffer_size, uint32_t& packe
 
     size_t off = sizeof(ResultHeader);
     for (size_t i = 0; i < target_count; ++i) {
-        write_target_packet(pkt, off, targets[i]);
+        write_target_packet(pkt, off, packet.targets[i]);
         off += kTargetPacketSize;
+    }
+    if (image_bytes > 0U) {
+        std::memcpy(pkt.data() + off, packet.image.data(), image_bytes);
+        off += image_bytes;
     }
 
     uint8_t checksum = 0;

@@ -16,7 +16,7 @@ bool GMTIProcessor::clutter_38_V2(
     int skip_num,
     int az_st, int rg_st,
     int az_ed, int rg_ed,
-    const std::vector<double>& y_faAxis,               // len = cfg.pulse_num
+    const std::vector<double>& y_faAxis,               // len = effectivePulseNum(cfg)
     double fa2,
     const Config& cfg,                                  // ☆ 新增：显式传入 cfg
     std::vector<std::complex<double>>& CSI_result_38paper,
@@ -24,7 +24,7 @@ bool GMTIProcessor::clutter_38_V2(
     std::vector<double>& phase_38_phase,
     std::vector<double>& phase_38_fa
 ) {
-    const size_t Na = static_cast<size_t>(cfg.pulse_num);
+    const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
     const size_t total = Na * Nr;
 
@@ -74,7 +74,7 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_p38(
     const Config& cfg,
     std::array<double,2>& p_38
 ) {
-    const size_t Na = static_cast<size_t>(cfg.pulse_num);
+    const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
     const size_t total = Na * Nr;
 
@@ -153,7 +153,7 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_p38(
 }
 
 bool GMTIProcessor::clutter_cancel_38_paper_1(
-    const std::vector<double>& y_faAxis,                  // len = cfg.pulse_num
+    const std::vector<double>& y_faAxis,                  // len = effectivePulseNum(cfg)
     const std::vector<std::complex<double>>& F1f,         // size = Na*Nr
     const std::vector<std::complex<double>>& F2f,         // size = Na*Nr
     int az_st, int rg_st, int az_ed, int rg_ed,
@@ -166,7 +166,7 @@ bool GMTIProcessor::clutter_cancel_38_paper_1(
 
     auto wall_start = std::chrono::high_resolution_clock::now();
 
-    const size_t Na = static_cast<size_t>(cfg.pulse_num);
+    const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
     const size_t total = Na * Nr;
 

@@ -5,6 +5,7 @@
 #include <vector>
 #include <complex>
 #include <array>
+#include <cstddef>
 
 // 常量定义
 const double EARTH_R = 6371.0;  // 地球半径，单位：km
@@ -24,6 +25,7 @@ struct Config {
     std::string channel_mode;    // 通道模式
     std::string iq_compose;      // IQ 组合方式
     std::vector<int> track_idx_range; // 航迹关联读取的周期索引
+    int result_file_id = -1;     // 当前检测结果固定写入 GMTIxx.bin 的 xx，<=0 时才使用自动编号
 
     // 配置标志
     int INFO_Type;              // FPGA包头协议类型，1为新协议，0为旧协议
@@ -35,6 +37,10 @@ struct Config {
     int pulse_len;              // 脉冲长度
     int rg_len;                 // 距离采样长度
     int pulse_num;              // 脉冲数目
+    int read_pulse_num = 0;     // 新协议实际读取脉冲数，<=0 表示读取 pulse_num
+    int read_pulse_offset = -1; // 新协议读取起始偏移，<0 表示居中读取
+    int process_pulse_num = 0;  // 当前处理矩阵脉冲数，<=0 表示使用 pulse_num
+    int range_compress_len = 0; // 脉压/抽取后距离点数，>0 时覆盖 rg_len
     int pulse_dec;              // 脉冲压缩比例
     double fc;                  // 中心频率（GHz）
     double Br;                  // 带宽（MHz）
@@ -42,6 +48,8 @@ struct Config {
     double Tr;                  // 脉冲宽度（秒）
     double PRF;                 // 脉冲重复频率（Hz）
     int az_count;               // 方位角计数
+    double beamwidth_deg = 3.0; // 波束宽度，对应 XML boshu
+    double loc_beam_gate_deg = -1.0; // 定位后波束方向门限半宽，<=0 时按 boshu 推导
     int week;                   // 周数
     double d_channel;           // 信道间隔
     double pf;                  // 固定参数
@@ -88,6 +96,7 @@ struct Config {
     int dbs_beam_skip = 1;      // DBS 波位跳过数，对应 XML n_tiaoguo
     int dbs_range_skip = 1;     // DBS 距离抽样步长，对应 XML len_tiaoguo
     int dbs_interp_mode = 1;    // DBS 拼图插值模式，1=最近邻，2=双线性
+    size_t dbs_max_mosaic_pixels = 200000000ULL; // DBS 拼图像素数上限，对应 XML dbs_max_mosaic_pixels
 
     // ★ 新增：是否估计误差角（false 时直接使用 XML 中的 squint_angle）
     bool estimate_error_angle = true;
@@ -95,7 +104,7 @@ struct Config {
     // ★ ROI 四角经纬度（度）：[lat1,lng1, lat2,lng2, lat3,lng3, lat4,lng4]
     std::array<double,4> roi_ll_deg;  // 调用前请填好
 
-    // ★ 斜视角有效扫描范围（度），默认 [-25, 25]
+    // ★ 斜视角有效扫描范围（度），默认 [-25, 25]；离散波位由 wavepos_st/ed/skip 约束
     double scan_min_deg = -25.0;
     double scan_max_deg =  25.0;
     double lat_st;              
@@ -106,6 +115,17 @@ struct Config {
     int squint_side = 0;      // 右斜视侧，默认0
     double squint_angle = 0.0; // 斜视角度，单位：度
 };
+
+inline int effectivePulseNum(const Config& cfg)
+{
+    if (cfg.process_pulse_num > 0) {
+        return cfg.process_pulse_num;
+    }
+    if (cfg.INFO_Type && cfg.read_pulse_num > 0) {
+        return cfg.read_pulse_num;
+    }
+    return cfg.pulse_num;
+}
 
 // 定义结构体用于存储输出数据
 struct GMTIOutput {

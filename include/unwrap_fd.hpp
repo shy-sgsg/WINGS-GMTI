@@ -94,7 +94,7 @@ static inline float unwrap_prf_to_model(double d_est,
     return static_cast<float>(best_val);
 }
 
-bool estimateCenterFdCtrFromData(const std::vector<std::complex<double>> &data,
+bool estimateCenterFdCtrFromData(const std::vector<std::complex<float>> &data,
                                         const Config &cfg,
                                         double &fd_ctr,
                                         int &start_pulse,

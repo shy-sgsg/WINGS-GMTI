@@ -70,13 +70,14 @@ static inline bool align_two_channels_fast(const std::vector<cd> &d1,
 static inline void dbs_center_by_fa_fast(std::vector<cd> &A,
                                          std::vector<cd> &B,
                                          std::size_t Na, std::size_t Nr,
-                                         double f_d)
+                                         double f_d,
+                                         double prf)
 {
-    if (Na == 0 || Nr == 0)
+    if (Na == 0 || Nr == 0 || !(prf > 0.0))
         return;
 
     const int width = static_cast<int>(Na);
-    const int center_num = static_cast<int>(std::floor((f_d + 1000.0) / 2000.0 * width)) + 1;
+    const int center_num = static_cast<int>(std::floor((f_d + 0.5 * prf) / prf * width)) + 1;
 
     int cstart = center_num - width / 2; // 1-based
     int k_1b = cstart;
@@ -128,7 +129,7 @@ bool GMTIProcessor::alignFFTAndDBS(const std::vector<std::complex<double>> &data
                                    std::vector<std::complex<double>> &out1,
                                    std::vector<std::complex<double>> &out2)
 {
-    const std::size_t Na = static_cast<std::size_t>(cfg.pulse_num);
+    const std::size_t Na = static_cast<std::size_t>(effectivePulseNum(cfg));
     const std::size_t Nr = static_cast<std::size_t>(cfg.rg_len);
     const std::size_t total = Na * Nr;
     if (Na == 0 || Nr == 0) return false;
@@ -149,14 +150,14 @@ bool GMTIProcessor::alignFFTAndDBS(const std::vector<std::complex<double>> &data
     if (!colfft_.execute(a2_.data(), out2.data())) return false;
 
     // 3) DBS 中心化（两段 memcpy）
-    dbs_center_by_fa_fast(out1, out2, Na, Nr, fa2);
+    dbs_center_by_fa_fast(out1, out2, Na, Nr, fa2, cfg.PRF);
 
     return true;
 }
 
 bool GMTIProcessor::initFFTPlans(const Config &cfg)
 {
-    const int H = cfg.pulse_num / cfg.pulse_dec;
+    const int H = effectivePulseNum(cfg) / cfg.pulse_dec;
     const int W = cfg.rg_len;
     int threads = std::max(1, (int)std::thread::hardware_concurrency());
     DBG("initFFTPlans: Using " << threads << " threads for FFTW");
@@ -170,13 +171,15 @@ bool GMTIProcessor::initFFTPlans(const Config &cfg)
 
 bool GMTIProcessor::initcuFFTPlans(const Config &cfg) {
     // 使用 size_t 避免 32位 溢出
-    size_t Na = static_cast<size_t>(cfg.pulse_num);
+    size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     size_t Nr = static_cast<size_t>(cfg.rg_len);
+    size_t rawNr = static_cast<size_t>(std::max(cfg.pulse_len, cfg.rg_len));
     size_t total = Na * Nr;
+    size_t rawTotal = Na * rawNr;
     
     // 显存中每个复数占 8 字节 (float2)
-    size_t single_buf_bytes = total * sizeof(cudacd);
-    size_t needed_bytes = 7 * single_buf_bytes + Nr * sizeof(cudacd); // 7 个缓冲区(CSI) + 距离向相位校正中间结果
+    size_t single_buf_bytes = rawTotal * sizeof(cudacd);
+    size_t needed_bytes = 7 * single_buf_bytes + Nr * sizeof(cudacd); // 7 个主缓冲区 + 距离向相位校正中间结果
 
     // --- 1. 预分配显存 (仅在必要时重新分配) ---
     if (d_workspace == nullptr || d_workspace_bytes < needed_bytes) {

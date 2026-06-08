@@ -32,7 +32,7 @@ __global__ void decimate_and_scale(const cuFloatComplex* in, cuFloatComplex* out
 }
 
 bool GMTIProcessor::rangeCompressCUFFT_device(int Lraw, int M, const Config &cfg) {
-    const int W = cfg.pulse_num;
+    const int W = effectivePulseNum(cfg);
     if (W <= 0 || Lraw <= 0 || M <= 0) return false;
     const size_t total_in = (size_t)W * (size_t)Lraw;
     const size_t total_out = (size_t)W * (size_t)M;
@@ -117,4 +117,102 @@ bool GMTIProcessor::rangeCompressCUFFT_device(int Lraw, int M, const Config &cfg
     cudaFree(d_Hf);
     cudaFree(d_buf);
     return true;
+}
+
+bool GMTIProcessor::rangeCompressCUFFT_device_pair(int Lraw, int M, const Config &cfg) {
+    const int W = effectivePulseNum(cfg);
+    if (W <= 0 || Lraw <= 0 || M <= 0) return false;
+    const size_t total_in = (size_t)W * (size_t)Lraw;
+    const size_t total_out = (size_t)W * (size_t)M;
+
+    cuFloatComplex* d_ch1 = reinterpret_cast<cuFloatComplex*>(gpu_ptrs_.d1);
+    cuFloatComplex* d_ch2 = reinterpret_cast<cuFloatComplex*>(gpu_ptrs_.d2);
+    if (!d_ch1 || !d_ch2) return false;
+
+    const double Kr = (cfg.Tr > 0.0) ? (cfg.Br / cfg.Tr) : 0.0;
+    const double fs = cfg.fs;
+    if (Kr == 0.0 || fs <= 0.0) return false;
+
+    const int Lraw2M = Lraw / M;
+    if (Lraw2M <= 0) {
+        ERR("[GPU] Invalid decimation factor: Lraw=" << Lraw << " M=" << M);
+        return false;
+    }
+
+    cuFloatComplex* d_buf = nullptr;
+    cuFloatComplex* d_Hf = nullptr;
+    const size_t total_in_bytes = total_in * sizeof(cuFloatComplex);
+    if (cudaMalloc((void**)&d_buf, total_in_bytes) != cudaSuccess) return false;
+    if (cudaMalloc((void**)&d_Hf, (size_t)Lraw * sizeof(cuFloatComplex)) != cudaSuccess) {
+        cudaFree(d_buf);
+        return false;
+    }
+
+    const double df = fs / double(Lraw);
+    std::vector<cuFloatComplex> h_Hf(Lraw);
+    for (int n = 0; n < Lraw; ++n) {
+        double fn = (n <= (Lraw / 2 - 1)) ? n * df : (n - Lraw) * df;
+        double phase = M_PI * (fn * fn) / Kr;
+        h_Hf[n] = make_cuFloatComplex((float)std::cos(phase), (float)std::sin(phase));
+    }
+    if (cudaMemcpyAsync(d_Hf, h_Hf.data(), (size_t)Lraw * sizeof(cuFloatComplex),
+                        cudaMemcpyHostToDevice, stream_compute_) != cudaSuccess) {
+        cudaFree(d_Hf);
+        cudaFree(d_buf);
+        return false;
+    }
+
+    cufftHandle plan;
+    int nvec[1] = { Lraw };
+    if (cufftPlanMany(&plan, 1, nvec, &Lraw, 1, Lraw, &Lraw, 1, Lraw,
+                      CUFFT_C2C, W) != CUFFT_SUCCESS) {
+        cudaFree(d_Hf);
+        cudaFree(d_buf);
+        return false;
+    }
+    CUFFT_CHECK(cufftSetStream(plan, stream_compute_));
+
+    const int threads = 256;
+    const int blocks_in = (total_in + threads - 1) / threads;
+    const int blocks_out = (total_out + threads - 1) / threads;
+    const float scale = 1.0f / (float)Lraw;
+
+    auto process_one_channel = [&](cuFloatComplex* d_in_out) -> bool {
+        if (cudaMemcpyAsync(d_buf, d_in_out, total_in_bytes,
+                            cudaMemcpyDeviceToDevice, stream_compute_) != cudaSuccess) {
+            return false;
+        }
+        if (cufftExecC2C(plan, reinterpret_cast<cufftComplex*>(d_buf),
+                         reinterpret_cast<cufftComplex*>(d_buf),
+                         CUFFT_FORWARD) != CUFFT_SUCCESS) {
+            return false;
+        }
+        mul_Hf_dev<<<blocks_in, threads, 0, stream_compute_>>>(d_buf, d_Hf, Lraw, W);
+        if (cudaGetLastError() != cudaSuccess) {
+            ERR("[GPU] mul_Hf_dev kernel launch failed");
+            return false;
+        }
+        if (cufftExecC2C(plan, reinterpret_cast<cufftComplex*>(d_buf),
+                         reinterpret_cast<cufftComplex*>(d_buf),
+                         CUFFT_INVERSE) != CUFFT_SUCCESS) {
+            return false;
+        }
+        decimate_and_scale<<<blocks_out, threads, 0, stream_compute_>>>(d_buf, d_in_out, Lraw, M, W, Lraw2M, scale);
+        if (cudaGetLastError() != cudaSuccess) {
+            ERR("[GPU] decimate_and_scale kernel launch failed");
+            return false;
+        }
+        return true;
+    };
+
+    const bool ok = process_one_channel(d_ch1) && process_one_channel(d_ch2);
+    cudaError_t sync_err = cudaStreamSynchronize(stream_compute_);
+    if (sync_err != cudaSuccess) {
+        ERR("[GPU] Stream synchronize failed: " << cudaGetErrorString(sync_err));
+    }
+
+    cufftDestroy(plan);
+    cudaFree(d_Hf);
+    cudaFree(d_buf);
+    return ok && sync_err == cudaSuccess;
 }

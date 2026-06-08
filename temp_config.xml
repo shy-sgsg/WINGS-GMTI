@@ -9,10 +9,10 @@
         <isSeparated>separate</isSeparated>
         <INFO_Type>1</INFO_Type>
         <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/M68ID16.bin</GMTI_data_new>
-        <pipe_root_path>/home/shy/pipe_test</pipe_root_path>
+        <pipe_root_path>/home/raco</pipe_root_path>
         <estimate_error_angle>0</estimate_error_angle>
         <wavepos_parallel>1</wavepos_parallel>
-        <enable_dbs_fusion>1</enable_dbs_fusion>
+        <enable_dbs_fusion>0</enable_dbs_fusion>
         <iq_compose>I+jQ</iq_compose>
         <isPC>0</isPC>
         <hasRefFunc>0</hasRefFunc>
@@ -20,6 +20,8 @@
         <pulse_len>4096</pulse_len>
         <rg_len>4096</rg_len>
         <pulse_num>256</pulse_num>
+        <read_pulse_num>256</read_pulse_num>
+        <read_pulse_offset>-1</read_pulse_offset>
         <pulse_dec>1</pulse_dec>
         <fc>17</fc>
         <Br>50</Br>
@@ -41,6 +43,8 @@
         <wavepos_st>1</wavepos_st>
         <wavepos_ed>25</wavepos_ed>
         <wavepos_skip>1</wavepos_skip>
+        <scan_min_deg>-25</scan_min_deg>
+        <scan_max_deg>25</scan_max_deg>
         <min_points>10</min_points>
         <min_len>1</min_len>
         <rg_st>1</rg_st>
@@ -48,23 +52,21 @@
         <calib_coef>1.0</calib_coef>
         <squint_side>1</squint_side>
         <az_count>25</az_count>
-        <boshu>3</boshu>
+        <boshu>6</boshu>
+        <loc_beam_gate_deg>6</loc_beam_gate_deg>
         <max_theta>30</max_theta>
         <period_first>8</period_first>
         <period_num>1</period_num>
         <n_tiaoguo>1</n_tiaoguo>
         <raw_fenbianlv>8</raw_fenbianlv>
         <len_tiaoguo>200</len_tiaoguo>
+        <dbs_max_mosaic_pixels>300000000</dbs_max_mosaic_pixels>
         <week_offset>0</week_offset>
         <squint_angle>-2.9363293647766113</squint_angle>
         <lat_st>2</lat_st>
         <lat_ed>2</lat_ed>
         <lon_st>2</lon_st>
         <lon_ed>2</lon_ed>
-        <track_sort_by_utc>true</track_sort_by_utc>
-        <track_debug_assoc>true</track_debug_assoc>
-        <track_debug_max_frames>10</track_debug_max_frames>
-        <track_debug_max_items>50</track_debug_max_items>
         <track_idx_window>3</track_idx_window>
         <track_truth_threshold>2</track_truth_threshold>
         <track_gate_m>500</track_gate_m>

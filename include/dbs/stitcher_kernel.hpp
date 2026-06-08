@@ -18,8 +18,14 @@ struct BeamDevParams {
 
 // 定义一个普通的 C++ 函数作为包装器
 
-// 支持 texture object 的 kernel 启动器
 #include <cuda_runtime.h>
+
+#ifndef DBS_USE_CUDA_TEXTURE_OBJECTS
+#define DBS_USE_CUDA_TEXTURE_OBJECTS 0
+#endif
+
+// DBS_USE_CUDA_TEXTURE_OBJECTS=1 keeps the legacy texture-object path.
+// The default CoreX path avoids tex2D/cudaTextureObject_t completely.
 void launchBuildMosaicKernel(
   float* d_amp_mosaic, uint16_t* d_which_beam,
   const float* d_all_amps,

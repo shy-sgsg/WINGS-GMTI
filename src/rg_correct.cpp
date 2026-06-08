@@ -144,7 +144,7 @@ bool GMTIProcessor::rg_correct(const std::vector<std::complex<double>>& F1,
                                std::vector<double>& phi_diss_phase,
                                std::vector<int>&    phi_diss_range)
 {
-    const int Na = cfg.pulse_num;   // 使用类内 cfg_（你之前要求 readXmlParam 填充到私有成员）
+    const int Na = effectivePulseNum(cfg);   // 使用类内 cfg_（你之前要求 readXmlParam 填充到私有成员）
     const int Nr = cfg.rg_len;
     const int rg_len = cfg.rg_len;
 
@@ -206,7 +206,7 @@ bool GMTIProcessor::rg_correct_CUDA(
     std::vector<double>& phi_diss_phase, 
     std::vector<int>&    phi_diss_range)
 {
-    const int Na = cfg.pulse_num;
+    const int Na = effectivePulseNum(cfg);
     const int Nr = cfg.rg_len;
 
     // 范围校验 & 规范

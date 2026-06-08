@@ -96,11 +96,25 @@ static inline double wrap180_deg(double angle_deg)
     return angle_deg - 180.0;
 }
 
+static inline double beam_center_relative_dir_deg(int squint_side, double theta_deg)
+{
+    const double side_dir = (squint_side == 1) ? -90.0 : 90.0;
+    return wrap180_deg(side_dir - theta_deg);
+}
+
+static inline double location_beam_gate_deg(const Config &cfg)
+{
+    if (cfg.loc_beam_gate_deg > 0.0) {
+        return cfg.loc_beam_gate_deg;
+    }
+    return std::max(0.0, cfg.beamwidth_deg * 0.5) + 0.5;
+}
+
 } // namespace
 
 double GMTIProcessor::estimateSquintAngleDeg(const GMTIOutput::Plane &plane, const Config &cfg, double fd_ctr)
 {
-    const double lambda = (cfg.lambda > 0.0) ? cfg.lambda : (C / (cfg.fc * 1e9));
+    const double lambda = (cfg.lambda > 0.0) ? cfg.lambda : (C / cfg.fc);
     const double v = plane.V;
 
     if (std::isfinite(fd_ctr))
@@ -114,7 +128,7 @@ double GMTIProcessor::estimateSquintAngleDeg(const GMTIOutput::Plane &plane, con
             return 0.0;
         }
 
-        const double ratio = fd_ctr * lambda / (2.0 * v);
+        const double ratio = -fd_ctr * lambda / (2.0 * v);
         const double clipped = std::max(-1.0, std::min(1.0, ratio));
         const double squint_deg = std::asin(clipped) * 180.0 / M_PI;
 
@@ -150,7 +164,7 @@ double GMTIProcessor::estimateSquintAngleDeg(const GMTIOutput::Plane &plane, con
     return squint_deg;
 }
 
-double GMTIProcessor::estimateSquintAngleDeg(const std::vector<std::complex<double>> &data,
+double GMTIProcessor::estimateSquintAngleDeg(const std::vector<std::complex<float>> &data,
                                              const GMTIOutput::Plane &plane,
                                              const Config &cfg)
 {
@@ -171,102 +185,70 @@ double GMTIProcessor::estimateSquintAngleDeg(const std::vector<std::complex<doub
     return estimateSquintAngleDeg(plane, cfg);
 }
 
+bool GMTIProcessor::pulseCompressionGpuResident(const std::vector<std::complex<float>> &data1,
+                                                const std::vector<std::complex<float>> &data2,
+                                                const Config &cfg)
+{
+    const int W = effectivePulseNum(cfg);
+    if (W <= 0 || cfg.pulse_len <= 0 || cfg.rg_len <= 0) {
+        return false;
+    }
+    if (data1.size() != static_cast<size_t>(W) * static_cast<size_t>(cfg.pulse_len) ||
+        data2.size() != static_cast<size_t>(W) * static_cast<size_t>(cfg.pulse_len) ||
+        gpu_ptrs_.d1 == nullptr || gpu_ptrs_.d2 == nullptr) {
+        return false;
+    }
+
+    const size_t total_bytes = data1.size() * sizeof(std::complex<float>);
+    if (cudaMemcpyAsync(gpu_ptrs_.d1, data1.data(), total_bytes, cudaMemcpyHostToDevice, stream_compute_) != cudaSuccess ||
+        cudaMemcpyAsync(gpu_ptrs_.d2, data2.data(), total_bytes, cudaMemcpyHostToDevice, stream_compute_) != cudaSuccess) {
+        return false;
+    }
+
+    return rangeCompressCUFFT_device_pair(cfg.pulse_len, cfg.rg_len, cfg);
+}
+
 // 辅助函数：进行脉压处理（支持GPU加速 + CPU回退）
-bool GMTIProcessor::pulseCompression(std::vector<std::complex<double>> &data1,
-                                     std::vector<std::complex<double>> &data2,
+bool GMTIProcessor::pulseCompression(std::vector<std::complex<float>> &data1,
+                                     std::vector<std::complex<float>> &data2,
                                      const Config &cfg)
 {
-    TIMING_SCOPE(pulseCompression);
+    // TIMING_SCOPE(pulseCompression);
     // 对两个通道分别进行脉压
-    if (data1.size() != (size_t)cfg.pulse_num * cfg.pulse_len ||
-        data2.size() != (size_t)cfg.pulse_num * cfg.pulse_len)
+    const int W = effectivePulseNum(cfg);
+    if (data1.size() != (size_t)W * cfg.pulse_len ||
+        data2.size() != (size_t)W * cfg.pulse_len)
     {
         std::cerr << "输入数据尺寸不匹配脉冲数和脉冲长度。" << std::endl;
         return false;
     }
 
-    const int Lraw = cfg.pulse_len;
-    const int M = cfg.rg_len;
-    const int W = cfg.pulse_num;
-    
-    // #define FORCE_CPU_RANGE_COMPRESS 1 // 取消注释此行强制使用CPU脉压（调试用）
-    bool try_gpu = true; // 默认尝试GPU
-    #ifdef FORCE_CPU_RANGE_COMPRESS
-    try_gpu = false;
-    #endif
-
-    // ========== 尝试GPU路径 ==========
-    if (try_gpu && gpu_ptrs_.d1 != nullptr) {
-        std::vector<std::complex<float>> data1_f(data1.size());
-        std::vector<std::complex<float>> data2_f(data2.size());
-        
-        // 转换为float
-        for (size_t i = 0; i < data1_f.size(); ++i) {
-            data1_f[i] = std::complex<float>(static_cast<float>(data1[i].real()), static_cast<float>(data1[i].imag()));
-            data2_f[i] = std::complex<float>(static_cast<float>(data2[i].real()), static_cast<float>(data2[i].imag()));
+    // GPU 脉压使用 pulseCompressionGpuResident()，成功后不下载整幅矩阵。
+    // 本函数只作为 CPU 回退路径使用。
+    auto compress_one = [&](std::vector<std::complex<float>>& data) -> bool {
+        std::vector<std::complex<double>> in_d(data.size());
+        for (size_t i = 0; i < data.size(); ++i) {
+            in_d[i] = std::complex<double>(data[i].real(), data[i].imag());
         }
-
-        // 上传float数据到GPU
-        size_t total_bytes = data1_f.size() * sizeof(std::complex<float>);
-        if (cudaMemcpyAsync(gpu_ptrs_.d1, data1_f.data(), total_bytes, cudaMemcpyHostToDevice, stream_compute_) == cudaSuccess &&
-            cudaMemcpyAsync(gpu_ptrs_.d2, data2_f.data(), total_bytes, cudaMemcpyHostToDevice, stream_compute_) == cudaSuccess)
-        {
-            // 调用GPU脉压设备路径：通道1
-            if (rangeCompressCUFFT_device(Lraw, M, cfg)) {
-                // GPU处理通道1成功，现在处理通道2
-                // 首先交换d1和d2以处理通道2
-                std::swap(gpu_ptrs_.d1, gpu_ptrs_.d2);
-                if (rangeCompressCUFFT_device(Lraw, M, cfg)) {
-                    // 都成功，交换回来，准备下载
-                    std::swap(gpu_ptrs_.d1, gpu_ptrs_.d2);
-                    
-                    // 下载结果
-                    std::vector<std::complex<float>> result1_f(W * M);
-                    std::vector<std::complex<float>> result2_f(W * M);
-                    size_t download_bytes = W * M * sizeof(std::complex<float>);
-                    
-                    if (cudaMemcpyAsync(result1_f.data(), gpu_ptrs_.d1, download_bytes, cudaMemcpyDeviceToHost, stream_compute_) == cudaSuccess &&
-                        cudaMemcpyAsync(result2_f.data(), gpu_ptrs_.d2, download_bytes, cudaMemcpyDeviceToHost, stream_compute_) == cudaSuccess)
-                    {
-                        cudaStreamSynchronize(stream_compute_); // 等待下载完成
-                        
-                        // 转换回double并更新data1/data2
-                        data1.resize(W * M);
-                        data2.resize(W * M);
-                        for (int i = 0; i < W * M; ++i) {
-                            data1[i] = std::complex<double>(result1_f[i].real(), result1_f[i].imag());
-                            data2[i] = std::complex<double>(result2_f[i].real(), result2_f[i].imag());
-                        }
-                        std::cout << "[GPU] 脉压处理成功 (GPU cuFFT)" << std::endl;
-                        DBG("[GPU] 脉压处理成功 (GPU cuFFT)");
-                        return true;
-                    }
-                }
-                // 如果通道2失败，交换回来然后回退到CPU
-                std::swap(gpu_ptrs_.d1, gpu_ptrs_.d2);
-            }
+        std::vector<std::complex<double>> out_d;
+        if (!rangeCompressFFT(cfg, in_d, out_d)) {
+            return false;
         }
-        std::cout << "[GPU] 脉压处理失败，回退到CPU" << std::endl;
-        DBG("[GPU] 脉压处理失败，回退到CPU");
-    }
+        data.resize(out_d.size());
+        for (size_t i = 0; i < out_d.size(); ++i) {
+            data[i] = std::complex<float>(static_cast<float>(out_d[i].real()),
+                                          static_cast<float>(out_d[i].imag()));
+        }
+        return true;
+    };
 
-    // ========== CPU回退路径 ==========
-    std::vector<std::complex<double>> temp; // 一个通用中间缓存
-
-    // --- 通道1 ---
-    bool success1 = rangeCompressFFT(cfg, data1, temp);
-    if (!success1)
+    if (!compress_one(data1))
         return false;
-    data1.swap(temp); // 替换通道1结果
-
-    // --- 通道2 ---
-    success1 = rangeCompressFFT(cfg, data2, temp);
-    if (!success1)
+    if (!compress_one(data2))
         return false;
-    data2.swap(temp); // 替换通道2结果
 
-    if (data1.size() != (size_t)cfg.pulse_num * cfg.rg_len ||
-        data2.size() != (size_t)cfg.pulse_num * cfg.rg_len)
+    if (data1.size() != (size_t)W * cfg.rg_len ||
+        data2.size() != (size_t)W * cfg.rg_len)
     {
         std::cerr << "输出数据尺寸不匹配脉冲数和距离长度。" << std::endl;
         return false;
@@ -277,11 +259,11 @@ bool GMTIProcessor::pulseCompression(std::vector<std::complex<double>> &data1,
 }
 
 // 辅助函数：计算多普勒频率轴
-inline bool computeDoppler(const std::vector<std::complex<double>> &data, int k, const Config &cfg,
+inline bool computeDoppler(const std::vector<std::complex<float>> &data, int k, const Config &cfg,
                            std::vector<double> &faAxis, double &fa2, const double &v, const double &theta_deg)
 {
     // 获取数据的尺寸
-    size_t Na = cfg.pulse_num; // 方位向点数
+    size_t Na = effectivePulseNum(cfg); // 方位向点数
     size_t Nr = cfg.rg_len;    // 距离向点数
 
     // 相关矩阵初始化
@@ -316,9 +298,11 @@ inline bool computeDoppler(const std::vector<std::complex<double>> &data, int k,
 
     // 生成频率轴 faAxis
     faAxis.clear();
-    for (double f = -cfg.PRF / 2 + cfg.fd_res; f <= cfg.PRF / 2; f += cfg.fd_res)
+    faAxis.resize(Na);
+    const double df = (Na > 0) ? (cfg.PRF / static_cast<double>(Na)) : 0.0;
+    for (size_t i = 0; i < Na; ++i)
     {
-        faAxis.push_back(f); // 填充频率轴
+        faAxis[i] = -0.5 * cfg.PRF + static_cast<double>(i) * df;
     }
 
     // fa2 = unwrap_prf_to_model(fa2 , cfg.PRF, theta_deg, v, cfg.fc); // 解除模糊
@@ -333,7 +317,7 @@ inline bool computeDoppler(const std::vector<std::complex<double>> &data, int k,
 }
 
 
-bool estimateCenterFdCtrFromData(const std::vector<std::complex<double>> &data,
+bool estimateCenterFdCtrFromData(const std::vector<std::complex<float>> &data,
                                         const Config &cfg,
                                         double &fd_ctr,
                                         int &start_pulse,
@@ -343,38 +327,25 @@ bool estimateCenterFdCtrFromData(const std::vector<std::complex<double>> &data,
     start_pulse = 0;
     window_pulses = 0;
 
-    if (cfg.pulse_num < 2 || cfg.rg_len <= 0) {
+    const int W = effectivePulseNum(cfg);
+    if (W < 2 || cfg.rg_len <= 0) {
         return false;
     }
 
-    const int center_start = std::max(0, (cfg.pulse_num - 2) / 2);
-    const int center_count = std::min(2, cfg.pulse_num);
     const size_t nr = static_cast<size_t>(cfg.rg_len);
-    const size_t slice_size = static_cast<size_t>(center_count) * nr;
-    if (data.size() < static_cast<size_t>(cfg.pulse_num) * nr || slice_size == 0) {
+    if (data.size() < static_cast<size_t>(W) * nr) {
         return false;
     }
-
-    std::vector<std::complex<double>> slice(slice_size);
-    for (int p = 0; p < center_count; ++p) {
-        const size_t src_base = static_cast<size_t>(center_start + p) * nr;
-        const size_t dst_base = static_cast<size_t>(p) * nr;
-        std::copy_n(data.begin() + static_cast<std::ptrdiff_t>(src_base), nr, slice.begin() + static_cast<std::ptrdiff_t>(dst_base));
-    }
-
-    Config local_cfg = cfg;
-    local_cfg.pulse_num = center_count;
-    local_cfg.fd_res = (center_count > 0) ? (cfg.PRF / double(center_count)) : cfg.fd_res;
 
     std::vector<double> faAxis;
     double fa_tmp = 0.0;
-    if (!computeDoppler(slice, 1, local_cfg, faAxis, fa_tmp, 0.0, 0.0)) {
+    if (!computeDoppler(data, 1, cfg, faAxis, fa_tmp, 0.0, 0.0)) {
         return false;
     }
 
     fd_ctr = fa_tmp;
-    start_pulse = center_start;
-    window_pulses = center_count;
+    start_pulse = 0;
+    window_pulses = W;
     return true;
 }
 
@@ -384,7 +355,7 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     TIMING_SCOPE(processOnePeriod);
     Config cfg = cfg_; // 复制配置，局部修改
     // 0) 读取脉冲块（适配双文件/交织）
-    std::vector<std::complex<double>> data1, data2;
+    std::vector<std::complex<float>> data1, data2;
     std::vector<double> utc;
     std::vector<std::uint8_t> headers;
     std::vector<std::vector<double>> echoPosRaw;
@@ -402,27 +373,34 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         std::cerr << "读取脉冲块失败。" << std::endl;
         return false;
     }
+    if (cfg.INFO_Type) {
+        cfg.process_pulse_num = static_cast<int>(utc.size());
+    }
     DBG("读取脉冲块成功，脉冲数: " << utc.size());
     
+    bool data_on_gpu = false;
 
     // 如果没有脉压，则需要脉压
     if (!cfg.isPC)
     {
-        // 进行脉压处理（纯 CPU 路径）
-        bool pc_ok = pulseCompression(data1, data2, cfg);
+        data_on_gpu = pulseCompressionGpuResident(data1, data2, cfg);
+        bool pc_ok = data_on_gpu;
+        if (!pc_ok) {
+            pc_ok = pulseCompression(data1, data2, cfg);
+        }
         if (!pc_ok) {
             std::cerr << "脉压处理失败。" << std::endl;
             return false;
         }
-        DBG("脉压处理成功");
+        DBG(data_on_gpu ? "脉压处理成功，结果驻留GPU" : "脉压处理成功，结果位于CPU内存");
     }
     else
     {
         // 只进行抽取
         // 归一化 + 裁剪到 M，输出到 rc_out（W×M 行主）
-        std::vector<std::complex<double>> rc_out;
+        std::vector<std::complex<float>> rc_out;
         const int Lraw = cfg.pulse_len;
-        const int W = cfg.pulse_num;
+        const int W = effectivePulseNum(cfg);
         const int M1 = cfg.rg_len;
         const int Lraw2M = Lraw / M1;
         rc_out.resize((size_t)W * M1);
@@ -451,14 +429,15 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     cfg.fs = cfg.fs * cfg.rg_len / cfg.pulse_len;
     cfg.pulse_len = cfg.rg_len; // 更新脉冲长度为距离采样长度
     // 通用方位向抽取：cfg.pulse_dec 合 1 抽取
-    if (data1.size() != (size_t)cfg.pulse_num * cfg.rg_len ||
-        data2.size() != (size_t)cfg.pulse_num * cfg.rg_len)
+    if (!data_on_gpu &&
+        (data1.size() != (size_t)effectivePulseNum(cfg) * cfg.rg_len ||
+         data2.size() != (size_t)effectivePulseNum(cfg) * cfg.rg_len))
     {
         ERR("数据尺寸不匹配脉冲数和距离长度，无法继续处理。");
         return false;
     }
 
-    const int W_orig = cfg.pulse_num;
+    const int W_orig = effectivePulseNum(cfg);
     const int M = cfg.rg_len;
     const int dec = cfg.pulse_dec;
     if (dec <= 0)
@@ -468,19 +447,35 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     }
     if (W_orig % dec != 0)
     {
-        ERR("cfg.pulse_num 不是" << dec << "的倍数，无法进行" << dec << "合 1 抽取（当前 pulse_num = " << W_orig << "）。");
+        ERR("处理脉冲数不是" << dec << "的倍数，无法进行" << dec << "合 1 抽取（当前 process_pulse_num = " << W_orig << "）。");
         return false;
     }
 
     const int W_new = W_orig / dec;
-    if (W_new == W_orig)
+    if (data_on_gpu)
+    {
+        if (!cuda_stage_az_decimate_async(W_orig, M, dec)) {
+            ERR("GPU 方位向抽取失败。");
+            return false;
+        }
+        data1.clear();
+        data2.clear();
+        data1.shrink_to_fit();
+        data2.shrink_to_fit();
+        if (W_new == W_orig) {
+            DBG("cfg.pulse_dec == 1，GPU数据保持原方位长度。");
+        } else {
+            DBG("GPU 方位向" << dec << " 合 1 抽取完成：处理脉冲数 " << W_orig << " -> " << W_new);
+        }
+    }
+    else if (W_new == W_orig)
     {
         DBG("cfg.pulse_dec == 1，跳过抽取。");
     }
     else
     {
         // 临时缓冲，复用（data1 先处理，后处理 data2）
-        std::vector<std::complex<double>> tmp((size_t)W_new * M);
+        std::vector<std::complex<float>> tmp((size_t)W_new * M);
 
         // 处理 data1
         for (int k_new = 0; k_new < W_new; ++k_new)
@@ -489,7 +484,7 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
             size_t in_base = (size_t)(dec * k_new) * M;
             for (int m = 0; m < M; ++m)
             {
-                std::complex<double> acc = 0.0;
+                std::complex<float> acc = 0.0f;
                 for (int d = 0; d < dec; ++d)
                 {
                     acc += data1[in_base + (size_t)d * M + m];
@@ -500,14 +495,14 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         data1.swap(tmp);
 
         // 复用 tmp 处理 data2（重新分配确保大小正确）
-        tmp.assign((size_t)W_new * M, std::complex<double>(0.0, 0.0));
+        tmp.assign((size_t)W_new * M, std::complex<float>(0.0f, 0.0f));
         for (int k_new = 0; k_new < W_new; ++k_new)
         {
             size_t out_base = (size_t)k_new * M;
             size_t in_base = (size_t)(dec * k_new) * M;
             for (int m = 0; m < M; ++m)
             {
-                std::complex<double> acc = 0.0;
+                std::complex<float> acc = 0.0f;
                 for (int d = 0; d < dec; ++d)
                 {
                     acc += data2[in_base + (size_t)d * M + m];
@@ -521,7 +516,7 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     // ========== 抽取 utc 同步 ==========
     if ((int)utc.size() != W_orig)
     {
-        ERR("utc 长度" << utc.size() << " 与 cfg.pulse_num(" << W_orig << ") 不匹配，无法同步抽取。");
+        ERR("utc 长度" << utc.size() << " 与处理脉冲数(" << W_orig << ") 不匹配，无法同步抽取。");
         return false;
     }
     std::vector<double> utc_tmp(W_new);
@@ -539,9 +534,9 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     utc.swap(utc_tmp);
 
     // 更新脉冲数
-    cfg.pulse_num = W_new;
+    cfg.process_pulse_num = W_new;
     cfg.PRF = cfg.PRF / dec; // 更新 PRF
-    DBG("方位向" << dec << " 合 1 抽取完成：脉冲数 " << W_orig << " -> " << cfg.pulse_num << "，距离长度 M = " << M << "。");
+    DBG("方位向" << dec << " 合 1 抽取完成：处理脉冲数 " << W_orig << " -> " << cfg.process_pulse_num << "，距离长度 M = " << M << "。");
 
     // 从帧头提取 UTC
     double utc_mean = 0.0;
@@ -568,9 +563,17 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
 
     // 通道2 乘以系数，补偿幅度差异
     double coef = cfg.calib_coef; // 可根据实际情况调整
-    const size_t N = data2.size();
-    for (size_t i = 0; i < N; ++i)
-        data2[i] *= coef;
+    if (data_on_gpu) {
+        if (!cuda_scale_channel2_async(static_cast<float>(coef),
+                                       static_cast<size_t>(effectivePulseNum(cfg)) * static_cast<size_t>(cfg.rg_len))) {
+            ERR("GPU 通道2幅度校准失败。");
+            return false;
+        }
+    } else {
+        const size_t N = data2.size();
+        for (size_t i = 0; i < N; ++i)
+            data2[i] *= coef;
+    }
 
     // 1) 飞机位姿/速度
     GMTIOutput::Plane plane;
@@ -591,13 +594,30 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     }
 
     // 2) 多普勒中心 & 动态支撑域
-    double fa_ctr;
+    double fa_ctr = 0.0;
     std::vector<double> faAxis;
-    double angle_deg = GMTIProcessor::estimateSquintAngleDeg(data1, plane, cfg);
+    double angle_deg = 0.0;
+    if (data_on_gpu) {
+        if (!cuda_compute_fd_ctr_from_d1(1, cfg, fa_ctr)) {
+            ERR("GPU 多普勒中心估计失败。");
+            return false;
+        }
+        angle_deg = GMTIProcessor::estimateSquintAngleDeg(plane, cfg, fa_ctr);
+        const size_t axisN = static_cast<size_t>(effectivePulseNum(cfg));
+        faAxis.resize(axisN);
+        const double df = (axisN > 0) ? (cfg.PRF / static_cast<double>(axisN)) : 0.0;
+        for (size_t i = 0; i < axisN; ++i) {
+            faAxis[i] = -0.5 * cfg.PRF + static_cast<double>(i) * df + fa_ctr;
+        }
+    } else {
+        angle_deg = GMTIProcessor::estimateSquintAngleDeg(data1, plane, cfg);
+    }
     double theta_deg = angle_deg + theta_sq; // 斜视角（GMTI 内部估计）+ 帧内方位修正
     DBG("GMTI estimated angle_deg = " << angle_deg << " deg");
 
-    computeDoppler(data1, 1, cfg, faAxis, fa_ctr, plane.V, theta_deg);
+    if (!data_on_gpu) {
+        computeDoppler(data1, 1, cfg, faAxis, fa_ctr, plane.V, theta_deg);
+    }
     DBG("多普勒中心计算成功: fa_ctr=" << fa_ctr);
 
     // 动态支撑域
@@ -631,22 +651,24 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     int skipInt_theory = static_cast<int>(std::round(delta_t * PRF));
     DBG("理论 skipInt = " << skipInt_theory);
 
-    int skipInt = 1;
+    int skipInt = 0;
     std::vector<std::complex<double>> F1, F2, F1_r, F2_r;
-    const size_t Na = static_cast<size_t>(cfg.pulse_num);
+    const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
 
-    std::vector<std::complex<float>> data1_f(Na * Nr);
-    std::vector<std::complex<float>> data2_f(Na * Nr);
-    for (size_t i = 0; i < data1_f.size(); ++i) {
-        data1_f[i] = std::complex<float>(static_cast<float>(data1[i].real()), static_cast<float>(data1[i].imag()));
-        data2_f[i] = std::complex<float>(static_cast<float>(data2[i].real()), static_cast<float>(data2[i].imag()));
+    if (!data_on_gpu) {
+        cuda_upload_async(data1, data2, Na, Nr);
     }
 
-    cuda_upload_async(data1_f, data2_f, Na, Nr);
-    cuda_stage_align_async(skipInt, Na, Nr);
-    cuda_stage_fft_async(Na, Nr);
-    cuda_stage_dbs_async(static_cast<float>(fa_ctr), Na, Nr);
+    if (!cuda_stage_align_async(skipInt, Na, Nr)) {
+        return false;
+    }
+    if (!cuda_stage_fft_async(Na, Nr)) {
+        return false;
+    }
+    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr)) {
+        return false;
+    }
 
     double fa2 = unwrap_prf_to_model(fa_ctr, cfg.PRF, theta_deg, plane.V, cfg.fc); // 解除模糊
     double fa_shift = fa2 - fa_ctr;
@@ -683,7 +705,7 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     // 对消
     cuda_stage_align_async(skipInt_theory, Na, Nr);
     cuda_stage_fft_async(Na, Nr);
-    cuda_stage_dbs_async(static_cast<float>(fa_ctr), Na, Nr);
+    cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr);
     if (rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
         cuda_apply_rg_correction_async(phi_fit, Na, Nr);
     }
@@ -705,8 +727,8 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     )) return false;
 
     // --- 10) CFAR 处理 ---
-    const int band_st = std::max(0, std::min(az_st, cfg.pulse_num - 1));
-    const int band_ed = std::max(0, std::min(az_ed, cfg.pulse_num - 1));
+    const int band_st = std::max(0, std::min(az_st, effectivePulseNum(cfg) - 1));
+    const int band_ed = std::max(0, std::min(az_ed, effectivePulseNum(cfg) - 1));
     std::vector<int> prow, pcol;
     std::vector<float> mydata;
     int cfar_bnum = 16; // 背景单元数
@@ -937,6 +959,16 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         const double target_azimuth_deg = normalize_azimuth_deg(std::atan2(dN, dE) * 180.0 / M_PI);  // 东为0°, 逆时针为正
         // 相对方向：顺时针为正 => 计算 plane - target，再映射到 [-180,180]
         const double direction = wrap180_deg(plane.V_angle - target_azimuth_deg);
+        const double beam_center_dir = beam_center_relative_dir_deg(cfg.squint_side, theta_deg);
+        const double beam_half_width = location_beam_gate_deg(cfg);
+        const double beam_dir_err = wrap180_deg(direction - beam_center_dir);
+        if (std::abs(beam_dir_err) > beam_half_width) {
+            DBG("目标 " << i << " 因方向超出波束被剔除: direction=" << direction
+                        << " beam_center_dir=" << beam_center_dir
+                        << " err=" << beam_dir_err
+                        << " gate=" << beam_half_width);
+            continue;
+        }
         const double range = std::sqrt(dE * dE + dN * dN);
         
         // debug printing removed
@@ -973,7 +1005,7 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
                                                 FusionGroupContext &ctx)
 {
     Config cfg = cfg_;
-    std::vector<std::complex<double>> data1, data2;
+    std::vector<std::complex<float>> data1, data2;
     std::vector<double> utc;
     std::vector<std::vector<double>> echoPosRaw;
     double theta_sq = 0.0;
@@ -987,17 +1019,26 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     if (!readSuccess) {
         return false;
     }
+    if (cfg.INFO_Type) {
+        cfg.process_pulse_num = static_cast<int>(utc.size());
+    }
 
+    bool data_on_gpu = false;
     if (!cfg.isPC) {
-        if (!pulseCompression(data1, data2, cfg)) {
+        data_on_gpu = pulseCompressionGpuResident(data1, data2, cfg);
+        bool pc_ok = data_on_gpu;
+        if (!pc_ok) {
+            pc_ok = pulseCompression(data1, data2, cfg);
+        }
+        if (!pc_ok) {
             return false;
         }
     } else {
         const int Lraw = cfg.pulse_len;
-        const int W = cfg.pulse_num;
+        const int W = effectivePulseNum(cfg);
         const int M1 = cfg.rg_len;
         const int Lraw2M = Lraw / M1;
-        std::vector<std::complex<double>> rc_out((size_t)W * M1);
+        std::vector<std::complex<float>> rc_out((size_t)W * M1);
         for (int k = 0; k < W; ++k) {
             for (int m = 0; m < M1; ++m) {
                 rc_out[(size_t)k * M1 + m] = data1[(size_t)k * Lraw + m * Lraw2M];
@@ -1005,7 +1046,7 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
         }
         data1.swap(rc_out);
 
-        rc_out.assign((size_t)W * M1, std::complex<double>(0.0, 0.0));
+        rc_out.assign((size_t)W * M1, std::complex<float>(0.0f, 0.0f));
         for (int k = 0; k < W; ++k) {
             for (int m = 0; m < M1; ++m) {
                 rc_out[(size_t)k * M1 + m] = data2[(size_t)k * Lraw + m * Lraw2M];
@@ -1017,20 +1058,28 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     cfg.fs = cfg.fs * cfg.rg_len / cfg.pulse_len;
     cfg.pulse_len = cfg.rg_len;
 
-    const int W_orig = cfg.pulse_num;
+    const int W_orig = effectivePulseNum(cfg);
     const int M = cfg.rg_len;
     const int dec = cfg.pulse_dec;
     if (dec <= 0 || W_orig % dec != 0) {
         return false;
     }
     const int W_new = W_orig / dec;
-    if (W_new != W_orig) {
-        std::vector<std::complex<double>> tmp((size_t)W_new * M);
+    if (data_on_gpu) {
+        if (!cuda_stage_az_decimate_async(W_orig, M, dec)) {
+            return false;
+        }
+        data1.clear();
+        data2.clear();
+        data1.shrink_to_fit();
+        data2.shrink_to_fit();
+    } else if (W_new != W_orig) {
+        std::vector<std::complex<float>> tmp((size_t)W_new * M);
         for (int k_new = 0; k_new < W_new; ++k_new) {
             const size_t out_base = (size_t)k_new * M;
             const size_t in_base = (size_t)(dec * k_new) * M;
             for (int m = 0; m < M; ++m) {
-                std::complex<double> acc = 0.0;
+                std::complex<float> acc = 0.0f;
                 for (int d = 0; d < dec; ++d) {
                     acc += data1[in_base + (size_t)d * M + m];
                 }
@@ -1039,12 +1088,12 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
         }
         data1.swap(tmp);
 
-        tmp.assign((size_t)W_new * M, std::complex<double>(0.0, 0.0));
+        tmp.assign((size_t)W_new * M, std::complex<float>(0.0f, 0.0f));
         for (int k_new = 0; k_new < W_new; ++k_new) {
             const size_t out_base = (size_t)k_new * M;
             const size_t in_base = (size_t)(dec * k_new) * M;
             for (int m = 0; m < M; ++m) {
-                std::complex<double> acc = 0.0;
+                std::complex<float> acc = 0.0f;
                 for (int d = 0; d < dec; ++d) {
                     acc += data2[in_base + (size_t)d * M + m];
                 }
@@ -1052,7 +1101,9 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
             }
         }
         data2.swap(tmp);
+    }
 
+    if (W_new != W_orig) {
         std::vector<double> utc_tmp(W_new);
         for (int k_new = 0; k_new < W_new; ++k_new) {
             double acc = 0.0;
@@ -1062,7 +1113,7 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
             utc_tmp[k_new] = acc / static_cast<double>(dec);
         }
         utc.swap(utc_tmp);
-        cfg.pulse_num = W_new;
+        cfg.process_pulse_num = W_new;
         cfg.PRF = cfg.PRF / dec;
     }
 
@@ -1082,8 +1133,15 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     }
 
     const double coef = cfg.calib_coef;
-    for (auto &v : data2) {
-        v *= coef;
+    if (data_on_gpu) {
+        if (!cuda_scale_channel2_async(static_cast<float>(coef),
+                                       static_cast<size_t>(effectivePulseNum(cfg)) * static_cast<size_t>(cfg.rg_len))) {
+            return false;
+        }
+    } else {
+        for (auto &v : data2) {
+            v *= coef;
+        }
     }
 
     GMTIOutput::Plane plane;
@@ -1101,11 +1159,31 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
 
     std::vector<double> faAxis;
     double fa_ctr = 0.0;
-    const double angle_deg = GMTIProcessor::estimateSquintAngleDeg(data1, plane, cfg);
+    double angle_deg = 0.0;
+    if (data_on_gpu) {
+        if (!cuda_compute_fd_ctr_from_d1(1, cfg, fa_ctr)) {
+            return false;
+        }
+        angle_deg = GMTIProcessor::estimateSquintAngleDeg(plane, cfg, fa_ctr);
+        const size_t axisN = static_cast<size_t>(effectivePulseNum(cfg));
+        faAxis.resize(axisN);
+        const double df = (axisN > 0) ? (cfg.PRF / static_cast<double>(axisN)) : 0.0;
+        for (size_t i = 0; i < axisN; ++i) {
+            faAxis[i] = -0.5 * cfg.PRF + static_cast<double>(i) * df + fa_ctr;
+        }
+    } else {
+        angle_deg = GMTIProcessor::estimateSquintAngleDeg(data1, plane, cfg);
+    }
     const double theta_deg = angle_deg + theta_sq;
-    if (!computeDoppler(data1, 1, cfg, faAxis, fa_ctr, plane.V, theta_deg)) {
+    if (!data_on_gpu && !computeDoppler(data1, 1, cfg, faAxis, fa_ctr, plane.V, theta_deg)) {
         return false;
     }
+    std::cout << "[fusion][fd] period=" << periodIdx
+              << " theta_sq=" << theta_sq
+              << " angle_from_fd=" << angle_deg
+              << " theta_for_support=" << theta_deg
+              << " fd_wrapped=" << fa_ctr
+              << " PRF=" << cfg.PRF << std::endl;
 
     int az_center = 0, az_st = 0, az_ed = 0, rg_st = 0, rg_ed = 0;
     double fd_st = 0.0, fd_ed = 0.0, BW_az = 0.0;
@@ -1124,27 +1202,22 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     const double baseline = cfg.d_channel;
     const double delta_t = (plane.V > 0.0) ? (baseline / plane.V) : 0.0;
     const int skipInt_theory = static_cast<int>(std::round(delta_t * cfg.PRF));
-    const int skipInt = 1;
+    const int skipInt = 0;
 
-    const size_t Na = static_cast<size_t>(cfg.pulse_num);
+    const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
-    std::vector<std::complex<float>> data1_f(Na * Nr);
-    std::vector<std::complex<float>> data2_f(Na * Nr);
-    for (size_t i = 0; i < data1_f.size(); ++i) {
-        data1_f[i] = std::complex<float>(static_cast<float>(data1[i].real()), static_cast<float>(data1[i].imag()));
-        data2_f[i] = std::complex<float>(static_cast<float>(data2[i].real()), static_cast<float>(data2[i].imag()));
+    if (!data_on_gpu) {
+        if (!cuda_upload_async(data1, data2, Na, Nr)) {
+            return false;
+        }
     }
-
-    if (!cuda_upload_async(data1_f, data2_f, Na, Nr)) {
-        return false;
-    }
-    if (!cuda_stage_align_async(0, Na, Nr)) {
+    if (!cuda_stage_align_async(skipInt, Na, Nr)) {
         return false;
     }
     if (!cuda_stage_fft_async(Na, Nr)) {
         return false;
     }
-    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), Na, Nr)) {
+    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr)) {
         return false;
     }
 
@@ -1162,16 +1235,6 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     beamMeta.lambda = (cfg.lambda > 0.0) ? cfg.lambda : (C / cfg.fc);
 
     if (!exportDbsCacheAfterRecenter(cfg, beamMeta, slot, Na, Nr, ctx.rd, ctx.meta)) {
-        return false;
-    }
-
-    if (!cuda_stage_align_async(skipInt, Na, Nr)) {
-        return false;
-    }
-    if (!cuda_stage_fft_async(Na, Nr)) {
-        return false;
-    }
-    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), Na, Nr)) {
         return false;
     }
 
@@ -1204,7 +1267,7 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     if (!cuda_stage_fft_async(Na, Nr)) {
         return false;
     }
-    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), Na, Nr)) {
+    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr)) {
         return false;
     }
     if (!rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
@@ -1224,8 +1287,8 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
         return false;
     }
 
-    const int band_st = std::max(0, std::min(az_st, cfg.pulse_num - 1));
-    const int band_ed = std::max(0, std::min(az_ed, cfg.pulse_num - 1));
+    const int band_st = std::max(0, std::min(az_st, effectivePulseNum(cfg) - 1));
+    const int band_ed = std::max(0, std::min(az_ed, effectivePulseNum(cfg) - 1));
     std::vector<float> mydata;
     std::vector<std::complex<float>> CSI_out;
     bool cfar_ok = dpca_cfar2_fast_cuda(CSI_out, band_st, band_ed,
@@ -1264,6 +1327,8 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     if (!cfar_ok) {
         return false;
     }
+    const size_t cfar_hits = static_cast<size_t>(
+        std::count_if(mydata.begin(), mydata.end(), [](float v) { return v > 0.0f; }));
 
     std::vector<int> prow_new, pcol_new;
     std::vector<float> refined_mydata;
@@ -1305,6 +1370,14 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     if (!targetDetection) {
         return false;
     }
+
+    std::cout << "[fusion][detect] beam=" << periodIdx
+              << " slot=" << slot
+              << " cfar_hits=" << cfar_hits
+              << " clusters=" << prow_new.size()
+              << " selected=" << targetSel.prow.size()
+              << " min_points=" << cfg.min_points
+              << " pf=" << cfg.pf << std::endl;
 
     beamMeta.phase_slope = p_38[0];
     beamMeta.phase_intercept = p_38[1];
@@ -1456,7 +1529,8 @@ bool GMTIProcessor::extractPlanePos(const std::vector<double> &t_utc,
     //   注：若 t_utc 非等间隔，用下行替代：
     //   const double dt = (t_utc.back() - t_utc.front()); // 秒
     //   plane.Vx = (E.back() - E.front()) / dt; ...
-    const double scale = (cfg.pulse_num > 0) ? (cfg.PRF / double(cfg.pulse_num)) : 0.0;
+    const int W = effectivePulseNum(cfg);
+    const double scale = (W > 0) ? (cfg.PRF / double(W)) : 0.0;
     double Vx = (E.back() - E.front()) * scale;
     double Vy = (N.back() - N.front()) * scale;
     double Vz = (alt_m.back() - alt_m.front()) * scale;
@@ -1472,17 +1546,19 @@ bool GMTIProcessor::extractPlanePos(const std::vector<double> &t_utc,
 bool GMTIProcessor::extractPlanePVFromEcho(const Config &cfg,
                                            GMTIOutput::Plane &plane)
 {
-    std::vector<std::complex<double>> data1, data2;
+    Config local_cfg = cfg;
+    std::vector<std::complex<float>> data1, data2;
     std::vector<double> utc;
     std::vector<std::vector<double>> echoPosRaw;
     double theta_sq = 0.0;
 
-    if (!readPulseBlockNewProtocol(cfg, 1, data1, data2, utc, theta_sq, echoPosRaw)) {
+    if (!readPulseBlockNewProtocol(local_cfg, 1, data1, data2, utc, theta_sq, echoPosRaw)) {
         std::cerr << "extractPlanePVFromEcho: failed to read new-protocol echo" << std::endl;
         return false;
     }
+    local_cfg.process_pulse_num = static_cast<int>(utc.size());
 
-    if (!extractPlanePos(utc, echoPosRaw, cfg, plane)) {
+    if (!extractPlanePos(utc, echoPosRaw, local_cfg, plane)) {
         std::cerr << "extractPlanePVFromEcho: failed to extract plane from embedded echo pose" << std::endl;
         return false;
     }
@@ -1490,10 +1566,9 @@ bool GMTIProcessor::extractPlanePVFromEcho(const Config &cfg,
     return true;
 }
 
-// Compute dataset-level squint by reading center period(s) and estimating fd_ctr
-// from center-window data. This replicates DBS semantics: estimate fd_ctr from
-// the central period(s), unwrap PRF ambiguity, convert to squint angle and
-// average when two centers exist.
+// Compute dataset-level squint by reading center period(s) and estimating fd_ctr.
+// This replicates DBS semantics: estimate fd_ctr from the central period(s),
+// unwrap PRF ambiguity, convert to squint angle and average when two centers exist.
 bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &periodList,
                                                    const Config &cfg,
                                                    const std::vector<std::vector<double>> &posRaw,
@@ -1514,7 +1589,7 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
 
     std::vector<double> angles_deg;
     for (int per : centers) {
-        std::vector<std::complex<double>> data1, data2;
+        std::vector<std::complex<float>> data1, data2;
         std::vector<double> utc;
         std::vector<std::vector<double>> echoPosRaw;
         double theta_sq_local = 0.0;
@@ -1532,6 +1607,9 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
 
         // Range-compress if necessary
         Config local_cfg = cfg;
+        if (local_cfg.INFO_Type) {
+            local_cfg.process_pulse_num = static_cast<int>(utc.size());
+        }
         if (!local_cfg.isPC) {
             if (!pulseCompression(data1, data2, local_cfg)) {
                 std::cerr << "computeDatasetSquintFromCenter: pulseCompression failed for period " << per << std::endl;
@@ -1540,17 +1618,17 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
         } else {
             // Extract/normalize path (same as processOnePeriod extraction)
             const int Lraw = local_cfg.pulse_len;
-            const int W = local_cfg.pulse_num;
+            const int W = effectivePulseNum(local_cfg);
             const int M1 = local_cfg.rg_len;
             const int Lraw2M = Lraw / M1;
-            std::vector<std::complex<double>> rc_out((size_t)W * M1);
+            std::vector<std::complex<float>> rc_out((size_t)W * M1);
             for (int k = 0; k < W; ++k) {
                 for (int m = 0; m < M1; ++m) {
                     rc_out[(size_t)k * M1 + m] = data1[(size_t)k * Lraw + m * Lraw2M];
                 }
             }
             data1.swap(rc_out);
-            rc_out.assign((size_t)W * M1, std::complex<double>(0.0,0.0));
+            rc_out.assign((size_t)W * M1, std::complex<float>(0.0f,0.0f));
             for (int k = 0; k < W; ++k) {
                 for (int m = 0; m < M1; ++m) {
                     rc_out[(size_t)k * M1 + m] = data2[(size_t)k * Lraw + m * Lraw2M];
@@ -1569,7 +1647,7 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
             std::cerr << "computeDatasetSquintFromCenter: invalid pulse_dec" << std::endl;
             return false;
         }
-        const int W_orig = local_cfg.pulse_num;
+        const int W_orig = effectivePulseNum(local_cfg);
         if (W_orig % dec != 0) {
             std::cerr << "computeDatasetSquintFromCenter: pulse_num not divisible by pulse_dec" << std::endl;
             return false;
@@ -1577,29 +1655,29 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
         const int W_new = W_orig / dec;
         if (W_new != W_orig) {
             // decimate data1 in-place
-            std::vector<std::complex<double>> tmp((size_t)W_new * local_cfg.rg_len);
+            std::vector<std::complex<float>> tmp((size_t)W_new * local_cfg.rg_len);
             for (int k_new = 0; k_new < W_new; ++k_new) {
                 size_t out_base = (size_t)k_new * local_cfg.rg_len;
                 size_t in_base = (size_t)(dec * k_new) * local_cfg.rg_len;
                 for (int m = 0; m < local_cfg.rg_len; ++m) {
-                    std::complex<double> acc = 0.0;
+                    std::complex<float> acc = 0.0f;
                     for (int d = 0; d < dec; ++d) acc += data1[in_base + (size_t)d * local_cfg.rg_len + m];
                     tmp[out_base + m] = acc;
                 }
             }
             data1.swap(tmp);
-            tmp.assign((size_t)W_new * local_cfg.rg_len, std::complex<double>(0.0,0.0));
+            tmp.assign((size_t)W_new * local_cfg.rg_len, std::complex<float>(0.0f,0.0f));
             for (int k_new = 0; k_new < W_new; ++k_new) {
                 size_t out_base = (size_t)k_new * local_cfg.rg_len;
                 size_t in_base = (size_t)(dec * k_new) * local_cfg.rg_len;
                 for (int m = 0; m < local_cfg.rg_len; ++m) {
-                    std::complex<double> acc = 0.0;
+                    std::complex<float> acc = 0.0f;
                     for (int d = 0; d < dec; ++d) acc += data2[in_base + (size_t)d * local_cfg.rg_len + m];
                     tmp[out_base + m] = acc;
                 }
             }
             data2.swap(tmp);
-            local_cfg.pulse_num = W_new;
+            local_cfg.process_pulse_num = W_new;
             local_cfg.PRF = local_cfg.PRF / dec;
         }
 
@@ -1618,7 +1696,7 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
             return false;
         }
 
-        // Estimate center fd_ctr from data (center window)
+        // Estimate wrapped fd_ctr from data.
         double fd_ctr = 0.0;
         int start_pulse = 0, window_pulses = 0;
         if (!estimateCenterFdCtrFromData(data1, local_cfg, fd_ctr, start_pulse, window_pulses)) {
@@ -1630,7 +1708,7 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
         double fd_unwrapped = unwrap_prf_to_model(fd_ctr, local_cfg.PRF, theta_sq_local, plane.V, local_cfg.fc);
 
         // Convert to squint angle (deg)
-        const double lambda = (local_cfg.lambda > 0.0) ? local_cfg.lambda : (3.0e8 / (local_cfg.fc * 1e9));
+        const double lambda = (local_cfg.lambda > 0.0) ? local_cfg.lambda : (C / local_cfg.fc);
         if (plane.V <= 0.0 || lambda <= 0.0) {
             std::cerr << "computeDatasetSquintFromCenter: invalid V/lambda" << std::endl;
             return false;
@@ -1717,7 +1795,7 @@ bool GMTIProcessor::exportDbsCacheAfterRecenter(const Config& cfg,
     }
 
     std::vector<float> fd_axis(Na, 0.0f);
-    const double df = (Na > 1) ? (cfg.PRF / static_cast<double>(Na - 1)) : 0.0;
+    const double df = (Na > 0) ? (cfg.PRF / static_cast<double>(Na)) : 0.0;
     for (size_t r = 0; r < Na; ++r) {
         fd_axis[r] = static_cast<float>(-0.5 * cfg.PRF + static_cast<double>(r) * df);
     }
@@ -1753,7 +1831,7 @@ bool GMTIProcessor::exportDbsCacheAfterRecenter(const Config& cfg,
 bool GMTIProcessor::debug_compare_range(const Config &cfg, int periodIdx)
 {
     Config local_cfg = cfg;
-    std::vector<std::complex<double>> data1, data2;
+    std::vector<std::complex<float>> data1, data2;
     std::vector<double> utc;
     double theta_sq = 0.0;
 
@@ -1764,19 +1842,19 @@ bool GMTIProcessor::debug_compare_range(const Config &cfg, int periodIdx)
 
     if (!local_cfg.isPC) {
         // CPU reference path
+        std::vector<std::complex<double>> data1_d(data1.size());
+        for (size_t i = 0; i < data1.size(); ++i) {
+            data1_d[i] = std::complex<double>(data1[i].real(), data1[i].imag());
+        }
         std::vector<std::complex<double>> cpu_out;
-        if (!rangeCompressFFT(local_cfg, data1, cpu_out)) {
+        if (!rangeCompressFFT(local_cfg, data1_d, cpu_out)) {
             std::cerr << "debug_compare_range: CPU rangeCompressFFT failed" << std::endl;
             return false;
         }
 
         // GPU cuFFT path (host-side convenience wrapper)
-        std::vector<std::complex<float>> gpu_in(data1.size());
-        for (size_t i = 0; i < data1.size(); ++i) {
-            gpu_in[i] = std::complex<float>((float)data1[i].real(), (float)data1[i].imag());
-        }
         std::vector<std::complex<float>> gpu_out;
-        if (!rangeCompressCUFFT(gpu_in, gpu_out, local_cfg)) {
+        if (!rangeCompressCUFFT(data1, gpu_out, local_cfg)) {
             std::cerr << "debug_compare_range: GPU rangeCompressCUFFT failed" << std::endl;
             return false;
         }

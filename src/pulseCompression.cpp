@@ -78,7 +78,7 @@ bool rangeCompressFFT(const Config& P,
                       const std::vector<std::complex<double>>& in,
                       std::vector<std::complex<double>>& rc_out)
 {
-  const int W    = P.pulse_num;
+  const int W    = effectivePulseNum(P);
   const int Lraw = P.pulse_len;
   const int M    = P.rg_len;
 
@@ -170,7 +170,7 @@ bool readBeamRawFloat(const Config& P,
 {
   const int hdr  = P.info_len;
   const int Lraw = P.pulse_len;
-  const int W    = P.pulse_num;
+  const int W    = effectivePulseNum(P);
 
   const size_t bytesIQperPulse = (size_t)Lraw * 2 /*I/Q*/ * sizeof(float);
   const size_t stride          = (size_t)hdr + bytesIQperPulse;
@@ -247,7 +247,7 @@ bool readBeamRaw(const Config& P,
 {
   const int hdr  = P.info_len;
   const int Lraw = P.pulse_len;
-  const int W    = P.pulse_num;
+  const int W    = effectivePulseNum(P);
 
   const size_t bytesIQperPulse = (size_t)Lraw * 2 /*I/Q*/ * sizeof(float);
   const size_t stride          = (size_t)hdr + bytesIQperPulse;

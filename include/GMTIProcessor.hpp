@@ -13,7 +13,7 @@
 #include <string>
 #include <cstdint>
 #include <limits>
-#include "tinyxml.h"
+#include "xml/tinyxml.h"
 #include <array>
 #include <cstddef>
 #include <cuda_runtime.h>
@@ -207,7 +207,7 @@ public:
                                         double &out_squint);
 
     // Global squint handling: allow computing/setting a dataset-wide squint angle
-    static double estimateSquintAngleDeg(const std::vector<std::complex<double>> &data,
+    static double estimateSquintAngleDeg(const std::vector<std::complex<float>> &data,
                                          const GMTIOutput::Plane &plane,
                                          const Config &cfg);
     static double estimateSquintAngleDeg(const GMTIOutput::Plane &plane, const Config &cfg, double fd_ctr = std::numeric_limits<double>::quiet_NaN());
@@ -220,17 +220,21 @@ private:
     bool openEchoFiles(const Config &cfg, std::ifstream &fid1, std::ifstream &fid2);
     bool readPulseBlock(const Config &cfg,
                         int beamskip,
-                        std::vector<std::complex<double>> &data1,
-                        std::vector<std::complex<double>> &data2,
+                        std::vector<std::complex<float>> &data1,
+                        std::vector<std::complex<float>> &data2,
                         std::vector<double> &utc,
                         double& theta_sq);
-    bool pulseCompression(std::vector<std::complex<double>> &data1, std::vector<std::complex<double>> &data2, const Config &cfg);
+    bool pulseCompression(std::vector<std::complex<float>> &data1, std::vector<std::complex<float>> &data2, const Config &cfg);
+    bool pulseCompressionGpuResident(const std::vector<std::complex<float>> &data1,
+                                     const std::vector<std::complex<float>> &data2,
+                                     const Config &cfg);
     // GPU implementation of range compression using cuFFT (float kernels)
     bool rangeCompressCUFFT(const std::vector<std::complex<float>> &in,
                             std::vector<std::complex<float>> &rc_out,
                             const Config &cfg);
     // Device-only variant: operate on buffers already uploaded to GPU (gpu_ptrs_.d1 -> gpu_ptrs_.a1)
     bool rangeCompressCUFFT_device(int Lraw, int M, const Config &cfg);
+    bool rangeCompressCUFFT_device_pair(int Lraw, int M, const Config &cfg);
     // Debug helper: download compressed data from device buffer d1 (float complex)
     bool debug_download_d1(std::vector<std::complex<float>> &out, size_t total);
     bool extractUTC(const std::vector<uint8_t> &headers, const Config &cfg, std::vector<double> &utc);
@@ -467,14 +471,13 @@ private:
     // 默认策略：按 st..ed..skip 取“中间 3 个”（或尽量多）
     static bool makeDefaultRangeList(const Config& cfg, std::vector<int>& periodList);
 
-    // ROI: [lat1,lng1, lat2,lng2, lat3,lng3, lat4,lng4] (单位：度)
-    // plane: 需包含 lat_deg, lng_deg（飞机位置，度）与 V_angle_deg（航向角，度；东为0°，逆时针为正）
-    // 输出 periodList：3 个波位号（1..51）
-    bool makePeriodListROI51(const std::array<double,4>& roi_ll_deg,
+    // ROI: 当前使用 [lat,lng,...] 的首个点作为 ROI 参考点（单位：度）
+    // cfg: 提供高斯投影中央经线 L0、扫描角范围和 wavepos 边界/步进
+    // plane: 需包含 E/N（飞机投影坐标）与 V_angle（航向角，度；东为0°，逆时针为正）
+    // 输出 periodList：相邻波位号
+    bool makePeriodListROI51(const Config& cfg,
                              const GMTIOutput::Plane& plane,
-                             std::vector<int>& periodList,
-                             double scan_min_deg = -25.0,
-                             double scan_max_deg =  25.0);
+                             std::vector<int>& periodList);
 
     Config cfg_; // 私有成员 cfg_ 用来存储配置
     ColFFTTranspose colfft_; // 用于列 FFT 的对象
@@ -525,7 +528,10 @@ private:
     bool cuda_stage_fft_async(size_t Na, size_t Nr);
 
     // --- 第四阶段：DBS 中心化 ---
-    bool cuda_stage_dbs_async(float fa2, size_t Na, size_t Nr);
+    bool cuda_stage_dbs_async(float fa2, float prf, size_t Na, size_t Nr);
+    bool cuda_stage_az_decimate_async(int W_orig, int M, int dec);
+    bool cuda_scale_channel2_async(float coef, size_t total);
+    bool cuda_compute_fd_ctr_from_d1(int k, const Config& cfg, double& fd_ctr);
 
     bool exportDbsCacheAfterRecenter(const Config& cfg,
                                      const FusionBeamMeta& beamMeta,

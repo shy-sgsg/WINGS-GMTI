@@ -331,11 +331,12 @@ void fillHeaderAndIns(
 }
 
 void fillGmtiIqPayload(std::vector<uint8_t> &pkt,
-                       const std::vector<std::complex<double>> &ch1,
-                       const std::vector<std::complex<double>> &ch2,
+                       const std::vector<std::complex<float>> &ch1,
+                       const std::vector<std::complex<float>> &ch2,
                        int pulse_idx,
                        int pulse_len,
                        double iq_scale) {
+    (void)iq_scale;
     const int payload_start = 256;
     const int payload_bytes = static_cast<int>(pkt.size()) - payload_start;
     const int bytes_per_sample_2ch = 16; // ch1(float I,Q)=8 + ch2(float I,Q)=8
@@ -345,8 +346,8 @@ void fillGmtiIqPayload(std::vector<uint8_t> &pkt,
     const size_t row_off = static_cast<size_t>(pulse_idx) * static_cast<size_t>(pulse_len);
 
     for (int n = 0; n < copy_samples; ++n) {
-        const std::complex<double> &a = ch1[row_off + static_cast<size_t>(n)];
-        const std::complex<double> &b = ch2[row_off + static_cast<size_t>(n)];
+        const std::complex<float> &a = ch1[row_off + static_cast<size_t>(n)];
+        const std::complex<float> &b = ch2[row_off + static_cast<size_t>(n)];
         const size_t off = static_cast<size_t>(payload_start + n * bytes_per_sample_2ch);
 
         write_f32_le(pkt, off + 0, static_cast<float>(a.real()));
@@ -440,8 +441,8 @@ bool convertOldToNew(const ConvertConfig &cfg,
     const uint32_t prt_len = 256U + 4096U * 16U;
     std::cerr << "[DBG] using new PRT length=" << prt_len << " bytes (256 header + 4096 samples * 16 bytes/sample)\n";
 
-    std::vector<std::complex<double>> data1;
-    std::vector<std::complex<double>> data2;
+    std::vector<std::complex<float>> data1;
+    std::vector<std::complex<float>> data2;
     std::vector<double> utc;
     std::vector<double> fw_angle_deg;
     std::vector<uint8_t> packet(4096, 0);
@@ -449,15 +450,15 @@ bool convertOldToNew(const ConvertConfig &cfg,
     uint32_t prt_counter = 0;
 
     for (int beam_idx = start; beam_idx <= end; ++beam_idx) {
-        if (!readBeamRaw(rcfg, cfg.data_ch2.c_str(), beam_idx, data2, fw_angle_deg, utc)) {
-            std::cerr << "readBeamRaw failed on channel-2, beam=" << beam_idx << std::endl;
+        if (!readBeamRawFloat(rcfg, cfg.data_ch2.c_str(), beam_idx, data2, fw_angle_deg, utc)) {
+            std::cerr << "readBeamRawFloat failed on channel-2, beam=" << beam_idx << std::endl;
             return false;
         }
 
         std::vector<double> utc_ch1;
         std::vector<double> fw_angle_dummy;
-        if (!readBeamRaw(rcfg, cfg.data_ch1.c_str(), beam_idx, data1, fw_angle_dummy, utc_ch1)) {
-            std::cerr << "readBeamRaw failed on channel-1, beam=" << beam_idx << std::endl;
+        if (!readBeamRawFloat(rcfg, cfg.data_ch1.c_str(), beam_idx, data1, fw_angle_dummy, utc_ch1)) {
+            std::cerr << "readBeamRawFloat failed on channel-1, beam=" << beam_idx << std::endl;
             return false;
         }
 

@@ -28,7 +28,7 @@ bool GMTIProcessor::rangeCompressCUFFT(const std::vector<std::complex<float>> &i
                                        std::vector<std::complex<float>> &rc_out,
                                        const Config &cfg)
 {
-    const int W = cfg.pulse_num;
+    const int W = effectivePulseNum(cfg);
     const int Lraw = cfg.pulse_len;
     const int M = cfg.rg_len;
     if (W <= 0 || Lraw <= 0 || M <= 0) return false;

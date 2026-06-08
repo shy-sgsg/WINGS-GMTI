@@ -577,7 +577,8 @@ __global__ void align_two_channels_fast_cuda(const cudacd* d1,
 
     if (skip > 0) {
         // CPU 逻辑：d1 从行 (skip-1) 开始复制到 a1 开头，前面的行填零
-        size_t src_row0 = (size_t)(skip - 1);
+        // size_t src_row0 = (size_t)(skip - 1);
+        size_t src_row0 = (size_t)(skip);
         if (row < (Na - src_row0)) {
             // 有效行：从 d1[src_row0 + row] 复制
             size_t src_idx = (src_row0 + row) * Nr + col;
@@ -591,7 +592,8 @@ __global__ void align_two_channels_fast_cuda(const cudacd* d1,
     } 
     else if (skip < 0) {
         // CPU 逻辑：d2 从行 (-skip-1) 开始复制到 a2 开头，前面的行填零
-        size_t src_row0 = (size_t)(-skip - 1);
+        // size_t src_row0 = (size_t)(-skip - 1);
+        size_t src_row0 = (size_t)(-skip);
         if (row < (Na - src_row0)) {
             // 有效行：从 d2[src_row0 + row] 复制
             size_t src_idx = (src_row0 + row) * Nr + col;
@@ -642,6 +644,79 @@ __global__ void dbs_center_by_fa_fast_cuda(const cudacd* inA,
     outB[new_idx] = inB[idx];
 }
 
+__global__ void az_decimate_two_channels_kernel(const cudacd* in1,
+                                                const cudacd* in2,
+                                                cudacd* out1,
+                                                cudacd* out2,
+                                                int W_orig,
+                                                int M,
+                                                int dec,
+                                                int W_new)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = static_cast<size_t>(W_new) * static_cast<size_t>(M);
+    if (idx >= total) return;
+
+    int k_new = static_cast<int>(idx / M);
+    int m = static_cast<int>(idx % M);
+    size_t in_base = static_cast<size_t>(k_new) * static_cast<size_t>(dec) * static_cast<size_t>(M);
+    cudacd acc1 = make_cuFloatComplex(0.0f, 0.0f);
+    cudacd acc2 = make_cuFloatComplex(0.0f, 0.0f);
+    for (int d = 0; d < dec; ++d) {
+        size_t in_idx = in_base + static_cast<size_t>(d) * static_cast<size_t>(M) + static_cast<size_t>(m);
+        if (in_idx < static_cast<size_t>(W_orig) * static_cast<size_t>(M)) {
+            acc1 = cuCaddf(acc1, in1[in_idx]);
+            acc2 = cuCaddf(acc2, in2[in_idx]);
+        }
+    }
+    out1[idx] = acc1;
+    out2[idx] = acc2;
+}
+
+__global__ void scale_complex_kernel(cudacd* data, size_t total, float coef)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    cudacd v = data[idx];
+    data[idx] = make_cuFloatComplex(v.x * coef, v.y * coef);
+}
+
+__global__ void adjacent_corr_reduce_kernel(const cudacd* data,
+                                            cudacd* block_sums,
+                                            int k,
+                                            int Na,
+                                            int Nr)
+{
+    extern __shared__ cudacd shared[];
+    int tid = threadIdx.x;
+    size_t total = static_cast<size_t>(Na - k) * static_cast<size_t>(Nr);
+    cudacd acc = make_cuFloatComplex(0.0f, 0.0f);
+
+    for (size_t idx = blockIdx.x * blockDim.x + tid;
+         idx < total;
+         idx += static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x)) {
+        int row = static_cast<int>(idx / Nr) + k;
+        int col = static_cast<int>(idx % Nr);
+        size_t cur = static_cast<size_t>(row) * static_cast<size_t>(Nr) + static_cast<size_t>(col);
+        size_t prev = static_cast<size_t>(row - k) * static_cast<size_t>(Nr) + static_cast<size_t>(col);
+        acc = cuCaddf(acc, cuCmulf(data[cur], cuConjf(data[prev])));
+    }
+
+    shared[tid] = acc;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] = cuCaddf(shared[tid], shared[tid + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        block_sums[blockIdx.x] = shared[0];
+    }
+}
+
 // Production-grade CUDA implementation with pre-allocated workspace
 bool GMTIProcessor::alignFFTAndDBS_CUDA(const std::vector<std::complex<float>> &data1,
                                         const std::vector<std::complex<float>> &data2,
@@ -658,7 +733,7 @@ bool GMTIProcessor::alignFFTAndDBS_CUDA(const std::vector<std::complex<float>> &
 
     auto wall_start = std::chrono::high_resolution_clock::now();
 
-    const size_t Na = static_cast<size_t>(cfg.pulse_num);
+    const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
     const size_t total = Na * Nr;
     if (Na == 0 || Nr == 0) return false;
@@ -748,7 +823,9 @@ bool GMTIProcessor::alignFFTAndDBS_CUDA(const std::vector<std::complex<float>> &
 
     // ===== 4) DBS 中心化 =====
     int width = static_cast<int>(Na);
-    int center_num = static_cast<int>(std::floor((fa2 + 1000.0f) / 2000.0f * width)) + 1;
+    if (!(cfg.PRF > 0.0)) return false;
+    int center_num = static_cast<int>(std::floor((fa2 + 0.5f * static_cast<float>(cfg.PRF)) /
+                                                 static_cast<float>(cfg.PRF) * width)) + 1;
     int cstart = center_num - width / 2;
     int k_1b = cstart;
     while (k_1b < 1) k_1b += width;
@@ -827,10 +904,13 @@ bool GMTIProcessor::cuda_stage_fft_async(size_t Na, size_t Nr) {
     return true;
 }
 
-bool GMTIProcessor::cuda_stage_dbs_async(float fa2, size_t Na, size_t Nr) {
-    // 1. 计算偏移 k (逻辑不变)
+bool GMTIProcessor::cuda_stage_dbs_async(float fa2, float prf, size_t Na, size_t Nr) {
+    // 1. 计算偏移 k
+    if (!(prf > 0.0f) || Na == 0 || Nr == 0) {
+        return false;
+    }
     int width = (int)Na;
-    int center_num = (int)std::floor((fa2 + 1000.0f) / 2000.0f * width) + 1;
+    int center_num = (int)std::floor((fa2 + 0.5f * prf) / prf * width) + 1;
     int k_1b = center_num - width / 2;
     while (k_1b < 1) k_1b += width;
     while (k_1b > width) k_1b -= width;
@@ -849,6 +929,92 @@ bool GMTIProcessor::cuda_stage_dbs_async(float fa2, size_t Na, size_t Nr) {
     return true;
 }
 
+bool GMTIProcessor::cuda_stage_az_decimate_async(int W_orig, int M, int dec) {
+    if (W_orig <= 0 || M <= 0 || dec <= 0 || gpu_ptrs_.d1 == nullptr || gpu_ptrs_.d2 == nullptr ||
+        gpu_ptrs_.a1 == nullptr || gpu_ptrs_.a2 == nullptr) {
+        return false;
+    }
+    if (W_orig % dec != 0) {
+        return false;
+    }
+    const int W_new = W_orig / dec;
+    if (dec == 1) {
+        return true;
+    }
+
+    const size_t total_out = static_cast<size_t>(W_new) * static_cast<size_t>(M);
+    const int threads = 256;
+    const int blocks = static_cast<int>((total_out + threads - 1) / threads);
+    az_decimate_two_channels_kernel<<<blocks, threads, 0, stream_compute_>>>(
+        (const cudacd*)gpu_ptrs_.d1, (const cudacd*)gpu_ptrs_.d2,
+        (cudacd*)gpu_ptrs_.a1, (cudacd*)gpu_ptrs_.a2,
+        W_orig, M, dec, W_new);
+    if (cudaGetLastError() != cudaSuccess) {
+        ERR("az_decimate_two_channels_kernel launch failed");
+        return false;
+    }
+
+    const size_t bytes = total_out * sizeof(cudacd);
+    CUDA_CHECK(cudaMemcpyAsync(gpu_ptrs_.d1, gpu_ptrs_.a1, bytes, cudaMemcpyDeviceToDevice, stream_compute_));
+    CUDA_CHECK(cudaMemcpyAsync(gpu_ptrs_.d2, gpu_ptrs_.a2, bytes, cudaMemcpyDeviceToDevice, stream_compute_));
+    CUDA_CHECK(cudaStreamSynchronize(stream_compute_));
+    return true;
+}
+
+bool GMTIProcessor::cuda_scale_channel2_async(float coef, size_t total) {
+    if (gpu_ptrs_.d2 == nullptr || total == 0) {
+        return false;
+    }
+    const int threads = 256;
+    const int blocks = static_cast<int>((total + threads - 1) / threads);
+    scale_complex_kernel<<<blocks, threads, 0, stream_compute_>>>((cudacd*)gpu_ptrs_.d2, total, coef);
+    if (cudaGetLastError() != cudaSuccess) {
+        ERR("scale_complex_kernel launch failed");
+        return false;
+    }
+    CUDA_CHECK(cudaStreamSynchronize(stream_compute_));
+    return true;
+}
+
+bool GMTIProcessor::cuda_compute_fd_ctr_from_d1(int k, const Config& cfg, double& fd_ctr) {
+    fd_ctr = 0.0;
+    const int Na = effectivePulseNum(cfg);
+    const int Nr = cfg.rg_len;
+    if (k <= 0 || Na <= k || Nr <= 0 || !(cfg.PRF > 0.0) || gpu_ptrs_.d1 == nullptr) {
+        return false;
+    }
+
+    const int threads = 256;
+    const int blocks = 256;
+    cudacd* d_block_sums = nullptr;
+    if (cudaMalloc(&d_block_sums, static_cast<size_t>(blocks) * sizeof(cudacd)) != cudaSuccess) {
+        return false;
+    }
+    adjacent_corr_reduce_kernel<<<blocks, threads, threads * sizeof(cudacd), stream_compute_>>>(
+        (const cudacd*)gpu_ptrs_.d1, d_block_sums, k, Na, Nr);
+    if (cudaGetLastError() != cudaSuccess) {
+        cudaFree(d_block_sums);
+        ERR("adjacent_corr_reduce_kernel launch failed");
+        return false;
+    }
+
+    std::vector<cudacd> h_sums(blocks);
+    CUDA_CHECK(cudaMemcpyAsync(h_sums.data(), d_block_sums,
+                               static_cast<size_t>(blocks) * sizeof(cudacd),
+                               cudaMemcpyDeviceToHost, stream_compute_));
+    CUDA_CHECK(cudaStreamSynchronize(stream_compute_));
+    cudaFree(d_block_sums);
+
+    double re = 0.0;
+    double im = 0.0;
+    for (const auto& v : h_sums) {
+        re += static_cast<double>(v.x);
+        im += static_cast<double>(v.y);
+    }
+    fd_ctr = (cfg.PRF / (2.0 * M_PI)) * std::atan2(im, re);
+    return true;
+}
+
 bool GMTIProcessor::cuda_stage_rg_sum_async(const Config& cfg) {
     int Nr = cfg.rg_len;
     int threads = 256;
@@ -861,7 +1027,7 @@ bool GMTIProcessor::cuda_stage_rg_sum_async(const Config& cfg) {
         (const cuFloatComplex*)gpu_ptrs_.t2,
         (cuFloatComplex*)gpu_ptrs_.d_rg_sums,
         cfg.az_st, cfg.az_ed,
-        cfg.pulse_num, cfg.rg_len,
+        effectivePulseNum(cfg), cfg.rg_len,
         cfg.rg_st, cfg.rg_ed
     );
 
@@ -958,7 +1124,7 @@ bool GMTIProcessor::dpca_cfar2_fast_cuda(const std::vector<std::complex<float>> 
                                          const Config &cfg,
                                          std::vector<float> &mydata)
 {
-    const int H = cfg.pulse_num;
+    const int H = effectivePulseNum(cfg);
     const int W = cfg.rg_len;
     if (H <= 0 || W <= 0) return false;
 
@@ -1106,7 +1272,7 @@ bool GMTIProcessor::cluster_filter_gap_phase_cuda(const std::vector<float> &myda
                                                   std::vector<int> &pcol_new,
                                                   std::vector<float> &phaseStdList)
 {
-    const int H = cfg.pulse_num;
+    const int H = effectivePulseNum(cfg);
     const int W = cfg.rg_len;
     if (H <= 0 || W <= 0) return false;
 
@@ -1281,7 +1447,7 @@ bool GMTIProcessor::target_select_cuda(const std::vector<int> &prow,
                                        const Config &cfg,
                                        GMTIOutput::Detect &S_target)
 {
-    const int H = cfg.pulse_num;
+    const int H = effectivePulseNum(cfg);
     const int W = cfg.rg_len;
     const size_t total = static_cast<size_t>(H) * static_cast<size_t>(W);
     if (H <= 0 || W <= 0) return false;
@@ -1335,7 +1501,7 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_p38_cuda(
 {
     (void)rg_st;
     (void)rg_ed;
-    const size_t Na = static_cast<size_t>(cfg.pulse_num);
+    const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
 
     if (y_faAxis.size() != Na) return false;
@@ -1431,7 +1597,7 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_cuda(
 {
     (void)rg_st;
     (void)rg_ed;
-    const size_t Na = static_cast<size_t>(cfg.pulse_num);
+    const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
     const size_t total = Na * Nr;
 

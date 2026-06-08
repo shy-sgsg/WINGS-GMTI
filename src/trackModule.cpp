@@ -1,5 +1,6 @@
 #include "trackModule.hpp"
 #include "GMTIProcessor.hpp"
+#include "TrackManager.hpp"
 #include "geo/geoProj.hpp"
 #include <iostream>
 #include <cmath>
@@ -132,6 +133,10 @@ static void printCurrentTargets(const std::vector<CurrentTargetPacket>& targets)
 // Note: GMTIProcessor constructor is defined in the main header; do not redefine it here.
 
 std::vector<GMTIDetection> trackModule(const Config& cfg) {
+    return trackModule(cfg, nullptr);
+}
+
+std::vector<GMTIDetection> trackModule(const Config& cfg, TrackManager* manager) {
     const std::string& result_dir = cfg.result_add;
     const std::vector<int>& idx_range = cfg.track_idx_range;
     std::vector<GMTIDetection> latest_targets;
@@ -141,6 +146,15 @@ std::vector<GMTIDetection> trackModule(const Config& cfg) {
         return latest_targets;
     }
 
+    std::cout << "[TRACK] 关联输入目录: " << result_dir << std::endl;
+    std::cout << "[TRACK] 关联周期 idx_range:";
+    for (const int idx : idx_range) {
+        std::cout << ' ' << idx;
+    }
+    std::cout << "  (truth_threshold=" << cfg.track_truth_threshold
+              << ", gate_m=" << cfg.track_gate_m
+              << ", v_max=" << cfg.track_v_max << ")" << std::endl;
+
     std::vector<std::vector<std::array<double,2>>> frame_dets;
     std::vector<std::vector<double>> frame_dirs;
     std::vector<std::vector<double>> frame_ranges;
@@ -149,6 +163,9 @@ std::vector<GMTIDetection> trackModule(const Config& cfg) {
     frame_dirs.reserve(idx_range.size());
     frame_ranges.reserve(idx_range.size());
     frame_target_utc.reserve(idx_range.size());
+    int readable_frames = 0;
+    int nonempty_frames = 0;
+    int valid_utc_frames = 0;
 
     for (const int idx : idx_range) {
         char filename[256];
@@ -157,7 +174,21 @@ std::vector<GMTIDetection> trackModule(const Config& cfg) {
 
         try {
             GMTIResult out = read_mt_result_bin(binPath);
-            std::cout << "utc = " << out.utcGlobal << std::endl;
+            ++readable_frames;
+            if (out.count > 0) {
+                ++nonempty_frames;
+            }
+            if (std::isfinite(out.utcGlobal) && out.utcGlobal > 0.0) {
+                ++valid_utc_frames;
+            } else {
+                std::cout << "[TRACK][WARN] idx=" << idx
+                          << " UTC 非法或缺失，速度估计将使用帧序兜底: utc="
+                          << out.utcGlobal << std::endl;
+            }
+            std::cout << "[TRACK] read idx=" << idx
+                      << " file=" << binPath
+                      << " count=" << out.count
+                      << " utc=" << out.utcGlobal << std::endl;
 
             std::vector<std::array<double,2>> dets;
             std::vector<double> dirs;
@@ -169,7 +200,7 @@ std::vector<GMTIDetection> trackModule(const Config& cfg) {
             target_utcs.reserve(static_cast<size_t>(out.count));
             for (int i = 0; i < out.count; ++i) {
                 double E = 0.0, N = 0.0;
-                Gaussp3(out.targets[i].lat, out.targets[i].lon, 117.0, E, N);
+                Gaussp3(out.targets[i].lat, out.targets[i].lon, cfg.L0, E, N);
 
                 dets.push_back({{E, N}});
                 dirs.push_back(wrap180_deg(out.targets[i].direction));
@@ -180,8 +211,16 @@ std::vector<GMTIDetection> trackModule(const Config& cfg) {
             frame_dirs.push_back(dirs);
             frame_ranges.push_back(ranges);
             frame_target_utc.push_back(target_utcs);
+        } catch (const std::exception& ex) {
+            std::cout << "[TRACK][WARN] 跳过序号 " << idx
+                      << ": 文件处理出错: " << ex.what() << std::endl;
+            frame_dets.push_back(std::vector<std::array<double,2>>());
+            frame_dirs.push_back(std::vector<double>());
+            frame_ranges.push_back(std::vector<double>());
+            frame_target_utc.push_back(std::vector<double>());
         } catch (...) {
-            std::cerr << "跳过序号 " << idx << ": 文件处理出错。" << std::endl;
+            std::cout << "[TRACK][WARN] 跳过序号 " << idx
+                      << ": 文件处理出错。" << std::endl;
             frame_dets.push_back(std::vector<std::array<double,2>>());
             frame_dirs.push_back(std::vector<double>());
             frame_ranges.push_back(std::vector<double>());
@@ -190,7 +229,7 @@ std::vector<GMTIDetection> trackModule(const Config& cfg) {
     }
 
     if (frame_dets.empty()) {
-        std::cerr << "没有可用周期数据。" << std::endl;
+        std::cout << "[TRACK][WARN] 没有可用周期数据。" << std::endl;
         return latest_targets;
     }
 
@@ -198,6 +237,19 @@ std::vector<GMTIDetection> trackModule(const Config& cfg) {
     const int min_hits = std::max(1, cfg.track_truth_threshold);
     const double gate_m = std::max(0.0, cfg.track_gate_m);
     const double v_max = std::max(0.0, cfg.track_v_max);
+    if (readable_frames < static_cast<int>(idx_range.size())) {
+        std::cout << "[TRACK][WARN] 关联窗口存在缺失文件: readable_frames="
+                  << readable_frames << "/" << idx_range.size() << std::endl;
+    }
+    if (valid_utc_frames < readable_frames) {
+        std::cout << "[TRACK][WARN] 关联窗口存在 UTC 非法帧: valid_utc_frames="
+                  << valid_utc_frames << "/" << readable_frames << std::endl;
+    }
+    if (nonempty_frames < min_hits) {
+        std::cout << "[TRACK][WARN] 有效非空帧不足: nonempty_frames="
+                  << nonempty_frames << ", truth_threshold=" << min_hits
+                  << "，可能无法形成当前周期真目标。" << std::endl;
+    }
 
     std::vector<SlidingTrack> tracks;
     tracks.reserve(128);
@@ -307,9 +359,9 @@ std::vector<GMTIDetection> trackModule(const Config& cfg) {
         }
     }
 
-    std::vector<CurrentTargetPacket> track_packets;
+    std::vector<GMTIDetection> current_targets;
     const auto& latest_dets = frame_dets.back();
-    track_packets.reserve(latest_dets.size());
+    current_targets.reserve(latest_dets.size());
 
     for (size_t j = 0; j < latest_dets.size(); ++j) {
         const int tr_idx = (j < latest_det_to_track.size()) ? latest_det_to_track[j] : -1;
@@ -323,17 +375,35 @@ std::vector<GMTIDetection> trackModule(const Config& cfg) {
 
         double lat = 0.0;
         double lon = 0.0;
-        Gaussp3RV(latest_dets[j][0], latest_dets[j][1], 117.0, lat, lon);
+        Gaussp3RV(latest_dets[j][0], latest_dets[j][1], cfg.L0, lat, lon);
 
         const int safe_id = std::max(1, std::min(65535, tr.id));
+        GMTIDetection det{};
+        det.id = static_cast<uint16_t>(safe_id);
+        det.lon = lon;
+        det.lat = lat;
+        det.speed = tr.speed;
+        det.direction = tr.direction;
+        det.range = tr.range;
+        det.utcMid = tr.utc;
+        current_targets.push_back(det);
+    }
+
+    if (manager != nullptr) {
+        current_targets = manager->update(cfg, current_targets);
+    }
+
+    std::vector<CurrentTargetPacket> track_packets;
+    track_packets.reserve(current_targets.size());
+    for (const auto& det : current_targets) {
         track_packets.push_back(CurrentTargetPacket{
-            static_cast<uint16_t>(safe_id),
-            lon,
-            lat,
-            tr.speed,
-            tr.direction,
-            tr.range,
-            tr.utc
+            det.id,
+            det.lon,
+            det.lat,
+            det.speed,
+            det.direction,
+            det.range,
+            det.utcMid
         });
     }
 
@@ -350,20 +420,6 @@ std::vector<GMTIDetection> trackModule(const Config& cfg) {
     const std::string save_path = result_dir + "/" + out_name;
     printCurrentTargets(track_packets);
     writeCurrentCyclePackets(track_packets, save_path);
-
-    std::vector<GMTIDetection> current_targets;
-    current_targets.reserve(track_packets.size());
-    for (const auto& t : track_packets) {
-        GMTIDetection det{};
-        det.id = t.id;
-        det.lon = t.lon;
-        det.lat = t.lat;
-        det.speed = t.speed;
-        det.direction = t.direction;
-        det.range = t.range;
-        det.utcMid = t.utc;
-        current_targets.push_back(det);
-    }
 
     return current_targets;
 }

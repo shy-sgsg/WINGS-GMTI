@@ -3,7 +3,6 @@
 #include "DbsIO.hpp"
 #include "geo/GaussProj.hpp" // <== 新增
 #include "config_structs.hpp"
-#include <tinyxml2.h>
 #include <memory>
 #include <array>
 

@@ -185,7 +185,8 @@ bool GMTIProcessor::processPeriodsParallelFusion(const std::vector<int> &periodL
     const size_t HARD_CAP = 8;
     const size_t instances = std::max<size_t>(1, std::min(requested, HARD_CAP));
     const size_t pulseDec = static_cast<size_t>(std::max(1, cfg.pulse_dec));
-    const size_t rdRows = (static_cast<size_t>(std::max(0, cfg.pulse_num)) + pulseDec - 1) / pulseDec;
+    const int procPulseNum = effectivePulseNum(cfg);
+    const size_t rdRows = (static_cast<size_t>(std::max(0, procPulseNum)) + pulseDec - 1) / pulseDec;
     const size_t rdCols = static_cast<size_t>(std::max(0, cfg.rg_len));
     const double rdCacheGiB = static_cast<double>(periodList.size()) * static_cast<double>(rdRows) *
                               static_cast<double>(rdCols) * static_cast<double>(sizeof(float)) /
@@ -195,6 +196,8 @@ bool GMTIProcessor::processPeriodsParallelFusion(const std::vector<int> &periodL
               << " cuda_free=" << (static_cast<double>(freeBytes) / (1024.0 * 1024.0 * 1024.0))
               << "GiB/" << (static_cast<double>(totalBytes) / (1024.0 * 1024.0 * 1024.0))
               << "GiB pulse_num=" << cfg.pulse_num
+              << " read_pulse_num=" << cfg.read_pulse_num
+              << " process_pulse_num=" << procPulseNum
               << " pulse_dec=" << cfg.pulse_dec
               << " rg_len=" << cfg.rg_len
               << " estimated_dbs_amp_cache~" << rdCacheGiB << "GiB" << std::endl;

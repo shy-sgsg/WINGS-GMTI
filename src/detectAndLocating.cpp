@@ -13,7 +13,7 @@ bool GMTIProcessor::target_select(const std::vector<std::complex<double>> &GMTI_
                                   const Config &cfg,
                                   GMTIOutput::Detect &S_target)
 {
-    const size_t Na = static_cast<size_t>(cfg.pulse_num);
+    const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
     const size_t total = Na * Nr;
     if (GMTI_dataf_1.size() != total || GMTI_dataf_2.size() != total)
@@ -72,7 +72,7 @@ bool GMTIProcessor::dpca_cfar2_fast(const std::vector<std::complex<double>> &GMT
                                     std::vector<int> &prow,
                                     std::vector<int> &pcol)
 {
-    const int H = cfg.pulse_num; // 行（方位）
+    const int H = effectivePulseNum(cfg); // 行（方位）
     const int W = cfg.rg_len;    // 列（距离）
     if (H <= 0 || W <= 0)
         return false;
@@ -241,7 +241,7 @@ bool GMTIProcessor::cluster_filter(const std::vector<double> &mydata,
                                    std::vector<int> &prow_new,
                                    std::vector<int> &pcol_new)
 {
-    const int H = cfg.pulse_num;
+    const int H = effectivePulseNum(cfg);
     const int W = cfg.rg_len;
     if (H <= 0 || W <= 0)
         return false;
@@ -360,7 +360,7 @@ bool GMTIProcessor::cluster_filter_gap_phase(const std::vector<double> &mydata,
                                              std::vector<int> &pcol_new,
                                              std::vector<double> &phaseStdList)
 {
-    const int H = cfg.pulse_num;  // 行数（方位向）
+    const int H = effectivePulseNum(cfg);  // 行数（方位向）
     const int W = cfg.rg_len;     // 列数（距离向）
     if (H <= 0 || W <= 0)
         return false;

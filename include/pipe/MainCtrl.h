@@ -9,9 +9,25 @@
 #include "MyFileStream.h"
 #include "config_structs.hpp"
 #include "trackModule.hpp"
+#include "TrackManager.hpp"
 #include "GMTIProcessor.hpp"
 #include <vector>
 #include <mutex>
+#include <deque>
+#include <cstdint>
+
+#define UPDATEXML 0
+
+struct GMTIResultPacket {
+    std::vector<GMTIDetection> targets;
+    std::vector<uint8_t> image;
+    uint16_t image_rows = 0;
+    uint16_t image_cols = 0;
+    bool image_available = false;
+    double corner_lon[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+    double corner_lat[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+    int result_file_id = 0;
+};
 
 class MainCtrl {
 
@@ -54,7 +70,9 @@ public:
     std::vector<int> periodList_;          // 周期列表
     std::vector<GMTIOutput> periodResults_;// 周期处理结果
     std::vector<Track> current_tracks_;    // 当前航迹结果
+    TrackManager track_manager_;           // 跨周期持久航迹编号管理器
     std::vector<GMTIDetection> latest_gmti_targets_; // 最新 GMTI 目标
+    std::deque<GMTIResultPacket> pending_result_packets_; // 待发送结果快照
     std::string latest_result_file_;       // 最新生成的 GMTI 航迹结果文件
     
     std::string gmti_config_xml_;          // GMTI 配置 XML 文件路径
@@ -70,7 +88,7 @@ public:
     bool validateGMTIParams();
 
     // 打包最新 GMTI 结果为主控协议格式
-    bool packGMTIResults(char* buffer, size_t buffer_size, uint32_t& packed_len);
+    bool packGMTIResults(const GMTIResultPacket& packet, char* buffer, size_t buffer_size, uint32_t& packed_len);
 
 private:
     uint16_t next_result_msg_count_ = 0;
