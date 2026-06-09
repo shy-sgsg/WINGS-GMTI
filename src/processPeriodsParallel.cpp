@@ -34,7 +34,7 @@ bool GMTIProcessor::processPeriodsParallel(const std::vector<int> &periodList,
         per_instance_bytes = 100ull * 1024ull * 1024ull;
     }
 
-    std::cout << "[parallel] per_instance_bytes MB: " << (per_instance_bytes/1024/1024) << std::endl;
+    // std::cout << "[parallel] per_instance_bytes MB: " << (per_instance_bytes/1024/1024) << std::endl;
 
     // 额外开销（CFAR / phase map / 临时 device malloc），按单 period 的实际峰值做保守预算
     const size_t overhead = 40ull * 1024ull * 1024ull;
@@ -125,7 +125,7 @@ bool GMTIProcessor::processPeriodsParallel(const std::vector<int> &periodList,
         }
         // Propagate dataset-wide squint to each worker
         workers.back()->setGlobalSquint(final_squint);
-        std::cout << "[parallel] Worker " << i << " initialized (workspace bytes=" << workers.back()->d_workspace_bytes/1024/1024 << " MB)" << std::endl;
+        // std::cout << "[parallel] Worker " << i << " initialized (workspace bytes=" << workers.back()->d_workspace_bytes/1024/1024 << " MB)" << std::endl;
     }
 
     // 准备输出容器
@@ -228,8 +228,8 @@ bool GMTIProcessor::processPeriodsParallelFusion(const std::vector<int> &periodL
                 const int per = periodList[slot];
                 const bool s = worker->processOnePeriodFusionCache(per, cfg, posRaw, slot, ctx);
                 ok[slot] = s ? 1 : 0;
-                std::cout << "[fusion] period " << per << " slot " << slot
-                          << " done by worker " << w << " -> " << (s ? "OK" : "FAIL") << std::endl;
+                // std::cout << "[fusion] period " << per << " slot " << slot
+                //           << " done by worker " << w << " -> " << (s ? "OK" : "FAIL") << std::endl;
             }
         });
     }

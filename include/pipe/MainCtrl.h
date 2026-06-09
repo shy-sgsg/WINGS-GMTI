@@ -32,7 +32,8 @@ struct GMTIResultPacket {
 class MainCtrl {
 
 public:
-    explicit MainCtrl(const std::string& pipeRootPath = "/home/shy/pipe_test");
+    explicit MainCtrl(const std::string& pipeRootPath = "/home/shy/pipe_test",
+                      bool enablePipes = true);
     ~MainCtrl();
 
     // 命令接收线程
@@ -90,8 +91,13 @@ public:
     // 打包最新 GMTI 结果为主控协议格式
     bool packGMTIResults(const GMTIResultPacket& packet, char* buffer, size_t buffer_size, uint32_t& packed_len);
 
+    // 本地测试模式：不依赖上位机管道，按给定回波文件顺序复用同一个 TrackManager。
+    bool RunLocalTest(const std::string& xmlPath, const std::vector<std::string>& echoFiles);
+    bool pipesEnabled() const { return pipes_enabled_; }
+
 private:
     uint16_t next_result_msg_count_ = 0;
+    bool pipes_enabled_ = true;
 
 };
 

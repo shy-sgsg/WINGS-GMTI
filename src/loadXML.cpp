@@ -345,6 +345,24 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     cfg.track_debug_points = parseOptionalInt("track_debug_points", cfg.track_debug_points);
     cfg.track_idx_window = parseOptionalInt("track_idx_window", cfg.track_idx_window);
     cfg.track_truth_threshold = parseOptionalInt("track_truth_threshold", cfg.track_truth_threshold);
+    cfg.track_confirm_window = parseOptionalInt("track_confirm_window", cfg.track_idx_window);
+    cfg.track_confirm_hits = parseOptionalInt("track_confirm_hits", cfg.track_truth_threshold);
+    cfg.track_max_missed = parseOptionalInt("track_max_missed", cfg.track_max_missed);
+    cfg.track_default_dt = parseOptionalDouble("track_default_dt", cfg.track_default_dt);
+    cfg.track_chi2_gate = parseOptionalDouble("track_chi2_gate", cfg.track_chi2_gate);
+    cfg.track_dummy_cost = parseOptionalDouble("track_dummy_cost", cfg.track_dummy_cost);
+    cfg.track_linearity_window = parseOptionalInt("track_linearity_window", cfg.track_linearity_window);
+    cfg.track_min_linearity_confirm = parseOptionalDouble("track_min_linearity_confirm",
+                                                          cfg.track_min_linearity_confirm);
+    cfg.track_speed_smooth_weight = parseOptionalDouble("track_speed_smooth_weight",
+                                                        cfg.track_speed_smooth_weight);
+    cfg.track_heading_weight = parseOptionalDouble("track_heading_weight", cfg.track_heading_weight);
+    cfg.track_process_noise_pos = parseOptionalDouble("track_process_noise_pos",
+                                                      cfg.track_process_noise_pos);
+    cfg.track_process_noise_vel = parseOptionalDouble("track_process_noise_vel",
+                                                      cfg.track_process_noise_vel);
+    cfg.track_measurement_noise_pos = parseOptionalDouble("track_measurement_noise_pos",
+                                                          cfg.track_measurement_noise_pos);
 
     const std::string trackIdxRangeStr = getOptionalText("track_idx_range");
     if (!trackIdxRangeStr.empty()) {

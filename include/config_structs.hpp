@@ -77,6 +77,19 @@ struct Config {
     int track_truth_threshold = 3; // 判真阈值
     double track_gate_m = 500.0; // 航迹关联门限
     double track_v_max = 50.0;   // 航迹关联速度上限
+    int track_confirm_window = 3; // 在线航迹 n屏选m确认窗口 N
+    int track_confirm_hits = 2;   // 在线航迹 n屏选m确认命中数 M
+    int track_max_missed = 2;     // Confirmed/Coasted 最大连续漏检保留帧数
+    double track_default_dt = 1.0; // UTC 无效时默认帧间隔，单位秒
+    double track_chi2_gate = 9.21; // 二维量测 99% Mahalanobis 门限
+    double track_dummy_cost = 1000.0; // Hungarian dummy 未匹配代价
+    int track_linearity_window = 5; // 直线度评价窗口
+    double track_min_linearity_confirm = 0.65; // Tentative 确认最小直线度
+    double track_speed_smooth_weight = 0.5; // EN 差分速度平滑代价权重
+    double track_heading_weight = 0.2; // EN 差分航向平滑代价权重
+    double track_process_noise_pos = 25.0; // Kalman 位置过程噪声方差项
+    double track_process_noise_vel = 10.0; // Kalman 速度过程噪声方差项
+    double track_measurement_noise_pos = 50.0; // Kalman 位置量测噪声标准差
 
     // 推导参数
     double lambda;              // 波长

@@ -1,18 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <GMTI>
     <GMTI_parameter>
-        <GMTI_data>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID15_8H15M_GMTI0</GMTI_data>
-        <GMTI_data2>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID15_8H15M_GMTI1</GMTI_data2>
+        <GMTI_data>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID19_8H19M_GMTI0</GMTI_data>
+        <GMTI_data2>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID19_8H19M_GMTI1</GMTI_data2>
         <result_add>/home/shy/AIR/小长/GMTI_Data/Mission068/result_final</result_add>
-        <Plane_POS>/home/shy/AIR/小长/GMTI_Data/Mission068/RTIPOS/RTIPOS_ID15.out</Plane_POS>
+        <Plane_POS>/home/shy/AIR/小长/GMTI_Data/Mission068/RTIPOS/RTIPOS_ID19.out</Plane_POS>
         <reffunc_add>/home/shy/AIR/小长/GMTI_Data/Mission068/RefFun_Br50MHz_Tr38us_Len4096.dat</reffunc_add>
         <isSeparated>separate</isSeparated>
         <INFO_Type>1</INFO_Type>
-        <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/M68ID16.bin</GMTI_data_new>
+        <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/M68ID19.bin</GMTI_data_new>
         <pipe_root_path>/home/raco</pipe_root_path>
         <estimate_error_angle>0</estimate_error_angle>
         <wavepos_parallel>1</wavepos_parallel>
-        <enable_dbs_fusion>0</enable_dbs_fusion>
+        <enable_dbs_fusion>1</enable_dbs_fusion>
         <iq_compose>I+jQ</iq_compose>
         <isPC>0</isPC>
         <hasRefFunc>0</hasRefFunc>
@@ -34,7 +34,7 @@
         <ref_H>20</ref_H>
         <pf>1e-6</pf>
         <secBias>18</secBias>
-        <skip_pulses>256</skip_pulses>
+        <skip_pulses>0</skip_pulses>
         <wavepos_use_roi>false</wavepos_use_roi>
         <roi_lat1>40.45121057</roi_lat1>
         <roi_lng1>116.98377429</roi_lng1>

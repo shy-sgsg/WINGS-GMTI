@@ -160,7 +160,7 @@ int main(int argc, char **argv)
         std::cout << "[TRACK][WARN] 本周期未写入新的检测结果文件，关联窗口中的当前编号文件可能是旧数据。" << std::endl;
     }
     TrackManager track_manager;
-    trackModule(cfg, &track_manager);
+    trackModuleOnline(cfg, &track_manager);
     
     // ===== 后续处理（可选）===============================================
     // 注：trackModule 已经将航迹关联结果写到磁盘

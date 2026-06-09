@@ -180,13 +180,13 @@ bool applyBeamPointingBiasToFusionContext(double biasDeg,
             fd += static_cast<float>(m.fd_ctr_unwrapped);
         }
 
-        std::cout << "[fusion][fd] beam=" << m.beam_index
-                  << " theta_sq=" << m.theta_sq
-                  << " theta_true=" << m.theta_true
-                  << " fd_wrapped=" << m.fd_ctr_wrapped
-                  << " fd_unwrapped=" << m.fd_ctr_unwrapped
-                  << " fa_shift=" << (m.fd_ctr_unwrapped - m.fd_ctr_wrapped)
-                  << " k_prf=" << m.prf_ambiguity_k << std::endl;
+        // std::cout << "[fusion][fd] beam=" << m.beam_index
+        //           << " theta_sq=" << m.theta_sq
+        //           << " theta_true=" << m.theta_true
+        //           << " fd_wrapped=" << m.fd_ctr_wrapped
+        //           << " fd_unwrapped=" << m.fd_ctr_unwrapped
+        //           << " fa_shift=" << (m.fd_ctr_unwrapped - m.fd_ctr_wrapped)
+        //           << " k_prf=" << m.prf_ambiguity_k << std::endl;
     }
 
     return true;
@@ -283,12 +283,12 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
             const double beamHalfWidth = location_beam_gate_deg(cfg);
             const double beamDirErr = wrap180_deg(direction - beamCenterDir);
             if (std::abs(beamDirErr) > beamHalfWidth) {
-                std::cout << "[fusion][loc][gate] drop target beam=" << m.beam_index
-                          << " dir=" << direction
-                          << " beam_center_dir=" << beamCenterDir
-                          << " theta_true=" << m.theta_true
-                          << " err=" << beamDirErr
-                          << " gate=" << beamHalfWidth << std::endl;
+                // std::cout << "[fusion][loc][gate] drop target beam=" << m.beam_index
+                //           << " dir=" << direction
+                //           << " beam_center_dir=" << beamCenterDir
+                //           << " theta_true=" << m.theta_true
+                //           << " err=" << beamDirErr
+                //           << " gate=" << beamHalfWidth << std::endl;
                 ++dropGate;
                 continue;
             }
@@ -314,14 +314,14 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
         totalDropSin += dropSin;
         totalDropPx += dropPx;
         totalDropGate += dropGate;
-        std::cout << "[fusion][loc][summary] beam=" << m.beam_index
-                  << " raw=" << rawList.size()
-                  << " kept=" << kept
-                  << " drop_sin=" << dropSin
-                  << " drop_px=" << dropPx
-                  << " drop_gate=" << dropGate
-                  << " theta_true=" << m.theta_true
-                  << " fd_shift=" << faShift << std::endl;
+        // std::cout << "[fusion][loc][summary] beam=" << m.beam_index
+        //           << " raw=" << rawList.size()
+        //           << " kept=" << kept
+        //           << " drop_sin=" << dropSin
+        //           << " drop_px=" << dropPx
+        //           << " drop_gate=" << dropGate
+        //           << " theta_true=" << m.theta_true
+        //           << " fd_shift=" << faShift << std::endl;
     }
 
     std::cout << "[fusion][loc][total] raw=" << totalRaw

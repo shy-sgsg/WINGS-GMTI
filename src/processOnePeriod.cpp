@@ -132,12 +132,12 @@ double GMTIProcessor::estimateSquintAngleDeg(const GMTIOutput::Plane &plane, con
         const double clipped = std::max(-1.0, std::min(1.0, ratio));
         const double squint_deg = std::asin(clipped) * 180.0 / M_PI;
 
-        std::cout << "[SQUINT] fd_ctr=" << fd_ctr
-                  << ", v=" << v
-                  << ", lambda=" << lambda
-                  << ", ratio=" << ratio
-                  << ", squint=" << squint_deg
-                  << std::endl;
+        // std::cout << "[SQUINT] fd_ctr=" << fd_ctr
+        //           << ", v=" << v
+        //           << ", lambda=" << lambda
+        //           << ", ratio=" << ratio
+        //           << ", squint=" << squint_deg
+        //           << std::endl;
         return squint_deg;
     }
 
@@ -149,17 +149,17 @@ double GMTIProcessor::estimateSquintAngleDeg(const GMTIOutput::Plane &plane, con
     const double bearing_deg = std::atan2(dN, dE) * 180.0 / M_PI;
     const double squint_deg = wrap180_deg(bearing_deg - plane.V_angle + 90.0);
     
-    std::cout << "[SQUINT] fd_ctr=nan"
-              << ", v=" << v
-              << ", lambda=" << lambda
-              << ", refE=" << refE
-              << ", refN=" << refN
-              << ", planeE=" << plane.E
-              << ", planeN=" << plane.N
-              << ", bearing=" << bearing_deg
-              << ", V_angle=" << plane.V_angle
-              << ", squint=" << squint_deg
-              << std::endl;
+    // std::cout << "[SQUINT] fd_ctr=nan"
+    //           << ", v=" << v
+    //           << ", lambda=" << lambda
+    //           << ", refE=" << refE
+    //           << ", refN=" << refN
+    //           << ", planeE=" << plane.E
+    //           << ", planeN=" << plane.N
+    //           << ", bearing=" << bearing_deg
+    //           << ", V_angle=" << plane.V_angle
+    //           << ", squint=" << squint_deg
+    //           << std::endl;
     
     return squint_deg;
 }
@@ -174,14 +174,14 @@ double GMTIProcessor::estimateSquintAngleDeg(const std::vector<std::complex<floa
 
     if (estimateCenterFdCtrFromData(data, cfg, fd_ctr, start_pulse, window_pulses))
     {
-        std::cout << "[SQUINT] center-window start=" << start_pulse
-                  << ", count=" << window_pulses
-                  << ", fd_ctr=" << fd_ctr
-                  << std::endl;
+        // std::cout << "[SQUINT] center-window start=" << start_pulse
+        //           << ", count=" << window_pulses
+        //           << ", fd_ctr=" << fd_ctr
+        //           << std::endl;
         return estimateSquintAngleDeg(plane, cfg, fd_ctr);
     }
 
-    std::cout << "[SQUINT] center-window fd_ctr estimate failed, fallback to geometric estimate" << std::endl;
+    // std::cout << "[SQUINT] center-window fd_ctr estimate failed, fallback to geometric estimate" << std::endl;
     return estimateSquintAngleDeg(plane, cfg);
 }
 
@@ -1178,12 +1178,12 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     if (!data_on_gpu && !computeDoppler(data1, 1, cfg, faAxis, fa_ctr, plane.V, theta_deg)) {
         return false;
     }
-    std::cout << "[fusion][fd] period=" << periodIdx
-              << " theta_sq=" << theta_sq
-              << " angle_from_fd=" << angle_deg
-              << " theta_for_support=" << theta_deg
-              << " fd_wrapped=" << fa_ctr
-              << " PRF=" << cfg.PRF << std::endl;
+    // std::cout << "[fusion][fd] period=" << periodIdx
+    //           << " theta_sq=" << theta_sq
+    //           << " angle_from_fd=" << angle_deg
+    //           << " theta_for_support=" << theta_deg
+    //           << " fd_wrapped=" << fa_ctr
+    //           << " PRF=" << cfg.PRF << std::endl;
 
     int az_center = 0, az_st = 0, az_ed = 0, rg_st = 0, rg_ed = 0;
     double fd_st = 0.0, fd_ed = 0.0, BW_az = 0.0;
@@ -1371,13 +1371,13 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
         return false;
     }
 
-    std::cout << "[fusion][detect] beam=" << periodIdx
-              << " slot=" << slot
-              << " cfar_hits=" << cfar_hits
-              << " clusters=" << prow_new.size()
-              << " selected=" << targetSel.prow.size()
-              << " min_points=" << cfg.min_points
-              << " pf=" << cfg.pf << std::endl;
+    // std::cout << "[fusion][detect] beam=" << periodIdx
+    //           << " slot=" << slot
+    //           << " cfar_hits=" << cfar_hits
+    //           << " clusters=" << prow_new.size()
+    //           << " selected=" << targetSel.prow.size()
+    //           << " min_points=" << cfg.min_points
+    //           << " pf=" << cfg.pf << std::endl;
 
     beamMeta.phase_slope = p_38[0];
     beamMeta.phase_intercept = p_38[1];
@@ -1722,11 +1722,11 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
         // This is the actual error angle that should be applied globally.
         double bias_deg = wrap180_deg(angle_deg - theta_sq_local);
 
-        std::cout << "[SQUINT] period=" << per
-                  << ", theta_sq_local=" << theta_sq_local
-                  << ", estimated_angle=" << angle_deg
-                  << ", bias_angle=" << bias_deg
-                  << std::endl;
+        // std::cout << "[SQUINT] period=" << per
+        //           << ", theta_sq_local=" << theta_sq_local
+        //           << ", estimated_angle=" << angle_deg
+        //           << ", bias_angle=" << bias_deg
+        //           << std::endl;
 
         angles_deg.push_back(bias_deg);
     }

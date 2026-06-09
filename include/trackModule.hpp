@@ -16,6 +16,8 @@ struct GMTIDetection {
     double direction;
     double range;
     double utcMid;
+    double e = 0.0;
+    double n = 0.0;
 };
 
 struct GMTIResult {
@@ -28,3 +30,4 @@ class TrackManager;
 
 std::vector<GMTIDetection> trackModule(const Config& cfg);
 std::vector<GMTIDetection> trackModule(const Config& cfg, TrackManager* manager);
+std::vector<GMTIDetection> trackModuleOnline(const Config& cfg, TrackManager* manager);

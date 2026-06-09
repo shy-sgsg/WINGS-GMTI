@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <limits>
 #include <stdexcept>
+#include <dirent.h>
 
 // 手动实现 clamp，替代 std::clamp
 template<typename T>
@@ -100,7 +101,7 @@ static void printCurrentTargets(const std::vector<CurrentTargetPacket>& targets)
     std::cout << "\n[TRACK] 目标信息列表" << std::endl;
     std::cout << "-----------------------------------------------------------------------------------------------" << std::endl;
     std::cout << std::left
-              << std::setw(8)  << "ID"
+              << std::setw(8)  << "TrackID"
               << std::setw(14) << "Lon(deg)"
               << std::setw(14) << "Lat(deg)"
               << std::setw(12) << "Speed(m/s)"
@@ -126,6 +127,96 @@ static void printCurrentTargets(const std::vector<CurrentTargetPacket>& targets)
         }
     }
     std::cout << "-----------------------------------------------------------------------------------------------\n" << std::endl;
+}
+
+static int resolveCurrentResultId(const Config& cfg)
+{
+    if (cfg.result_file_id > 0) {
+        return cfg.result_file_id;
+    }
+    if (!cfg.track_idx_range.empty()) {
+        return cfg.track_idx_range.back();
+    }
+
+    int latest = -1;
+    DIR* dir = opendir(cfg.result_add.c_str());
+    if (!dir) {
+        return latest;
+    }
+    while (dirent* ent = readdir(dir)) {
+        int id = -1;
+        char tail = '\0';
+        if (std::sscanf(ent->d_name, "GMTI%02d.bin%c", &id, &tail) == 1 && id > latest) {
+            latest = id;
+        }
+    }
+    closedir(dir);
+    return latest;
+}
+
+static std::string makeGmtiBinPath(const std::string& result_dir, int result_id)
+{
+    char name[256];
+    std::snprintf(name, sizeof(name), "GMTI%02d.bin", result_id);
+    return result_dir + "/" + name;
+}
+
+static std::string makeGmtiTrackPath(const std::string& result_dir, int result_id)
+{
+    char name[256];
+    std::snprintf(name, sizeof(name), "GMTI%02d_track.bin", result_id);
+    return result_dir + "/" + name;
+}
+
+static bool readCurrentDetections(const std::string& input_path,
+                                  std::vector<GMTIDetection>& dets,
+                                  double& utc_global)
+{
+    try {
+        GMTIResult result = read_mt_result_bin(input_path);
+        dets = result.targets;
+        utc_global = result.utcGlobal;
+        return true;
+    } catch (const std::exception& ex) {
+        std::cout << "[TRACK_ONLINE][WARN] read failed: " << input_path
+                  << " error=" << ex.what() << std::endl;
+    } catch (...) {
+        std::cout << "[TRACK_ONLINE][WARN] read failed: " << input_path << std::endl;
+    }
+    dets.clear();
+    utc_global = 0.0;
+    return false;
+}
+
+static double estimateFrameUtc(const std::vector<GMTIDetection>& dets, double utc_global)
+{
+    if (std::isfinite(utc_global) && utc_global > 0.0) {
+        return utc_global;
+    }
+    for (const auto& det : dets) {
+        if (std::isfinite(det.utcMid) && det.utcMid > 0.0) {
+            return det.utcMid;
+        }
+    }
+    return 0.0;
+}
+
+static std::vector<CurrentTargetPacket> makeCurrentPackets(const std::vector<GMTIDetection>& detections)
+{
+    std::vector<CurrentTargetPacket> packets;
+    packets.reserve(detections.size());
+    for (const auto& det : detections) {
+        packets.push_back(CurrentTargetPacket{
+            det.id,
+            det.lon,
+            det.lat,
+            det.speed,
+            det.direction,
+            det.range,
+            det.utcMid
+        });
+    }
+    return packets;
 }
 
 } // namespace
@@ -424,6 +515,61 @@ std::vector<GMTIDetection> trackModule(const Config& cfg, TrackManager* manager)
     return current_targets;
 }
 
+std::vector<GMTIDetection> trackModuleOnline(const Config& cfg, TrackManager* manager)
+{
+    if (!manager) {
+        return trackModule(cfg);
+    }
+
+    const int result_id = resolveCurrentResultId(cfg);
+    if (result_id <= 0) {
+        std::cout << "[TRACK_ONLINE][WARN] 无法解析当前 GMTI 结果编号，回退到旧 trackModule。" << std::endl;
+        return trackModule(cfg, manager);
+    }
+
+    const std::string input_path = makeGmtiBinPath(cfg.result_add, result_id);
+
+    std::vector<GMTIDetection> dets;
+    double utc_global = 0.0;
+    const bool ok = readCurrentDetections(input_path, dets, utc_global);
+    if (!ok) {
+        dets.clear();
+    }
+
+    for (auto& d : dets) {
+        double E = 0.0;
+        double N = 0.0;
+        Gaussp3(d.lat, d.lon, cfg.L0, E, N);
+        d.e = E;
+        d.n = N;
+    }
+
+    const double frame_utc = estimateFrameUtc(dets, utc_global);
+    std::vector<GMTIDetection> outputs =
+        manager->updateRawDetections(cfg, dets, result_id, frame_utc);
+
+    for (auto& out : outputs) {
+        double lat = 0.0;
+        double lon = 0.0;
+        Gaussp3RV(out.e, out.n, cfg.L0, lat, lon);
+        out.lat = lat;
+        out.lon = lon;
+    }
+
+    std::sort(outputs.begin(), outputs.end(),
+              [](const GMTIDetection& a, const GMTIDetection& b) {
+                  return a.id < b.id;
+              });
+
+    std::vector<CurrentTargetPacket> packets = makeCurrentPackets(outputs);
+    std::cout << "[TRACK_ONLINE] 当前周期确认输出目标数: " << packets.size()
+              << " (result_id=" << result_id
+              << ", raw_dets=" << dets.size() << ")" << std::endl;
+    printCurrentTargets(packets);
+    writeCurrentCyclePackets(packets, makeGmtiTrackPath(cfg.result_add, result_id));
+    return outputs;
+}
+
 GMTIResult read_mt_result_bin(const std::string& binFile) {
     GMTIResult out;
     std::ifstream fs(binFile, std::ios::binary);
@@ -452,7 +598,7 @@ GMTIResult read_mt_result_bin(const std::string& binFile) {
 
     // 2. 循环读取每个目标
     for (int i = 0; i < N; ++i) {
-        GMTIDetection det;
+        GMTIDetection det{};
         int32_t lon_int = 0, lat_int = 0;
 
         if (use_new_layout_36) {

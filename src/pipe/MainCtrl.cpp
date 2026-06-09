@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -91,6 +92,27 @@ void pushPendingEchoFile(const std::string& fileName)
 {
     std::lock_guard<std::mutex> lock(g_gmtiFileQueueMutex);
     g_gmtiFileQueue.push(fileName);
+}
+
+bool parseLocalEchoSpec(const std::string& spec, int& forcedId, std::string& echoFile)
+{
+    forcedId = -1;
+    echoFile = spec;
+
+    const size_t eq = spec.find('=');
+    if (eq == std::string::npos || eq == 0 || eq + 1 >= spec.size()) {
+        return true;
+    }
+
+    for (size_t i = 0; i < eq; ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(spec[i]))) {
+            return true;
+        }
+    }
+
+    forcedId = std::stoi(spec.substr(0, eq));
+    echoFile = spec.substr(eq + 1);
+    return forcedId > 0 && !echoFile.empty();
 }
 
 static inline int32_t quant_deg_to_i32(double deg)
@@ -289,7 +311,7 @@ static bool reopen_result_pipe(MainCtrl* host)
     return true;
 }
 
-static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile)
+static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, int forcedResultId = -1)
 {
     TIMING_SCOPE(main_total);
     if (!host) {
@@ -301,13 +323,13 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile)
         return false;
     }
 
-    if (!reopen_result_pipe(host)) {
+    if (host->pipesEnabled() && !reopen_result_pipe(host)) {
         return false;
     }
 
     if (!echoFile.empty()) {
         host->cfg_.GMTI_Data_new = echoFile;
-        int trackId = extractFileIdFromPath(echoFile);
+        int trackId = forcedResultId > 0 ? forcedResultId : extractFileIdFromPath(echoFile);
         if (trackId <= 0) {
             if (!allocateNextResultId(host->gmti_proc_, host->cfg_, trackId)) {
                 std::cerr << "[ERR] Cannot allocate incremental GMTI result id from result_add: "
@@ -319,6 +341,10 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile)
         }
         host->cfg_.result_file_id = trackId;
         host->cfg_.track_idx_range = buildTrackIdxRange(trackId, host->cfg_.track_idx_window);
+        if (forcedResultId > 0) {
+            std::cout << "[LOCAL-TEST] Use forced result id " << forcedResultId
+                      << " for echo file: " << echoFile << std::endl;
+        }
     }
 
     if (host->cfg_.track_idx_range.empty()) {
@@ -405,7 +431,7 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile)
             MT_acc.insert(MT_acc.end(), std::make_move_iterator(res.MT.begin()),
                           std::make_move_iterator(res.MT.end()));
         }
-        std::cout << "[OK] Period " << periodList[i] << " 完成" << std::endl;
+        // std::cout << "[OK] Period " << periodList[i] << " 完成" << std::endl;
     }
 
     bool wroteCurrentDetections = false;
@@ -422,7 +448,7 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile)
     if (!wroteCurrentDetections) {
         std::cout << "[TRACK][WARN] 本周期未写入新的检测结果文件，关联窗口中的当前编号文件可能是旧数据。" << std::endl;
     }
-    std::vector<GMTIDetection> currentTargets = trackModule(host->cfg_, &host->track_manager_);
+    std::vector<GMTIDetection> currentTargets = trackModuleOnline(host->cfg_, &host->track_manager_);
     GMTIResultPacket packet = buildResultPacketSnapshot(host, currentTargets);
     {
         std::lock_guard<std::mutex> lock(host->result_mutex_);
@@ -476,24 +502,29 @@ static void printModeSwitchCmd(const ModeSwitchCmd& cmd)
 
 } // namespace
 
-MainCtrl::MainCtrl(const std::string& pipeRootPath)
-    : pipe_root_path_(pipeRootPath.empty() ? cfg_.pipe_root_path : pipeRootPath)
+MainCtrl::MainCtrl(const std::string& pipeRootPath, bool enablePipes)
+    : pipe_root_path_(pipeRootPath.empty() ? cfg_.pipe_root_path : pipeRootPath),
+      pipes_enabled_(enablePipes)
 {
     std::cout << "GMTI INIT..." << std::endl;
 
     m_SendBuf = static_cast<char*>(std::malloc(40 * 1024 * 1024));
     IsResultReady = false;
 
-    const std::string cmdPipePath = composePipePath(pipe_root_path_, "pipegmticmd");
-    const std::string echoPipePath = composePipePath(pipe_root_path_, "pipegmtiecho");
-    const std::string resultPipePath = composePipePath(pipe_root_path_, "pipegmtiresult");
+    if (pipes_enabled_) {
+        const std::string cmdPipePath = composePipePath(pipe_root_path_, "pipegmticmd");
+        const std::string echoPipePath = composePipePath(pipe_root_path_, "pipegmtiecho");
+        const std::string resultPipePath = composePipePath(pipe_root_path_, "pipegmtiresult");
 
-    m_RecvCmdPipe.CreatePipe(cmdPipePath.c_str(), O_RDWR);
-    m_RecvEchoPipe.CreatePipe(echoPipePath.c_str(), O_RDWR);
-    m_SendResultPipe.CreatePipe(resultPipePath.c_str(), O_RDWR);
+        m_RecvCmdPipe.CreatePipe(cmdPipePath.c_str(), O_RDWR);
+        m_RecvEchoPipe.CreatePipe(echoPipePath.c_str(), O_RDWR);
+        m_SendResultPipe.CreatePipe(resultPipePath.c_str(), O_RDWR);
+    }
 
     m_workmode = Mode_INIT;
-    InitThread();
+    if (pipes_enabled_) {
+        InitThread();
+    }
 }
 
 MainCtrl::~MainCtrl()
@@ -506,6 +537,9 @@ MainCtrl::~MainCtrl()
 
 void MainCtrl::InitThread()
 {
+    if (!pipes_enabled_) {
+        return;
+    }
     std::cout << "GMTI mode..." << std::endl;
 
     pthread_t thrRecvCmd;
@@ -519,6 +553,51 @@ void MainCtrl::InitThread()
 
     pthread_t thrSendRes;
     pthread_create(&thrSendRes, NULL, OnResSendThread, this);
+}
+
+bool MainCtrl::RunLocalTest(const std::string& xmlPath, const std::vector<std::string>& echoFiles)
+{
+    if (echoFiles.empty()) {
+        std::cerr << "[LOCAL-TEST][ERR] echo file list is empty" << std::endl;
+        return false;
+    }
+
+    gmti_config_xml_ = xmlPath.empty() ? "temp_config.xml" : xmlPath;
+    m_workmode = Mode_GMTI;
+    track_manager_.reset();
+
+    bool allOk = true;
+    std::cout << "[LOCAL-TEST] XML: " << gmti_config_xml_ << std::endl;
+    std::cout << "[LOCAL-TEST] Echo files: " << echoFiles.size() << std::endl;
+    for (size_t i = 0; i < echoFiles.size(); ++i) {
+        int forcedId = -1;
+        std::string echoFile;
+        if (!parseLocalEchoSpec(echoFiles[i], forcedId, echoFile)) {
+            allOk = false;
+            std::cerr << "[LOCAL-TEST][ERR] Invalid echo spec: " << echoFiles[i] << std::endl;
+            continue;
+        }
+
+        std::cout << "\n[LOCAL-TEST] ===== "
+                  << (i + 1) << "/" << echoFiles.size()
+                  << " echo=" << echoFile;
+        if (forcedId > 0) {
+            std::cout << " result_id=" << forcedId;
+        }
+        std::cout << " =====" << std::endl;
+        if (!runGMTIProcessingFlow(this, echoFile, forcedId)) {
+            allOk = false;
+            std::cerr << "[LOCAL-TEST][ERR] GMTI processing failed: "
+                      << echoFile << std::endl;
+        }
+        {
+            std::lock_guard<std::mutex> lock(result_mutex_);
+            pending_result_packets_.clear();
+            IsResultReady = false;
+        }
+    }
+
+    return allOk;
 }
 
 void* MainCtrl::OnRecvCmdThread(void *param)

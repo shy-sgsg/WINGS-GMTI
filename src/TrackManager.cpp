@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <numeric>
 
 namespace {
 
@@ -13,6 +14,9 @@ constexpr double kMissCost = 25.0;
 constexpr double kMahalanobisGate = 16.0;
 constexpr double kMinMeasurementStdM = 20.0;
 constexpr double kProcessAccelMps2 = 5.0;
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kSmallDistanceM = 1.0;
+constexpr double kSmallSpeedMps = 0.5;
 
 struct DetectionPoint {
     GMTIDetection det;
@@ -20,36 +24,17 @@ struct DetectionPoint {
     double n = 0.0;
 };
 
+struct AssocScore {
+    bool valid = false;
+    double cost = kInvalidCost;
+    double dist = 0.0;
+    double instant_speed = 0.0;
+    double mahalanobis_d2 = kInvalidCost;
+};
+
 static bool validUtc(double utc)
 {
     return std::isfinite(utc) && utc > 0.0;
-}
-
-static double wrap180(double angle_deg)
-{
-    angle_deg = std::fmod(angle_deg + 180.0, 360.0);
-    if (angle_deg < 0.0) {
-        angle_deg += 360.0;
-    }
-    return angle_deg - 180.0;
-}
-
-static double directionCost(double a, double b)
-{
-    if (!std::isfinite(a) || !std::isfinite(b)) {
-        return 0.0;
-    }
-    const double diff = std::fabs(wrap180(a - b));
-    return std::min(4.0, diff / 45.0);
-}
-
-static double rangeCost(double a, double b)
-{
-    if (!std::isfinite(a) || !std::isfinite(b) || a <= 0.0 || b <= 0.0) {
-        return 0.0;
-    }
-    const double denom = std::max(100.0, 0.5 * (std::fabs(a) + std::fabs(b)));
-    return std::min(4.0, std::fabs(a - b) / denom);
 }
 
 static double currentUtc(const std::vector<DetectionPoint>& detections)
@@ -62,7 +47,12 @@ static double currentUtc(const std::vector<DetectionPoint>& detections)
     return 0.0;
 }
 
-static double frameDt(const ManagedTrack& tr, double utc, int result_id)
+static double safeDefaultDt(const Config& cfg)
+{
+    return std::max(1e-3, cfg.track_default_dt);
+}
+
+static double frameDtLegacy(const ManagedTrack& tr, double utc, int result_id)
 {
     if (validUtc(utc) && validUtc(tr.utc)) {
         const double dt = utc - tr.utc;
@@ -76,7 +66,29 @@ static double frameDt(const ManagedTrack& tr, double utc, int result_id)
     return 1.0;
 }
 
-static void initCovariance(ManagedTrack& tr, double gate_m)
+static double computeDtForPredict(const Config& cfg, const ManagedTrack& tr, double frame_utc)
+{
+    if (validUtc(frame_utc) && validUtc(tr.utc) && frame_utc > tr.utc) {
+        return frame_utc - tr.utc;
+    }
+    return safeDefaultDt(cfg);
+}
+
+static double computeDtForDetection(const Config& cfg,
+                                    const ManagedTrack& tr,
+                                    const GMTIDetection& det,
+                                    double frame_utc)
+{
+    if (validUtc(det.utcMid) && validUtc(tr.utc) && det.utcMid > tr.utc) {
+        return det.utcMid - tr.utc;
+    }
+    if (validUtc(frame_utc) && validUtc(tr.utc) && frame_utc > tr.utc) {
+        return frame_utc - tr.utc;
+    }
+    return safeDefaultDt(cfg);
+}
+
+static void initCovarianceLegacy(ManagedTrack& tr, double gate_m)
 {
     tr.P.fill(0.0);
     const double pos_var = std::max(kMinMeasurementStdM, gate_m * 0.5);
@@ -87,7 +99,16 @@ static void initCovariance(ManagedTrack& tr, double gate_m)
     tr.P[15] = vel_std * vel_std;
 }
 
-static void predictTrack(ManagedTrack& tr, double dt)
+static void initCovarianceOnline(ManagedTrack& tr)
+{
+    tr.P.fill(0.0);
+    tr.P[0] = 100.0;
+    tr.P[5] = 100.0;
+    tr.P[10] = 1000.0;
+    tr.P[15] = 1000.0;
+}
+
+static void kalmanPredict(ManagedTrack& tr, const Config& cfg, double dt)
 {
     dt = std::max(1e-3, dt);
     tr.e += tr.ve * dt;
@@ -98,47 +119,43 @@ static void predictTrack(ManagedTrack& tr, double dt)
     const double p20 = tr.P[8],  p21 = tr.P[9],  p22 = tr.P[10], p23 = tr.P[11];
     const double p30 = tr.P[12], p31 = tr.P[13], p32 = tr.P[14], p33 = tr.P[15];
 
-    tr.P[0] = p00 + dt * (p20 + p02) + dt * dt * p22;
+    tr.P[0] = p00 + dt * (p20 + p02) + dt * dt * p22 + cfg.track_process_noise_pos;
     tr.P[1] = p01 + dt * (p21 + p03) + dt * dt * p23;
     tr.P[2] = p02 + dt * p22;
     tr.P[3] = p03 + dt * p23;
 
     tr.P[4] = p10 + dt * (p30 + p12) + dt * dt * p32;
-    tr.P[5] = p11 + dt * (p31 + p13) + dt * dt * p33;
+    tr.P[5] = p11 + dt * (p31 + p13) + dt * dt * p33 + cfg.track_process_noise_pos;
     tr.P[6] = p12 + dt * p32;
     tr.P[7] = p13 + dt * p33;
 
     tr.P[8] = p20 + dt * p22;
     tr.P[9] = p21 + dt * p23;
-    tr.P[10] = p22;
+    tr.P[10] = p22 + cfg.track_process_noise_vel;
     tr.P[11] = p23;
 
     tr.P[12] = p30 + dt * p32;
     tr.P[13] = p31 + dt * p33;
     tr.P[14] = p32;
-    tr.P[15] = p33;
+    tr.P[15] = p33 + cfg.track_process_noise_vel;
+}
 
-    const double q = kProcessAccelMps2 * kProcessAccelMps2;
-    const double dt2 = dt * dt;
-    const double dt3 = dt2 * dt;
-    const double dt4 = dt2 * dt2;
-    tr.P[0] += 0.25 * dt4 * q;
-    tr.P[5] += 0.25 * dt4 * q;
-    tr.P[2] += 0.5 * dt3 * q;
-    tr.P[8] += 0.5 * dt3 * q;
-    tr.P[7] += 0.5 * dt3 * q;
-    tr.P[13] += 0.5 * dt3 * q;
-    tr.P[10] += dt2 * q;
-    tr.P[15] += dt2 * q;
+static void predictTrackLegacy(ManagedTrack& tr, double dt)
+{
+    Config cfg;
+    cfg.track_process_noise_pos = 0.25 * dt * dt * dt * dt * kProcessAccelMps2 * kProcessAccelMps2;
+    cfg.track_process_noise_vel = dt * dt * kProcessAccelMps2 * kProcessAccelMps2;
+    kalmanPredict(tr, cfg, dt);
 }
 
 static double mahalanobis2(const ManagedTrack& tr,
-                           const DetectionPoint& det,
+                           double det_e,
+                           double det_n,
                            double measurement_var,
                            double& dist_out)
 {
-    const double rx = det.e - tr.e;
-    const double ry = det.n - tr.n;
+    const double rx = det_e - tr.e;
+    const double ry = det_n - tr.n;
     dist_out = std::sqrt(rx * rx + ry * ry);
 
     const double s00 = tr.P[0] + measurement_var;
@@ -157,15 +174,14 @@ static double mahalanobis2(const ManagedTrack& tr,
     return rx * (inv00 * rx + inv01 * ry) + ry * (inv10 * rx + inv11 * ry);
 }
 
-static void updateTrackKalman(ManagedTrack& tr,
-                              const DetectionPoint& det,
-                              double measurement_var,
-                              double dt)
+static void kalmanUpdate(ManagedTrack& tr,
+                         double det_e,
+                         double det_n,
+                         double measurement_var,
+                         double* residual_d2)
 {
-    const double z0 = det.e;
-    const double z1 = det.n;
-    const double y0 = z0 - tr.e;
-    const double y1 = z1 - tr.n;
+    const double y0 = det_e - tr.e;
+    const double y1 = det_n - tr.n;
 
     const double s00 = tr.P[0] + measurement_var;
     const double s01 = tr.P[1];
@@ -173,8 +189,11 @@ static void updateTrackKalman(ManagedTrack& tr,
     const double s11 = tr.P[5] + measurement_var;
     const double det_s = s00 * s11 - s01 * s10;
     if (std::fabs(det_s) < 1e-9) {
-        tr.e = det.e;
-        tr.n = det.n;
+        tr.e = det_e;
+        tr.n = det_n;
+        if (residual_d2) {
+            *residual_d2 = 0.0;
+        }
         return;
     }
 
@@ -182,6 +201,9 @@ static void updateTrackKalman(ManagedTrack& tr,
     const double inv01 = -s01 / det_s;
     const double inv10 = -s10 / det_s;
     const double inv11 = s00 / det_s;
+    if (residual_d2) {
+        *residual_d2 = y0 * (inv00 * y0 + inv01 * y1) + y1 * (inv10 * y0 + inv11 * y1);
+    }
 
     double K[8] = {0.0};
     for (int r = 0; r < 4; ++r) {
@@ -207,14 +229,203 @@ static void updateTrackKalman(ManagedTrack& tr,
                 - K[r * 2 + 1] * oldP[4 + c];
         }
     }
+}
 
-    dt = std::max(1e-3, dt);
-    const double measured_ve = (det.e - (tr.e - tr.ve * dt)) / dt;
-    const double measured_vn = (det.n - (tr.n - tr.vn * dt)) / dt;
-    if (std::isfinite(measured_ve) && std::isfinite(measured_vn)) {
-        tr.ve = 0.7 * tr.ve + 0.3 * measured_ve;
-        tr.vn = 0.7 * tr.vn + 0.3 * measured_vn;
+static double median(std::deque<double> values)
+{
+    if (values.empty()) {
+        return 0.0;
     }
+    std::sort(values.begin(), values.end());
+    const size_t mid = values.size() / 2;
+    if (values.size() % 2 == 0) {
+        return 0.5 * (values[mid - 1] + values[mid]);
+    }
+    return values[mid];
+}
+
+static double absAngleDiff(double a, double b)
+{
+    double d = std::fmod(a - b + kPi, 2.0 * kPi);
+    if (d < 0.0) {
+        d += 2.0 * kPi;
+    }
+    return std::fabs(d - kPi);
+}
+
+static double circularMean(const std::deque<double>& angles)
+{
+    if (angles.empty()) {
+        return 0.0;
+    }
+    double s = 0.0;
+    double c = 0.0;
+    for (double a : angles) {
+        s += std::sin(a);
+        c += std::cos(a);
+    }
+    return std::atan2(s, c);
+}
+
+static void pushBounded(std::deque<int>& values, int value, int window)
+{
+    values.push_back(value);
+    while (static_cast<int>(values.size()) > std::max(1, window)) {
+        values.pop_front();
+    }
+}
+
+static void pushBounded(std::deque<double>& values, double value, int window)
+{
+    if (!std::isfinite(value)) {
+        return;
+    }
+    values.push_back(value);
+    while (static_cast<int>(values.size()) > std::max(1, window)) {
+        values.pop_front();
+    }
+}
+
+static void pushPointHistory(ManagedTrack& tr, double e, double n, double utc, int result_id, const Config& cfg)
+{
+    tr.point_history.push_back(TrackPoint{e, n, utc, result_id});
+    const int keep = std::max(3, cfg.track_linearity_window);
+    while (static_cast<int>(tr.point_history.size()) > keep) {
+        tr.point_history.pop_front();
+    }
+}
+
+static int recentHits(const ManagedTrack& tr, int window)
+{
+    int count = 0;
+    const int n = std::min<int>(std::max(1, window), tr.hit_history.size());
+    for (int i = 0; i < n; ++i) {
+        count += tr.hit_history[tr.hit_history.size() - 1 - i];
+    }
+    return count;
+}
+
+static double distanceEN(double e0, double n0, double e1, double n1)
+{
+    const double de = e1 - e0;
+    const double dn = n1 - n0;
+    return std::sqrt(de * de + dn * dn);
+}
+
+static double computeLinearity(const ManagedTrack& tr, int window)
+{
+    const int n = std::min<int>(std::max(3, window), tr.point_history.size());
+    if (n < 3) {
+        return 1.0;
+    }
+    const int start = static_cast<int>(tr.point_history.size()) - n;
+    const TrackPoint& first = tr.point_history[start];
+    const TrackPoint& last = tr.point_history.back();
+    const double straight = distanceEN(first.e, first.n, last.e, last.n);
+    double path = 0.0;
+    for (int i = start + 1; i < static_cast<int>(tr.point_history.size()); ++i) {
+        path += distanceEN(tr.point_history[i - 1].e, tr.point_history[i - 1].n,
+                           tr.point_history[i].e, tr.point_history[i].n);
+    }
+    if (path <= 1e-6) {
+        return 1.0;
+    }
+    return straight / path;
+}
+
+static bool linearityOK(const ManagedTrack& tr, const Config& cfg)
+{
+    if (tr.point_history.size() < 3) {
+        return true;
+    }
+    return computeLinearity(tr, cfg.track_linearity_window) >= cfg.track_min_linearity_confirm;
+}
+
+static bool shouldPromoteToConfirmed(const Config& cfg, const ManagedTrack& tr)
+{
+    if (recentHits(tr, cfg.track_confirm_window) < std::max(1, cfg.track_confirm_hits)) {
+        return false;
+    }
+    return linearityOK(tr, cfg);
+}
+
+static bool shouldOutputThisFrame(const Config& cfg, const ManagedTrack& tr, int result_id)
+{
+    if (tr.state != TrackState::Confirmed) {
+        return false;
+    }
+    if (!tr.matched_this_frame) {
+        return false;
+    }
+    if (tr.last_result_id != result_id) {
+        return false;
+    }
+    return recentHits(tr, cfg.track_confirm_window) >= std::max(1, cfg.track_confirm_hits);
+}
+
+static void updateMotionHistoryFromEN(ManagedTrack& tr,
+                                      const GMTIDetection& det,
+                                      double dt,
+                                      const Config& cfg)
+{
+    if (!tr.point_history.empty()) {
+        const TrackPoint& last = tr.point_history.back();
+        dt = std::max(1e-3, dt);
+        const double de = det.e - last.e;
+        const double dn = det.n - last.n;
+        const double dist = std::sqrt(de * de + dn * dn);
+        tr.ve = de / dt;
+        tr.vn = dn / dt;
+        tr.speed = std::sqrt(tr.ve * tr.ve + tr.vn * tr.vn);
+        pushBounded(tr.speed_history, tr.speed, cfg.track_linearity_window);
+        if (dist >= kSmallDistanceM && tr.speed >= kSmallSpeedMps) {
+            pushBounded(tr.heading_history, std::atan2(dn, de), cfg.track_linearity_window);
+        }
+    }
+}
+
+static AssocScore computeAssocScore(const Config& cfg,
+                                    const ManagedTrack& tr,
+                                    const GMTIDetection& det,
+                                    double frame_utc,
+                                    double measurement_var)
+{
+    AssocScore score;
+    score.mahalanobis_d2 = mahalanobis2(tr, det.e, det.n, measurement_var, score.dist);
+    if (cfg.track_gate_m > 0.0 && score.dist > cfg.track_gate_m) {
+        return score;
+    }
+    if (score.mahalanobis_d2 > cfg.track_chi2_gate) {
+        return score;
+    }
+
+    const double dt = computeDtForDetection(cfg, tr, det, frame_utc);
+    const TrackPoint* last_hit = tr.point_history.empty() ? nullptr : &tr.point_history.back();
+    const double motion_dist = last_hit ? distanceEN(last_hit->e, last_hit->n, det.e, det.n) : score.dist;
+    score.instant_speed = motion_dist / std::max(1e-3, dt);
+    if (cfg.track_v_max > 0.0 && score.instant_speed > cfg.track_v_max) {
+        return score;
+    }
+
+    double speed_penalty = 0.0;
+    if (tr.speed_history.size() >= 2) {
+        const double v_ref = median(tr.speed_history);
+        speed_penalty = std::fabs(score.instant_speed - v_ref) / std::max(v_ref, 1.0);
+    }
+
+    double heading_penalty = 0.0;
+    if (last_hit && tr.heading_history.size() >= 2 &&
+        motion_dist >= kSmallDistanceM && tr.speed >= kSmallSpeedMps) {
+        const double heading_inst = std::atan2(det.n - last_hit->n, det.e - last_hit->e);
+        const double heading_ref = circularMean(tr.heading_history);
+        heading_penalty = absAngleDiff(heading_inst, heading_ref) / kPi;
+    }
+
+    score.valid = true;
+    score.cost = score.mahalanobis_d2
+        + cfg.track_speed_smooth_weight * speed_penalty
+        + cfg.track_heading_weight * heading_penalty;
+    return score;
 }
 
 static std::vector<int> solveAssignment(const std::vector<std::vector<double>>& cost)
@@ -330,9 +541,9 @@ std::vector<GMTIDetection> TrackManager::update(
             continue;
         }
         if (tr.hit_count <= 0) {
-            initCovariance(tr, gate_m);
+            initCovarianceLegacy(tr, gate_m);
         }
-        predictTrack(tr, frameDt(tr, update_utc, result_id));
+        predictTrackLegacy(tr, frameDtLegacy(tr, update_utc, result_id));
         active_tracks.push_back(static_cast<int>(ti));
     }
 
@@ -348,13 +559,14 @@ std::vector<GMTIDetection> TrackManager::update(
             const ManagedTrack& tr = tracks_[active_tracks[row]];
             for (int di = 0; di < det_count; ++di) {
                 double dist = 0.0;
-                const double d2 = mahalanobis2(tr, detections[di], measurement_var, dist);
+                const double d2 = mahalanobis2(tr, detections[di].e, detections[di].n,
+                                               measurement_var, dist);
                 if (gate_m > 0.0 && dist > gate_m) {
                     cost[row][di] = kInvalidCost;
                     continue;
                 }
 
-                const double dt = frameDt(tr, detections[di].det.utcMid, result_id);
+                const double dt = frameDtLegacy(tr, detections[di].det.utcMid, result_id);
                 const double speed = dist / std::max(1e-3, dt);
                 if (v_max > 0.0 && speed > v_max) {
                     cost[row][di] = kInvalidCost;
@@ -366,10 +578,7 @@ std::vector<GMTIDetection> TrackManager::update(
                 }
 
                 const double norm_dist = (gate_m > 0.0) ? dist / gate_m : 0.0;
-                cost[row][di] = d2
-                    + 0.5 * norm_dist
-                    + 0.25 * directionCost(tr.direction, detections[di].det.direction)
-                    + 0.25 * rangeCost(tr.range, detections[di].det.range);
+                cost[row][di] = d2 + 0.5 * norm_dist;
             }
         }
 
@@ -383,12 +592,11 @@ std::vector<GMTIDetection> TrackManager::update(
 
             ManagedTrack& tr = tracks_[ti];
             const DetectionPoint& pt = detections[col];
-            const double dt = frameDt(tr, pt.det.utcMid, result_id);
+            const double dt = frameDtLegacy(tr, pt.det.utcMid, result_id);
             const double prev_e = tr.e;
             const double prev_n = tr.n;
-            updateTrackKalman(tr, pt, measurement_var, dt);
-            const double dist = std::sqrt((pt.e - prev_e) * (pt.e - prev_e)
-                                        + (pt.n - prev_n) * (pt.n - prev_n));
+            kalmanUpdate(tr, pt.e, pt.n, measurement_var, nullptr);
+            const double dist = distanceEN(pt.e, pt.n, prev_e, prev_n);
             const double speed = dist / std::max(1e-3, dt);
 
             detections[col].det.id = tr.id;
@@ -435,7 +643,7 @@ std::vector<GMTIDetection> TrackManager::update(
         tr.n = detections[di].n;
         tr.ve = 0.0;
         tr.vn = 0.0;
-        initCovariance(tr, gate_m);
+        initCovarianceLegacy(tr, gate_m);
         tr.utc = detections[di].det.utcMid;
         tr.speed = detections[di].det.speed;
         tr.direction = detections[di].det.direction;
@@ -464,6 +672,226 @@ std::vector<GMTIDetection> TrackManager::update(
     return out;
 }
 
+std::vector<GMTIDetection> TrackManager::updateRawDetections(
+    const Config& cfg,
+    const std::vector<GMTIDetection>& current_detections,
+    int result_id,
+    double frame_utc)
+{
+    if (result_id > 0 && last_update_result_id_ > 0 && result_id < last_update_result_id_) {
+        std::cout << "[TRACK][WARN] TrackManager result id moved backward: current="
+                  << result_id << ", previous=" << last_update_result_id_
+                  << ". Reset persistent tracks." << std::endl;
+        reset();
+    }
+
+    for (auto& tr : tracks_) {
+        tr.matched_this_frame = false;
+    }
+
+    std::vector<GMTIDetection> dets = current_detections;
+    for (auto& tr : tracks_) {
+        if (tr.state == TrackState::Deleted) {
+            continue;
+        }
+        kalmanPredict(tr, cfg, computeDtForPredict(cfg, tr, frame_utc));
+    }
+
+    std::vector<int> active_tracks;
+    active_tracks.reserve(tracks_.size());
+    for (size_t ti = 0; ti < tracks_.size(); ++ti) {
+        if (tracks_[ti].state != TrackState::Deleted) {
+            active_tracks.push_back(static_cast<int>(ti));
+        }
+    }
+
+    std::vector<char> det_used(dets.size(), 0);
+    std::vector<AssocScore> accepted_scores(tracks_.size());
+    const int row_count = static_cast<int>(active_tracks.size());
+    const int det_count = static_cast<int>(dets.size());
+    const double dummy_cost = std::max(1.0, cfg.track_dummy_cost);
+    const double measurement_std = std::max(1.0, cfg.track_measurement_noise_pos);
+    const double measurement_var = measurement_std * measurement_std;
+
+    if (row_count > 0 && det_count > 0) {
+        const int col_count = det_count + row_count;
+        std::vector<std::vector<double>> cost(row_count, std::vector<double>(col_count, dummy_cost));
+        std::vector<std::vector<AssocScore>> scores(row_count, std::vector<AssocScore>(det_count));
+
+        for (int row = 0; row < row_count; ++row) {
+            const ManagedTrack& tr = tracks_[active_tracks[row]];
+            for (int di = 0; di < det_count; ++di) {
+                scores[row][di] = computeAssocScore(cfg, tr, dets[di], frame_utc, measurement_var);
+                if (scores[row][di].valid) {
+                    cost[row][di] = scores[row][di].cost;
+                } else if (cfg.track_debug_level >= 3) {
+                    std::cout << "[TRACK_ONLINE] cost invalid track=" << tr.id
+                              << " det=" << di
+                              << " d=" << scores[row][di].dist
+                              << " d2=" << scores[row][di].mahalanobis_d2
+                              << " v=" << scores[row][di].instant_speed << std::endl;
+                }
+            }
+        }
+
+        const std::vector<int> assignment = solveAssignment(cost);
+        for (int row = 0; row < row_count; ++row) {
+            const int ti = active_tracks[row];
+            const int col = (row < static_cast<int>(assignment.size())) ? assignment[row] : -1;
+            if (col < 0 || col >= det_count || cost[row][col] >= dummy_cost) {
+                continue;
+            }
+
+            ManagedTrack& tr = tracks_[ti];
+            GMTIDetection& det = dets[col];
+            const AssocScore& score = scores[row][col];
+            if (!score.valid) {
+                continue;
+            }
+
+            const double dt = computeDtForDetection(cfg, tr, det, frame_utc);
+            double residual_d2 = 0.0;
+            kalmanUpdate(tr, det.e, det.n, measurement_var, &residual_d2);
+            updateMotionHistoryFromEN(tr, det, dt, cfg);
+
+            tr.e = det.e;
+            tr.n = det.n;
+            tr.matched_this_frame = true;
+            tr.age++;
+            tr.hit_count++;
+            tr.miss_count = 0;
+            tr.consecutive_hits++;
+            tr.last_result_id = result_id;
+            tr.utc = validUtc(det.utcMid) ? det.utcMid : frame_utc;
+            tr.range = det.range;
+            tr.direction = det.direction;
+            pushBounded(tr.hit_history, 1, cfg.track_confirm_window);
+            pushPointHistory(tr, det.e, det.n, tr.utc, result_id, cfg);
+            pushBounded(tr.residual_history, residual_d2, cfg.track_linearity_window);
+            if (tr.state == TrackState::Coasted) {
+                tr.state = TrackState::Confirmed;
+            }
+
+            accepted_scores[ti] = score;
+            det_used[col] = 1;
+
+            if (cfg.track_debug_level >= 2) {
+                std::cout << "[TRACK_ONLINE] assign track=" << tr.id
+                          << " det=" << col
+                          << " cost=" << score.cost
+                          << " d=" << score.dist
+                          << " v=" << score.instant_speed
+                          << " state=" << (tr.state == TrackState::Confirmed ? "Confirmed" : "Tentative")
+                          << std::endl;
+            }
+        }
+    }
+
+    const int max_missed = std::max(0, cfg.track_max_missed);
+    for (auto& tr : tracks_) {
+        if (tr.state == TrackState::Deleted || tr.matched_this_frame) {
+            continue;
+        }
+        tr.age++;
+        tr.miss_count++;
+        tr.consecutive_hits = 0;
+        pushBounded(tr.hit_history, 0, cfg.track_confirm_window);
+
+        if (tr.miss_count > max_missed) {
+            tr.state = TrackState::Deleted;
+            if (cfg.track_debug_level >= 2) {
+                std::cout << "[TRACK_ONLINE] delete id=" << tr.id
+                          << " miss=" << tr.miss_count << std::endl;
+            }
+        } else {
+            tr.state = TrackState::Coasted;
+            if (cfg.track_debug_level >= 2) {
+                std::cout << "[TRACK_ONLINE] coast id=" << tr.id
+                          << " miss=" << tr.miss_count << std::endl;
+            }
+        }
+    }
+
+    for (size_t di = 0; di < dets.size(); ++di) {
+        if (det_used[di]) {
+            continue;
+        }
+        const GMTIDetection& det = dets[di];
+        ManagedTrack tr;
+        tr.id = allocateNextId();
+        tr.state = TrackState::Tentative;
+        tr.e = det.e;
+        tr.n = det.n;
+        tr.ve = 0.0;
+        tr.vn = 0.0;
+        initCovarianceOnline(tr);
+        tr.utc = validUtc(det.utcMid) ? det.utcMid : frame_utc;
+        tr.speed = 0.0;
+        tr.direction = det.direction;
+        tr.range = det.range;
+        tr.last_result_id = result_id;
+        tr.age = 1;
+        tr.hit_count = 1;
+        tr.miss_count = 0;
+        tr.consecutive_hits = 1;
+        tr.matched_this_frame = true;
+        tr.hit_history.push_back(1);
+        tr.point_history.push_back(TrackPoint{det.e, det.n, tr.utc, result_id});
+        tracks_.push_back(tr);
+
+        if (cfg.track_debug_level >= 2) {
+            std::cout << "[TRACK_ONLINE] new tentative id=" << tr.id
+                      << " det=" << di << std::endl;
+        }
+    }
+
+    for (auto& tr : tracks_) {
+        if (tr.state == TrackState::Tentative && shouldPromoteToConfirmed(cfg, tr)) {
+            tr.state = TrackState::Confirmed;
+            if (cfg.track_debug_level >= 2) {
+                std::cout << "[TRACK_ONLINE] confirm id=" << tr.id
+                          << " hits=" << recentHits(tr, cfg.track_confirm_window)
+                          << "/" << cfg.track_confirm_window
+                          << " linearity=" << computeLinearity(tr, cfg.track_linearity_window)
+                          << std::endl;
+            }
+        }
+    }
+
+    std::vector<GMTIDetection> out;
+    for (const auto& tr : tracks_) {
+        if (!shouldOutputThisFrame(cfg, tr, result_id)) {
+            continue;
+        }
+        GMTIDetection det{};
+        det.id = tr.id;
+        det.e = tr.e;
+        det.n = tr.n;
+        det.speed = tr.speed;
+        det.direction = tr.direction;
+        det.range = tr.range;
+        det.utcMid = tr.utc;
+        out.push_back(det);
+    }
+
+    pruneDeleted();
+    if (result_id > 0) {
+        last_update_result_id_ = result_id;
+    }
+
+    if (cfg.track_debug_level >= 1) {
+        std::cout << "[TRACK_ONLINE] result_id=" << result_id
+                  << " dets=" << dets.size()
+                  << " active_tracks=" << tracks_.size()
+                  << " outputs=" << out.size() << std::endl;
+    }
+
+    std::sort(out.begin(), out.end(), [](const GMTIDetection& a, const GMTIDetection& b) {
+        return a.id < b.id;
+    });
+    return out;
+}
+
 void TrackManager::reset()
 {
     tracks_.clear();
@@ -472,6 +900,11 @@ void TrackManager::reset()
 }
 
 uint16_t TrackManager::allocateId()
+{
+    return allocateNextId();
+}
+
+uint16_t TrackManager::allocateNextId()
 {
     uint32_t candidate = next_id_;
     for (uint32_t count = 0; count < 65535U; ++count) {
