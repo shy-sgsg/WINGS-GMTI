@@ -80,8 +80,11 @@ struct Config {
     int track_confirm_window = 3; // 在线航迹 n屏选m确认窗口 N
     int track_confirm_hits = 2;   // 在线航迹 n屏选m确认命中数 M
     int track_max_missed = 2;     // Confirmed/Coasted 最大连续漏检保留帧数
+    int track_tentative_max_missed = 1; // Tentative 最大连续漏检保留帧数
     double track_default_dt = 1.0; // UTC 无效时默认帧间隔，单位秒
     double track_chi2_gate = 9.21; // 二维量测 99% Mahalanobis 门限
+    double track_tentative_gate_scale = 1.5; // Tentative 空间门限放宽倍率
+    double track_tentative_chi2_scale = 1.5; // Tentative Mahalanobis 门限放宽倍率
     double track_dummy_cost = 1000.0; // Hungarian dummy 未匹配代价
     int track_linearity_window = 5; // 直线度评价窗口
     double track_min_linearity_confirm = 0.65; // Tentative 确认最小直线度
@@ -90,6 +93,9 @@ struct Config {
     double track_process_noise_pos = 25.0; // Kalman 位置过程噪声方差项
     double track_process_noise_vel = 10.0; // Kalman 速度过程噪声方差项
     double track_measurement_noise_pos = 50.0; // Kalman 位置量测噪声标准差
+    bool track_debug_dump = true; // 在线 TrackManager 调试快照开关
+    std::string track_debug_dir = ""; // 为空时使用 result_add/track_debug
+    int track_debug_dump_level = 1; // 1: 周期摘要/CSV, 2: 逐航迹日志
 
     // 推导参数
     double lambda;              // 波长

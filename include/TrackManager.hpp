@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <string>
 #include <vector>
 
 enum class TrackState {
@@ -42,6 +43,8 @@ struct ManagedTrack {
     int miss_count = 0;
     int consecutive_hits = 0;
     bool matched_this_frame = false;
+    int matched_det_index = -1;
+    bool is_output_this_frame = false;
     std::deque<int> hit_history;
     std::deque<TrackPoint> point_history;
     std::deque<double> speed_history;
@@ -65,8 +68,18 @@ private:
     uint16_t allocateId();
     uint16_t allocateNextId();
     bool isActiveId(uint16_t id) const;
+    ManagedTrack* findTrackById(uint16_t id);
     int currentResultId(const Config& cfg) const;
     int maxMiss(const Config& cfg) const;
+    void dumpDebugSnapshot(const Config& cfg,
+                           int result_id,
+                           double frame_utc,
+                           const std::vector<GMTIDetection>& detections,
+                           const std::vector<int>& det_to_track_id,
+                           int num_outputs,
+                           int num_new_tracks,
+                           int num_matched_tracks,
+                           int num_unmatched_detections) const;
     void pruneDeleted();
 
     uint16_t next_id_ = 1;

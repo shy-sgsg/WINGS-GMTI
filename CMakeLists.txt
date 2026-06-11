@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.18)
 # ============================================================
 # OFF: normal CUDA/nvcc build, for your own CUDA development PC
 # ON : CoreX clang++ ivcore build, for CoreX environment
-option(USE_COREX "Build with CoreX clang++ ivcore instead of native CUDA/nvcc" OFF)
+option(USE_COREX "Build with CoreX clang++ ivcore instead of native CUDA/nvcc" ON)
 
 set(COREX_ROOT "/usr/local/corex-4.3.7" CACHE PATH "CoreX installation root")
 
@@ -162,6 +162,21 @@ set(DBS_FUSION_SRC
   ${DBS_CUDA_SRC}
 )
 
+set(XML_SRC
+   src/xml/tinystr.cpp
+   src/xml/tinyxml.cpp
+   src/xml/tinyxmlerror.cpp
+   src/xml/tinyxmlparser.cpp
+)
+
+set(AUTH_SRC
+   auth/hardware_bind_flow/core/binding.cpp
+   auth/hardware_bind_flow/gate/checkpoint_codec.cpp
+   auth/hardware_bind_flow/gate/security_gate.cpp
+   auth/shared/crypto/sm3.cpp
+   auth/shared/hardware/hardware.cpp
+)
+
 set(COMMON_CORE_SRC
   src/alignFFTAndDBS.cpp
   src/clutter_CSI.cpp
@@ -181,10 +196,7 @@ set(COMMON_CORE_SRC
   src/extractUTC.cpp
   src/makeLists.cpp
   src/pesudoTarget_Gen.cpp
-  src/xml/tinystr.cpp
-  src/xml/tinyxml.cpp
-  src/xml/tinyxmlerror.cpp
-  src/xml/tinyxmlparser.cpp
+  ${XML_SRC}
   ${GPU_CUDA_SRC}
   ${DBS_FUSION_SRC}
 )
@@ -215,11 +227,7 @@ endif()
 add_executable(GMTI_core
   src/main.cpp
   ${COMMON_CORE_SRC}
-)
-
-add_executable(compare_range
-  src/tools/compare_range.cpp
-  ${COMMON_CORE_SRC}
+  ${AUTH_SRC}
 )
 
 add_executable(convert_old_echo_to_new_format
@@ -234,6 +242,7 @@ add_executable(convert_old_echo_to_new_format
 add_executable(GMTI_pipe_core
   ${GMTI_PIPE_ONLY_SRC}
   ${COMMON_CORE_SRC}
+  ${AUTH_SRC}
 )
 
 # ============================================================
@@ -243,11 +252,19 @@ add_executable(GMTI_pipe_core
 set(PROJECT_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/include/xml
+  auth/shared/hardware
+  auth/shared/crypto
+  auth/hardware_bind_flow/core
+  auth/hardware_bind_flow/gate
 )
 
 set(PIPE_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/include/pipe
   ${CMAKE_SOURCE_DIR}/src/pipe
+  auth/shared/hardware
+  auth/shared/crypto
+  auth/hardware_bind_flow/core
+  auth/hardware_bind_flow/gate
 )
 
 if(USE_COREX)
@@ -394,7 +411,6 @@ endfunction()
 # ============================================================
 
 configure_gmti_target(GMTI_core)
-configure_gmti_target(compare_range)
 configure_gmti_target(GMTI_pipe_core)
 
 target_include_directories(GMTI_pipe_core PRIVATE

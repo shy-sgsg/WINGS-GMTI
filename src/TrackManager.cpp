@@ -2,10 +2,17 @@
 #include "geo/geoProj.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <sstream>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 namespace {
 
@@ -363,6 +370,21 @@ static bool shouldOutputThisFrame(const Config& cfg, const ManagedTrack& tr, int
     return recentHits(tr, cfg.track_confirm_window) >= std::max(1, cfg.track_confirm_hits);
 }
 
+static const char* stateName(TrackState state)
+{
+    switch (state) {
+    case TrackState::Tentative:
+        return "Tentative";
+    case TrackState::Confirmed:
+        return "Confirmed";
+    case TrackState::Coasted:
+        return "Coasted";
+    case TrackState::Deleted:
+        return "Deleted";
+    }
+    return "Unknown";
+}
+
 static void updateMotionHistoryFromEN(ManagedTrack& tr,
                                       const GMTIDetection& det,
                                       double dt,
@@ -392,10 +414,16 @@ static AssocScore computeAssocScore(const Config& cfg,
 {
     AssocScore score;
     score.mahalanobis_d2 = mahalanobis2(tr, det.e, det.n, measurement_var, score.dist);
-    if (cfg.track_gate_m > 0.0 && score.dist > cfg.track_gate_m) {
+    double gate_m = cfg.track_gate_m;
+    double chi2_gate = cfg.track_chi2_gate;
+    if (tr.state == TrackState::Tentative) {
+        gate_m *= std::max(1.0, cfg.track_tentative_gate_scale);
+        chi2_gate *= std::max(1.0, cfg.track_tentative_chi2_scale);
+    }
+    if (gate_m > 0.0 && score.dist > gate_m) {
         return score;
     }
-    if (score.mahalanobis_d2 > cfg.track_chi2_gate) {
+    if (score.mahalanobis_d2 > chi2_gate) {
         return score;
     }
 
@@ -407,14 +435,15 @@ static AssocScore computeAssocScore(const Config& cfg,
         return score;
     }
 
+    const bool early_track = (tr.hit_count < 2 || tr.point_history.size() < 2);
     double speed_penalty = 0.0;
-    if (tr.speed_history.size() >= 2) {
+    if (!early_track && tr.speed_history.size() >= 2) {
         const double v_ref = median(tr.speed_history);
         speed_penalty = std::fabs(score.instant_speed - v_ref) / std::max(v_ref, 1.0);
     }
 
     double heading_penalty = 0.0;
-    if (last_hit && tr.heading_history.size() >= 2 &&
+    if (!early_track && last_hit && tr.heading_history.size() >= 2 &&
         motion_dist >= kSmallDistanceM && tr.speed >= kSmallSpeedMps) {
         const double heading_inst = std::atan2(det.n - last_hit->n, det.e - last_hit->e);
         const double heading_ref = circularMean(tr.heading_history);
@@ -494,6 +523,72 @@ static std::vector<int> solveAssignment(const std::vector<std::vector<double>>& 
         }
     }
     return assignment;
+}
+
+static bool ensureDirectory(const std::string& path)
+{
+    if (path.empty()) {
+        return false;
+    }
+
+    std::string current;
+    current.reserve(path.size());
+    for (size_t i = 0; i < path.size(); ++i) {
+        current.push_back(path[i]);
+        if (path[i] != '/' && i + 1 != path.size()) {
+            continue;
+        }
+        while (current.size() > 1 && current.back() == '/') {
+            current.pop_back();
+        }
+        if (current.empty() || current == "/") {
+            if (path[i] == '/' && current != "/") {
+                current.push_back('/');
+            }
+            continue;
+        }
+        if (::mkdir(current.c_str(), 0777) != 0 && errno != EEXIST) {
+            std::cerr << "[TRACK][WARN] cannot create debug dir: "
+                      << current << " error=" << std::strerror(errno) << std::endl;
+            return false;
+        }
+        if (i + 1 != path.size() && path[i] == '/' && current.back() != '/') {
+            current.push_back('/');
+        }
+    }
+    return true;
+}
+
+static std::string debugDir(const Config& cfg)
+{
+    if (!cfg.track_debug_dir.empty()) {
+        return cfg.track_debug_dir;
+    }
+    if (cfg.result_add.empty()) {
+        return "track_debug";
+    }
+    return cfg.result_add + "/track_debug";
+}
+
+static bool fileNeedsHeader(const std::string& path)
+{
+    std::ifstream in(path.c_str(), std::ios::binary | std::ios::ate);
+    return !in.is_open() || in.tellg() <= 0;
+}
+
+static std::ofstream openCsvAppend(const std::string& path, const char* header)
+{
+    const bool need_header = fileNeedsHeader(path);
+    std::ofstream out(path.c_str(), std::ios::out | std::ios::app);
+    if (!out.is_open()) {
+        std::cerr << "[TRACK][WARN] cannot open debug csv: " << path << std::endl;
+        return out;
+    }
+    if (need_header) {
+        out << header << "\n";
+    }
+    out << std::fixed;
+    return out;
 }
 
 } // namespace
@@ -687,6 +782,8 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
 
     for (auto& tr : tracks_) {
         tr.matched_this_frame = false;
+        tr.matched_det_index = -1;
+        tr.is_output_this_frame = false;
     }
 
     std::vector<GMTIDetection> dets = current_detections;
@@ -706,7 +803,10 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
     }
 
     std::vector<char> det_used(dets.size(), 0);
+    std::vector<int> det_to_track_id(dets.size(), -1);
     std::vector<AssocScore> accepted_scores(tracks_.size());
+    int num_matched_tracks = 0;
+    int num_new_tracks = 0;
     const int row_count = static_cast<int>(active_tracks.size());
     const int det_count = static_cast<int>(dets.size());
     const double dummy_cost = std::max(1.0, cfg.track_dummy_cost);
@@ -757,6 +857,7 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
             tr.e = det.e;
             tr.n = det.n;
             tr.matched_this_frame = true;
+            tr.matched_det_index = col;
             tr.age++;
             tr.hit_count++;
             tr.miss_count = 0;
@@ -774,6 +875,8 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
 
             accepted_scores[ti] = score;
             det_used[col] = 1;
+            det_to_track_id[col] = tr.id;
+            num_matched_tracks++;
 
             if (cfg.track_debug_level >= 2) {
                 std::cout << "[TRACK_ONLINE] assign track=" << tr.id
@@ -788,6 +891,7 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
     }
 
     const int max_missed = std::max(0, cfg.track_max_missed);
+    const int tentative_max_missed = std::max(0, cfg.track_tentative_max_missed);
     for (auto& tr : tracks_) {
         if (tr.state == TrackState::Deleted || tr.matched_this_frame) {
             continue;
@@ -797,16 +901,35 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
         tr.consecutive_hits = 0;
         pushBounded(tr.hit_history, 0, cfg.track_confirm_window);
 
-        if (tr.miss_count > max_missed) {
+        if (tr.state == TrackState::Tentative) {
+            if (tr.miss_count > tentative_max_missed) {
+                tr.state = TrackState::Deleted;
+                if (cfg.track_debug_level >= 2) {
+                    std::cout << "[TRACK_ONLINE] delete tentative id=" << tr.id
+                              << " miss=" << tr.miss_count << std::endl;
+                }
+            }
+            continue;
+        }
+
+        if (tr.state == TrackState::Confirmed || tr.state == TrackState::Coasted) {
+            if (tr.miss_count > max_missed) {
+                tr.state = TrackState::Deleted;
+                if (cfg.track_debug_level >= 2) {
+                    std::cout << "[TRACK_ONLINE] delete id=" << tr.id
+                              << " miss=" << tr.miss_count << std::endl;
+                }
+            } else if (tr.miss_count > 0) {
+                tr.state = TrackState::Coasted;
+                if (cfg.track_debug_level >= 2) {
+                    std::cout << "[TRACK_ONLINE] coast id=" << tr.id
+                              << " miss=" << tr.miss_count << std::endl;
+                }
+            }
+        } else if (tr.miss_count > max_missed) {
             tr.state = TrackState::Deleted;
             if (cfg.track_debug_level >= 2) {
                 std::cout << "[TRACK_ONLINE] delete id=" << tr.id
-                          << " miss=" << tr.miss_count << std::endl;
-            }
-        } else {
-            tr.state = TrackState::Coasted;
-            if (cfg.track_debug_level >= 2) {
-                std::cout << "[TRACK_ONLINE] coast id=" << tr.id
                           << " miss=" << tr.miss_count << std::endl;
             }
         }
@@ -835,9 +958,11 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
         tr.miss_count = 0;
         tr.consecutive_hits = 1;
         tr.matched_this_frame = true;
+        tr.matched_det_index = static_cast<int>(di);
         tr.hit_history.push_back(1);
         tr.point_history.push_back(TrackPoint{det.e, det.n, tr.utc, result_id});
         tracks_.push_back(tr);
+        num_new_tracks++;
 
         if (cfg.track_debug_level >= 2) {
             std::cout << "[TRACK_ONLINE] new tentative id=" << tr.id
@@ -859,6 +984,9 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
     }
 
     std::vector<GMTIDetection> out;
+    for (auto& tr : tracks_) {
+        tr.is_output_this_frame = false;
+    }
     for (const auto& tr : tracks_) {
         if (!shouldOutputThisFrame(cfg, tr, result_id)) {
             continue;
@@ -873,17 +1001,63 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
         det.utcMid = tr.utc;
         out.push_back(det);
     }
+    for (const auto& det : out) {
+        ManagedTrack* tr = findTrackById(det.id);
+        if (tr) {
+            tr->is_output_this_frame = true;
+        }
+    }
+
+    const int num_unmatched_detections = static_cast<int>(
+        std::count(det_used.begin(), det_used.end(), 0));
+    const int log_level = std::max(cfg.track_debug_level, cfg.track_debug_dump_level);
+    if (log_level >= 1) {
+        int num_tentative = 0;
+        int num_confirmed = 0;
+        int num_coasted = 0;
+        int num_deleted = 0;
+        for (const auto& tr : tracks_) {
+            if (tr.state == TrackState::Tentative) ++num_tentative;
+            if (tr.state == TrackState::Confirmed) ++num_confirmed;
+            if (tr.state == TrackState::Coasted) ++num_coasted;
+            if (tr.state == TrackState::Deleted) ++num_deleted;
+        }
+        const int active_count = static_cast<int>(tracks_.size()) - num_deleted;
+        std::cout << "[TRACK] result_id=" << result_id
+                  << " dets=" << dets.size()
+                  << " active=" << active_count
+                  << " tentative=" << num_tentative
+                  << " confirmed=" << num_confirmed
+                  << " coasted=" << num_coasted
+                  << " deleted=" << num_deleted
+                  << " outputs=" << out.size()
+                  << " new=" << num_new_tracks
+                  << " matched=" << num_matched_tracks
+                  << " unmatched_dets=" << num_unmatched_detections
+                  << std::endl;
+        if (log_level >= 2) {
+            for (const auto& tr : tracks_) {
+                std::cout << "[TRACK] id=" << tr.id
+                          << " state=" << stateName(tr.state)
+                          << " hit=" << tr.hit_count
+                          << " miss=" << tr.miss_count
+                          << " recent=" << recentHits(tr, cfg.track_confirm_window)
+                          << "/" << cfg.track_confirm_window
+                          << " matched=" << (tr.matched_this_frame ? 1 : 0)
+                          << " det=" << tr.matched_det_index
+                          << " speed=" << tr.speed
+                          << std::endl;
+            }
+        }
+    }
+
+    dumpDebugSnapshot(cfg, result_id, frame_utc, dets, det_to_track_id,
+                      static_cast<int>(out.size()), num_new_tracks,
+                      num_matched_tracks, num_unmatched_detections);
 
     pruneDeleted();
     if (result_id > 0) {
         last_update_result_id_ = result_id;
-    }
-
-    if (cfg.track_debug_level >= 1) {
-        std::cout << "[TRACK_ONLINE] result_id=" << result_id
-                  << " dets=" << dets.size()
-                  << " active_tracks=" << tracks_.size()
-                  << " outputs=" << out.size() << std::endl;
     }
 
     std::sort(out.begin(), out.end(), [](const GMTIDetection& a, const GMTIDetection& b) {
@@ -933,6 +1107,16 @@ bool TrackManager::isActiveId(uint16_t id) const
     return false;
 }
 
+ManagedTrack* TrackManager::findTrackById(uint16_t id)
+{
+    for (auto& tr : tracks_) {
+        if (tr.id == id) {
+            return &tr;
+        }
+    }
+    return nullptr;
+}
+
 int TrackManager::currentResultId(const Config& cfg) const
 {
     if (cfg.result_file_id > 0) {
@@ -949,6 +1133,133 @@ int TrackManager::maxMiss(const Config& cfg) const
     const int window = std::max(1, cfg.track_idx_window);
     const int truth = std::max(1, cfg.track_truth_threshold);
     return std::max(1, window - truth + 1);
+}
+
+void TrackManager::dumpDebugSnapshot(const Config& cfg,
+                                     int result_id,
+                                     double frame_utc,
+                                     const std::vector<GMTIDetection>& detections,
+                                     const std::vector<int>& det_to_track_id,
+                                     int num_outputs,
+                                     int num_new_tracks,
+                                     int num_matched_tracks,
+                                     int num_unmatched_detections) const
+{
+    if (!cfg.track_debug_dump) {
+        return;
+    }
+
+    const std::string dir = debugDir(cfg);
+    if (!ensureDirectory(dir)) {
+        return;
+    }
+
+    int num_tentative = 0;
+    int num_confirmed = 0;
+    int num_coasted = 0;
+    int num_deleted = 0;
+    for (const auto& tr : tracks_) {
+        switch (tr.state) {
+        case TrackState::Tentative:
+            ++num_tentative;
+            break;
+        case TrackState::Confirmed:
+            ++num_confirmed;
+            break;
+        case TrackState::Coasted:
+            ++num_coasted;
+            break;
+        case TrackState::Deleted:
+            ++num_deleted;
+            break;
+        }
+    }
+
+    {
+        std::ofstream frames = openCsvAppend(
+            dir + "/track_frames.csv",
+            "result_id,frame_utc,num_detections,num_tracks,num_tentative,num_confirmed,num_coasted,num_deleted,num_outputs,num_new_tracks,num_matched_tracks,num_unmatched_detections");
+        if (frames.is_open()) {
+            frames << std::setprecision(12)
+                   << result_id << ","
+                   << frame_utc << ","
+                   << detections.size() << ","
+                   << tracks_.size() << ","
+                   << num_tentative << ","
+                   << num_confirmed << ","
+                   << num_coasted << ","
+                   << num_deleted << ","
+                   << num_outputs << ","
+                   << num_new_tracks << ","
+                   << num_matched_tracks << ","
+                   << num_unmatched_detections << "\n";
+        }
+    }
+
+    {
+        std::ofstream dets = openCsvAppend(
+            dir + "/track_detections.csv",
+            "result_id,det_index,matched,matched_track_id,e,n,lat,lon,utc,range,direction");
+        if (dets.is_open()) {
+            for (size_t i = 0; i < detections.size(); ++i) {
+                const int matched_track_id =
+                    (i < det_to_track_id.size()) ? det_to_track_id[i] : -1;
+                const bool matched = matched_track_id >= 0;
+                dets << std::setprecision(12)
+                     << result_id << ","
+                     << i << ","
+                     << (matched ? 1 : 0) << ","
+                     << matched_track_id << ","
+                     << std::setprecision(6) << detections[i].e << ","
+                     << detections[i].n << ","
+                     << std::setprecision(12) << detections[i].lat << ","
+                     << detections[i].lon << ","
+                     << detections[i].utcMid << ","
+                     << detections[i].range << ","
+                     << detections[i].direction << "\n";
+            }
+        }
+    }
+
+    {
+        std::ofstream states = openCsvAppend(
+            dir + "/track_states.csv",
+            "result_id,track_id,state,matched_this_frame,matched_det_index,e,n,lat,lon,ve,vn,speed,heading,utc,range,direction,age,hit_count,miss_count,consecutive_hits,recent_hits,linearity,is_output");
+        if (states.is_open()) {
+            for (const auto& tr : tracks_) {
+                double lat = 0.0;
+                double lon = 0.0;
+                Gaussp3RV(tr.e, tr.n, cfg.L0, lat, lon);
+                const double heading = std::atan2(tr.vn, tr.ve);
+                const int recent = recentHits(tr, cfg.track_confirm_window);
+                const double linearity = computeLinearity(tr, cfg.track_linearity_window);
+                states << std::setprecision(12)
+                       << result_id << ","
+                       << tr.id << ","
+                       << stateName(tr.state) << ","
+                       << (tr.matched_this_frame ? 1 : 0) << ","
+                       << tr.matched_det_index << ","
+                       << std::setprecision(6) << tr.e << ","
+                       << tr.n << ","
+                       << std::setprecision(12) << lat << ","
+                       << lon << ","
+                       << tr.ve << ","
+                       << tr.vn << ","
+                       << tr.speed << ","
+                       << heading << ","
+                       << tr.utc << ","
+                       << tr.range << ","
+                       << tr.direction << ","
+                       << tr.age << ","
+                       << tr.hit_count << ","
+                       << tr.miss_count << ","
+                       << tr.consecutive_hits << ","
+                       << recent << ","
+                       << linearity << ","
+                       << (tr.is_output_this_frame ? 1 : 0) << "\n";
+            }
+        }
+    }
 }
 
 void TrackManager::pruneDeleted()

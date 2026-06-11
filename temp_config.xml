@@ -69,7 +69,19 @@
         <lon_ed>2</lon_ed>
         <track_idx_window>3</track_idx_window>
         <track_truth_threshold>2</track_truth_threshold>
+        <track_confirm_window>3</track_confirm_window>
+        <track_confirm_hits>2</track_confirm_hits>
+        <track_max_missed>2</track_max_missed>
+        <track_tentative_max_missed>1</track_tentative_max_missed>
         <track_gate_m>500</track_gate_m>
         <track_v_max>50</track_v_max>
+        <track_chi2_gate>9.21</track_chi2_gate>
+        <track_tentative_gate_scale>1.5</track_tentative_gate_scale>
+        <track_tentative_chi2_scale>1.5</track_tentative_chi2_scale>
+        <track_speed_smooth_weight>0.5</track_speed_smooth_weight>
+        <track_heading_weight>0.2</track_heading_weight>
+        <track_default_dt>1.0</track_default_dt>
+        <track_debug_dump>true</track_debug_dump>
+        <track_debug_dump_level>1</track_debug_dump_level>
     </GMTI_parameter>
 </GMTI>

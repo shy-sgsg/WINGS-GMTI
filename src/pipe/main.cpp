@@ -3,8 +3,19 @@
 #include <vector>
 #include <pthread.h>
 #include "pipe/MainCtrl.h"
+#include <csignal>
+#include <atomic>
+#include <unistd.h>
+
 
 using namespace std;
+
+static atomic<bool> g_running{true};
+
+void handle_signal(int)
+{
+    g_running.store(false);
+}
 
 namespace {
 
@@ -42,13 +53,16 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    GMTIProcessor proc;
-    Config cfg;
-    if (!proc.readXmlParam("temp_config.xml", cfg)) {
-        cfg.pipe_root_path = "/home/raco";
+    std::signal(SIGINT, handle_signal);
+    std::signal(SIGTERM, handle_signal);
+
+    MainCtrl gmtiCtrl;
+
+    while (g_running.load()) {
+        sleep(1);
     }
 
-    MainCtrl gmtiCtrl(cfg.pipe_root_path);
-
-    pthread_exit(nullptr);
+    std::cout << "GMTI exiting..." << std::endl;
+    gmtiCtrl.StopThreads();
+    return 0;
 }

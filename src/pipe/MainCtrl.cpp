@@ -2,6 +2,7 @@
 #include "dbs/DbsFusion.hpp"
 #include "trackModule.hpp"
 #include "pipe/PipeStruDef.h"
+#include "../auth/hardware_bind_flow/gate/security_gate.h"
 
 #include <algorithm>
 #include <cmath>
@@ -318,7 +319,28 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, i
         return false;
     }
 
-    if (!host->gmti_proc_.readXmlParam(host->gmti_config_xml_, host->cfg_)) {
+    // security::reset_gate();
+
+    // run_checkpoint(security::CheckpointId::ProgramStartup, "program_startup");
+    // run_checkpoint(security::CheckpointId::SarParameterInit, "sar_parameter_init");
+    // run_checkpoint(security::CheckpointId::ImagingKernel, "imaging_kernel");
+    // run_checkpoint(security::CheckpointId::RangeCmp, "range_cmp");
+    // run_checkpoint(security::CheckpointId::MoCo, "moco");
+    // run_checkpoint(security::CheckpointId::AzComp, "az_comp");
+    // run_checkpoint(security::CheckpointId::PGA, "pga");
+
+    // if (!security::final_decision()) {
+    //     std::cout << "[gate] final_decision: failed\n";
+    //     return 1;
+    // }
+
+    std::string xmlPath;
+    {
+        std::lock_guard<std::mutex> lock(host->config_mutex_);
+        xmlPath = host->gmti_config_xml_;
+    }
+
+    if (!host->gmti_proc_.readXmlParam(xmlPath, host->cfg_)) {
         std::cerr << "Failed to read GMTI XML config" << std::endl;
         return false;
     }
@@ -454,7 +476,7 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, i
         std::lock_guard<std::mutex> lock(host->result_mutex_);
         host->latest_gmti_targets_ = currentTargets;
         host->pending_result_packets_.push_back(std::move(packet));
-        host->IsResultReady = true;
+        host->IsResultReady.store(true);
     }
     return true;
 }
@@ -500,6 +522,13 @@ static void printModeSwitchCmd(const ModeSwitchCmd& cmd)
     std::cout << "===========================\n";
 }
 
+bool run_checkpoint(security::CheckpointId id, const char* name) {
+    const security::GateCode code = security::checkpoint(id);
+    std::cout << "[gate] " << name << ": "
+              << security::gate_code_to_string(code) << "\n";
+    return code == security::GateCode::Ok;
+}
+
 } // namespace
 
 MainCtrl::MainCtrl(const std::string& pipeRootPath, bool enablePipes)
@@ -509,19 +538,31 @@ MainCtrl::MainCtrl(const std::string& pipeRootPath, bool enablePipes)
     std::cout << "GMTI INIT..." << std::endl;
 
     m_SendBuf = static_cast<char*>(std::malloc(40 * 1024 * 1024));
-    IsResultReady = false;
+    if (!m_SendBuf) {
+        std::cerr << "Failed to allocate GMTI send buffer" << std::endl;
+        pipes_enabled_ = false;
+    }
+    IsResultReady.store(false);
+    m_workmode.store(Mode_INIT);
+    gmti_config_xml_ = "temp_config.xml";
 
     if (pipes_enabled_) {
         const std::string cmdPipePath = composePipePath(pipe_root_path_, "pipegmticmd");
         const std::string echoPipePath = composePipePath(pipe_root_path_, "pipegmtiecho");
         const std::string resultPipePath = composePipePath(pipe_root_path_, "pipegmtiresult");
 
-        m_RecvCmdPipe.CreatePipe(cmdPipePath.c_str(), O_RDWR);
-        m_RecvEchoPipe.CreatePipe(echoPipePath.c_str(), O_RDWR);
-        m_SendResultPipe.CreatePipe(resultPipePath.c_str(), O_RDWR);
+        const bool cmdOk = m_RecvCmdPipe.CreatePipe(cmdPipePath.c_str(), O_RDWR);
+        const bool echoOk = m_RecvEchoPipe.CreatePipe(echoPipePath.c_str(), O_RDWR);
+        const bool resultOk = m_SendResultPipe.CreatePipe(resultPipePath.c_str(), O_RDWR);
+        if (!cmdOk || !echoOk || !resultOk) {
+            std::cerr << "Failed to create one or more GMTI pipes; threads will not start" << std::endl;
+            m_RecvCmdPipe.ClosePipe();
+            m_RecvEchoPipe.ClosePipe();
+            m_SendResultPipe.ClosePipe();
+            pipes_enabled_ = false;
+        }
     }
 
-    m_workmode = Mode_INIT;
     if (pipes_enabled_) {
         InitThread();
     }
@@ -529,6 +570,7 @@ MainCtrl::MainCtrl(const std::string& pipeRootPath, bool enablePipes)
 
 MainCtrl::~MainCtrl()
 {
+    StopThreads();
     if (m_SendBuf) {
         std::free(m_SendBuf);
         m_SendBuf = nullptr;
@@ -540,19 +582,88 @@ void MainCtrl::InitThread()
     if (!pipes_enabled_) {
         return;
     }
-    std::cout << "GMTI mode..." << std::endl;
 
-    pthread_t thrRecvCmd;
-    pthread_create(&thrRecvCmd, NULL, OnRecvCmdThread, this);
+    running_.store(true);
 
-    pthread_t thrRecvEcho;
-    pthread_create(&thrRecvEcho, NULL, OnEchoRecvThread, this);
+    int ret = 0;
 
-    pthread_t thrProcData;
-    pthread_create(&thrProcData, NULL, ProcessDataThread, this);
+    ret = pthread_create(&thrRecvCmd_, nullptr, OnRecvCmdThread, this);
+    if (ret != 0) {
+        std::cerr << "pthread_create OnRecvCmdThread failed: "
+                  << std::strerror(ret) << std::endl;
+        running_.store(false);
+        StopThreads();
+        return;
+    }
+    recv_cmd_started_ = true;
 
-    pthread_t thrSendRes;
-    pthread_create(&thrSendRes, NULL, OnResSendThread, this);
+    ret = pthread_create(&thrRecvEcho_, nullptr, OnEchoRecvThread, this);
+    if (ret != 0) {
+        std::cerr << "pthread_create OnEchoRecvThread failed: "
+                  << std::strerror(ret) << std::endl;
+        running_.store(false);
+        StopThreads();
+        return;
+    }
+    recv_echo_started_ = true;
+
+    ret = pthread_create(&thrProcData_, nullptr, ProcessDataThread, this);
+    if (ret != 0) {
+        std::cerr << "pthread_create ProcessDataThread failed: "
+                  << std::strerror(ret) << std::endl;
+        running_.store(false);
+        StopThreads();
+        return;
+    }
+    proc_data_started_ = true;
+
+    ret = pthread_create(&thrSendRes_, nullptr, OnResSendThread, this);
+    if (ret != 0) {
+        std::cerr << "pthread_create OnResSendThread failed: "
+                  << std::strerror(ret) << std::endl;
+        running_.store(false);
+        StopThreads();
+        return;
+    }
+    send_res_started_ = true;
+}
+
+void MainCtrl::StopThreads()
+{
+    running_.store(false);
+
+    if (pipes_enabled_) {
+        m_RecvCmdPipe.ClosePipe();
+        m_RecvEchoPipe.ClosePipe();
+        m_SendResultPipe.ClosePipe();
+    }
+
+    const pthread_t self = pthread_self();
+    auto joinThread = [&](pthread_t& thread, bool& started, const char* name) {
+        if (!started) {
+            thread = {};
+            return;
+        }
+        if (pthread_equal(thread, self)) {
+            std::cerr << "[WARN] Skip joining current thread: " << name << std::endl;
+            pthread_detach(thread);
+            thread = {};
+            started = false;
+            return;
+        }
+        const int ret = pthread_join(thread, nullptr);
+        if (ret != 0) {
+            std::cerr << "pthread_join " << name << " failed: "
+                      << std::strerror(ret) << std::endl;
+        }
+        thread = {};
+        started = false;
+    };
+
+    joinThread(thrRecvCmd_, recv_cmd_started_, "OnRecvCmdThread");
+    joinThread(thrRecvEcho_, recv_echo_started_, "OnEchoRecvThread");
+    joinThread(thrProcData_, proc_data_started_, "ProcessDataThread");
+    joinThread(thrSendRes_, send_res_started_, "OnResSendThread");
 }
 
 bool MainCtrl::RunLocalTest(const std::string& xmlPath, const std::vector<std::string>& echoFiles)
@@ -562,12 +673,16 @@ bool MainCtrl::RunLocalTest(const std::string& xmlPath, const std::vector<std::s
         return false;
     }
 
-    gmti_config_xml_ = xmlPath.empty() ? "temp_config.xml" : xmlPath;
-    m_workmode = Mode_GMTI;
+    const std::string localXmlPath = xmlPath.empty() ? "temp_config.xml" : xmlPath;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        gmti_config_xml_ = localXmlPath;
+    }
+    m_workmode.store(Mode_GMTI);
     track_manager_.reset();
 
     bool allOk = true;
-    std::cout << "[LOCAL-TEST] XML: " << gmti_config_xml_ << std::endl;
+    std::cout << "[LOCAL-TEST] XML: " << localXmlPath << std::endl;
     std::cout << "[LOCAL-TEST] Echo files: " << echoFiles.size() << std::endl;
     for (size_t i = 0; i < echoFiles.size(); ++i) {
         int forcedId = -1;
@@ -593,7 +708,7 @@ bool MainCtrl::RunLocalTest(const std::string& xmlPath, const std::vector<std::s
         {
             std::lock_guard<std::mutex> lock(result_mutex_);
             pending_result_packets_.clear();
-            IsResultReady = false;
+            IsResultReady.store(false);
         }
     }
 
@@ -607,19 +722,40 @@ void* MainCtrl::OnRecvCmdThread(void *param)
 
     std::cout << "sizeof ModeSwitchCmd = " << sizeof(ModeSwitchCmd) << std::endl;
 
-    while(true) {
+    while(pHost->running_.load()) {
         const int ret = pHost->m_RecvCmdPipe.ReadData(reinterpret_cast<char*>(&cmd), sizeof(ModeSwitchCmd));
         std::cout << "Recv cmd ret = " << ret << std::endl;
 
         if(ret < 0) {
+            if (!pHost->running_.load()) {
+                break;
+            }
             printf("Receive mode switch command error\n");
+            usleep(100000);
+            continue;
+        }
+        if(ret != static_cast<int>(sizeof(ModeSwitchCmd))) {
+            if (!pHost->running_.load()) {
+                break;
+            }
+            printf("Receive incomplete mode switch command\n");
+            usleep(100000);
             continue;
         }
 
         printModeSwitchCmd(cmd);
-        pHost->last_cmd_ = cmd;
+        std::string xmlPath;
+        {
+            std::lock_guard<std::mutex> lock(pHost->config_mutex_);
+            pHost->last_cmd_ = cmd;
+            if(cmd.workMode == Mode_GMTI)
+            {
+                pHost->gmti_config_xml_ = "temp_config.xml";
+            }
+            xmlPath = pHost->gmti_config_xml_;
+        }
 
-        if(pHost->m_workmode == cmd.workMode)
+        if(pHost->m_workmode.load() == cmd.workMode)
         {
             printf("Already in cmd workmode\n");
         }
@@ -630,7 +766,6 @@ void* MainCtrl::OnRecvCmdThread(void *param)
         else if(cmd.workMode == Mode_GMTI)
         {
             printf("Switch to Mode_GMTI (mode=%d)\n", cmd.workMode);
-            pHost->gmti_config_xml_ = "temp_config.xml";
         }
         else
         {
@@ -638,14 +773,15 @@ void* MainCtrl::OnRecvCmdThread(void *param)
         }
 
         if (UPDATEXML) {
-            if (!pHost->updateXmlFromModeSwitchCmd(cmd, pHost->gmti_config_xml_)) {
+            if (!pHost->updateXmlFromModeSwitchCmd(cmd, xmlPath)) {
                 std::cerr << "Failed to update XML config from ModeSwitchCmd: "
-                          << pHost->gmti_config_xml_ << std::endl;
+                          << xmlPath << std::endl;
             }
         }
 
-        pHost->m_workmode = cmd.workMode;
+        pHost->m_workmode.store(cmd.workMode);
     }
+    return nullptr;
 }
 
 void* MainCtrl::OnEchoRecvThread(void *param)
@@ -655,11 +791,15 @@ void* MainCtrl::OnEchoRecvThread(void *param)
     std::cout << "OnEchoRecvThread start" << std::endl;
 
     char buf[512] = {0};
-    while(true)
+    while(pHost->running_.load())
     {
         const int ret = pHost->m_RecvEchoPipe.ReadData(buf, 512);
         if(ret < 1) {
+            if (!pHost->running_.load()) {
+                break;
+            }
             printf("Receive echo data error\n");
+            usleep(100000);
             continue;
         }
 
@@ -671,6 +811,7 @@ void* MainCtrl::OnEchoRecvThread(void *param)
             pushPendingEchoFile(fileName);
         }
     }
+    return nullptr;
 }
 
 void* MainCtrl::ProcessDataThread(void* param)
@@ -679,11 +820,11 @@ void* MainCtrl::ProcessDataThread(void* param)
 
     std::cout << "ProcessDataThread start" << std::endl;
 
-    while(true) {
+    while(pHost->running_.load()) {
         std::string fileName;
         if (!popPendingEchoFile(fileName))
         {
-            usleep(100);
+            usleep(10000);
             continue;
         }
 
@@ -692,18 +833,19 @@ void* MainCtrl::ProcessDataThread(void* param)
         const bool ok = runGMTIProcessingFlow(pHost, fileName);
         {
             std::lock_guard<std::mutex> lock(pHost->result_mutex_);
-            pHost->IsResultReady = !pHost->pending_result_packets_.empty();
+            pHost->IsResultReady.store(!pHost->pending_result_packets_.empty());
         }
         if (!ok) {
             std::cerr << "[ERR] GMTI processing failed for echo file: " << fileName << std::endl;
         }
 
-        if (pHost->m_workmode != Mode_GMTI)
+        if (pHost->m_workmode.load() != Mode_GMTI)
         {
             clearPendingEchoQueue();
             std::cout << "Standby mode: cleared pending echo queue after current file" << std::endl;
         }
     }
+    return nullptr;
 }
 
 void* MainCtrl::OnResSendThread(void* param)
@@ -712,20 +854,22 @@ void* MainCtrl::OnResSendThread(void* param)
 
     std::cout << "OnResSendThread start" << std::endl;
 
-    while(true)
+    while(pHost->running_.load())
     {
         GMTIResultPacket packet;
+        bool hasPacket = false;
         {
             std::lock_guard<std::mutex> lock(pHost->result_mutex_);
             if (pHost->pending_result_packets_.empty()) {
-                pHost->IsResultReady = false;
+                pHost->IsResultReady.store(false);
             } else {
                 packet = pHost->pending_result_packets_.front();
-                pHost->IsResultReady = true;
+                pHost->IsResultReady.store(true);
+                hasPacket = true;
             }
         }
 
-        if (!pHost->IsResultReady)
+        if (!hasPacket)
         {
             usleep(100000);
             continue;
@@ -737,15 +881,14 @@ void* MainCtrl::OnResSendThread(void* param)
         if (!pHost->packGMTIResults(packet, pHost->m_SendBuf, 40U * 1024U * 1024U, packed_len))
         {
             std::cerr << "Failed to pack GMTI protocol packet" << std::endl;
-            std::lock_guard<std::mutex> lock(pHost->result_mutex_);
-            if (!pHost->pending_result_packets_.empty()) {
-                pHost->pending_result_packets_.pop_front();
-            }
-            pHost->IsResultReady = !pHost->pending_result_packets_.empty();
+            usleep(100000);
             continue;
         }
 
         const ssize_t written = pHost->m_SendResultPipe.WriteData(pHost->m_SendBuf, static_cast<int>(packed_len));
+        if (!pHost->running_.load()) {
+            break;
+        }
         if (written == static_cast<ssize_t>(packed_len))
         {
             std::cout << "GMTI protocol packet sent: " << packed_len << " bytes" << std::endl;
@@ -755,14 +898,16 @@ void* MainCtrl::OnResSendThread(void* param)
             }
             pHost->latest_gmti_targets_.clear();
             pHost->latest_gmti_targets_.shrink_to_fit();
-            pHost->IsResultReady = !pHost->pending_result_packets_.empty();
+            pHost->IsResultReady.store(!pHost->pending_result_packets_.empty());
         }
         else
         {
             std::cerr << "Failed to send GMTI protocol packet" << std::endl;
+            usleep(100000);
         }
         std::cout << "end send res" << std::endl;
     }
+    return nullptr;
 }
 
 bool MainCtrl::updateXmlFromModeSwitchCmd(const ModeSwitchCmd& cmd, const std::string& xmlPath)

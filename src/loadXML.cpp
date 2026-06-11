@@ -196,6 +196,12 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
         throw std::runtime_error(oss.str());
     };
 
+    auto parseOptionalString = [&](const char *name, const std::string& current) -> std::string
+    {
+        const std::string text = getOptionalText(name);
+        return text.empty() ? current : text;
+    };
+
     auto parseIntList = [](const std::string& text) -> std::vector<int>
     {
         std::vector<int> values;
@@ -348,8 +354,14 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     cfg.track_confirm_window = parseOptionalInt("track_confirm_window", cfg.track_idx_window);
     cfg.track_confirm_hits = parseOptionalInt("track_confirm_hits", cfg.track_truth_threshold);
     cfg.track_max_missed = parseOptionalInt("track_max_missed", cfg.track_max_missed);
+    cfg.track_tentative_max_missed = parseOptionalInt("track_tentative_max_missed",
+                                                       cfg.track_tentative_max_missed);
     cfg.track_default_dt = parseOptionalDouble("track_default_dt", cfg.track_default_dt);
     cfg.track_chi2_gate = parseOptionalDouble("track_chi2_gate", cfg.track_chi2_gate);
+    cfg.track_tentative_gate_scale = parseOptionalDouble("track_tentative_gate_scale",
+                                                         cfg.track_tentative_gate_scale);
+    cfg.track_tentative_chi2_scale = parseOptionalDouble("track_tentative_chi2_scale",
+                                                         cfg.track_tentative_chi2_scale);
     cfg.track_dummy_cost = parseOptionalDouble("track_dummy_cost", cfg.track_dummy_cost);
     cfg.track_linearity_window = parseOptionalInt("track_linearity_window", cfg.track_linearity_window);
     cfg.track_min_linearity_confirm = parseOptionalDouble("track_min_linearity_confirm",
@@ -363,6 +375,10 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
                                                       cfg.track_process_noise_vel);
     cfg.track_measurement_noise_pos = parseOptionalDouble("track_measurement_noise_pos",
                                                           cfg.track_measurement_noise_pos);
+    cfg.track_debug_dump = parseOptionalBool("track_debug_dump", cfg.track_debug_dump);
+    cfg.track_debug_dir = parseOptionalString("track_debug_dir", cfg.track_debug_dir);
+    cfg.track_debug_dump_level = parseOptionalInt("track_debug_dump_level",
+                                                  cfg.track_debug_dump_level);
 
     const std::string trackIdxRangeStr = getOptionalText("track_idx_range");
     if (!trackIdxRangeStr.empty()) {

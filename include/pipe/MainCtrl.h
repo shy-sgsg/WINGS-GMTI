@@ -15,6 +15,7 @@
 #include <mutex>
 #include <deque>
 #include <cstdint>
+#include <atomic>
 
 #define UPDATEXML 0
 
@@ -36,6 +37,13 @@ public:
                       bool enablePipes = true);
     ~MainCtrl();
 
+    std::atomic<bool> running_{false};
+
+    pthread_t thrRecvCmd_{};
+    pthread_t thrRecvEcho_{};
+    pthread_t thrProcData_{};
+    pthread_t thrSendRes_{};
+
     // 命令接收线程
     static void* OnRecvCmdThread(void* param);
     // 回波数据接收线程
@@ -45,9 +53,9 @@ public:
     // 结果发送线程
     static void* OnResSendThread(void* param);
 
-    bool IsResultReady;
+    std::atomic<bool> IsResultReady{false};
 
-    uint32_t m_workmode;
+    std::atomic<uint32_t> m_workmode{Mode_INIT};
     
     char * m_SendBuf;
 
@@ -56,6 +64,7 @@ public:
     PipeRW m_SendResultPipe;
 
     void InitThread();
+    void StopThreads();
 
     FileOnlyStream file_stream;
 
@@ -79,6 +88,7 @@ public:
     std::string gmti_config_xml_;          // GMTI 配置 XML 文件路径
     ModeSwitchCmd last_cmd_;               // 最后接收的模式切换命令
     std::mutex result_mutex_;              // 保护 latest_gmti_targets_
+    std::mutex config_mutex_;              // 保护 gmti_config_xml_ / last_cmd_
     std::string pipe_root_path_;           // 管道主路径
 
     // ===== 新增函数：GMTI 参数和结果处理 =====
@@ -98,6 +108,10 @@ public:
 private:
     uint16_t next_result_msg_count_ = 0;
     bool pipes_enabled_ = true;
+    bool recv_cmd_started_ = false;
+    bool recv_echo_started_ = false;
+    bool proc_data_started_ = false;
+    bool send_res_started_ = false;
 
 };
 

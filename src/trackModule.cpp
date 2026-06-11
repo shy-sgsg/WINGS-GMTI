@@ -168,6 +168,51 @@ static std::string makeGmtiTrackPath(const std::string& result_dir, int result_i
     return result_dir + "/" + name;
 }
 
+static void dumpTrackPointsCsv(const Config& cfg,
+                               int result_id,
+                               const std::vector<GMTIDetection>& outputs)
+{
+    const std::string path = cfg.result_add + "/track_points.csv";
+
+    bool need_header = true;
+    {
+        std::ifstream in(path, std::ios::binary | std::ios::ate);
+        if (in.is_open()) {
+            need_header = (in.tellg() <= 0);
+        }
+    }
+
+    std::ofstream out(path, std::ios::out | std::ios::app);
+    if (!out.is_open()) {
+        std::cout << "[TRACK_ONLINE][WARN] cannot open track points csv: "
+                  << path << std::endl;
+        return;
+    }
+
+    if (need_header) {
+        out << "result_id,track_id,e,n,lat,lon\n";
+        if (!out.good()) {
+            std::cout << "[TRACK_ONLINE][WARN] cannot write track points csv header: "
+                      << path << std::endl;
+            return;
+        }
+    }
+
+    for (const auto& det : outputs) {
+        out << result_id << ","
+            << det.id << ","
+            << std::fixed << std::setprecision(6) << det.e << ","
+            << std::fixed << std::setprecision(6) << det.n << ","
+            << std::fixed << std::setprecision(12) << det.lat << ","
+            << std::fixed << std::setprecision(12) << det.lon << "\n";
+    }
+
+    if (!out.good()) {
+        std::cout << "[TRACK_ONLINE][WARN] failed writing track points csv: "
+                  << path << std::endl;
+    }
+}
+
 static bool readCurrentDetections(const std::string& input_path,
                                   std::vector<GMTIDetection>& dets,
                                   double& utc_global)
@@ -477,6 +522,8 @@ std::vector<GMTIDetection> trackModule(const Config& cfg, TrackManager* manager)
         det.direction = tr.direction;
         det.range = tr.range;
         det.utcMid = tr.utc;
+        det.e = latest_dets[j][0];
+        det.n = latest_dets[j][1];
         current_targets.push_back(det);
     }
 
@@ -510,6 +557,7 @@ std::vector<GMTIDetection> trackModule(const Config& cfg, TrackManager* manager)
     sprintf(out_name, "GMTI%02d_track.bin", idx_range.back());
     const std::string save_path = result_dir + "/" + out_name;
     printCurrentTargets(track_packets);
+    dumpTrackPointsCsv(cfg, idx_range.back(), current_targets);
     writeCurrentCyclePackets(track_packets, save_path);
 
     return current_targets;
@@ -566,6 +614,7 @@ std::vector<GMTIDetection> trackModuleOnline(const Config& cfg, TrackManager* ma
               << " (result_id=" << result_id
               << ", raw_dets=" << dets.size() << ")" << std::endl;
     printCurrentTargets(packets);
+    dumpTrackPointsCsv(cfg, result_id, outputs);
     writeCurrentCyclePackets(packets, makeGmtiTrackPath(cfg.result_add, result_id));
     return outputs;
 }

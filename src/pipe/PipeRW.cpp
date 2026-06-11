@@ -58,6 +58,7 @@ void PipeRW::ClosePipe()
 		return;
 	}
 	close(m_fd);
+	m_fd = -1;
 }
 
 ssize_t  PipeRW::WriteData(const char* pData, int nLen)
