@@ -2,15 +2,20 @@
 import argparse
 from dataclasses import dataclass
 import os
+import re
 import shutil
 import sys
 import tempfile
 
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "gmti_matplotlib"))
 os.environ.setdefault("XDG_CACHE_HOME", os.path.join(tempfile.gettempdir(), "gmti_cache"))
+os.environ.setdefault("MPLBACKEND", "Agg")
 
+import matplotlib
+matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+import numpy as np
 import pandas as pd
 
 
@@ -54,9 +59,9 @@ class PlotStyle:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize TrackManager debug snapshots.")
-    parser.add_argument("--debug-dir", required=True)
-    parser.add_argument("--coord", choices=["en", "geo"], default="en")
-    parser.add_argument("--out-dir", default=None)
+    parser.add_argument("--debug-dir", default="/home/shy/AIR/小长/GMTI_Data/Mission068/result_final/track_debug")
+    parser.add_argument("--coord", choices=["en", "geo"], default="geo")
+    parser.add_argument("--out-dir", default="/home/shy/AIR/小长/GMTI_Data/Mission068/result_final/track_debug_out")
     parser.add_argument("--format", choices=["png", "pdf", "svg"], default="svg")
     parser.add_argument("--result-id", type=int, default=None)
     parser.add_argument("--start-id", type=int, default=None)
@@ -68,11 +73,12 @@ def parse_args():
     parser.add_argument("--label-tracks", action="store_true", default=True)
     parser.add_argument("--no-label-tracks", action="store_true")
     parser.add_argument("--make-frames", action="store_true")
-    parser.add_argument("--make-gif", action="store_true")
+    parser.add_argument("--make-gif", action="store_true", default=True)
+    parser.add_argument("--make-output-gif", action="store_true")
     parser.add_argument("--gif-duration-ms", type=int, default=500)
-    parser.add_argument("--keep-frame-png", nargs="?", const="true", default="true",
+    parser.add_argument("--keep-frame-png", nargs="?", const="true", default="false",
                         choices=["true", "false", "1", "0"],
-                        help="Keep PNG frames used for GIF. Default: true.")
+                        help="Keep PNG frames used for GIF. Default: false.")
     parser.add_argument("--xmin", type=float, default=None)
     parser.add_argument("--xmax", type=float, default=None)
     parser.add_argument("--ymin", type=float, default=None)
@@ -96,12 +102,77 @@ def parse_args():
     parser.add_argument("--tick-fontsize", type=float, default=None)
     parser.add_argument("--hide-labels-in-frames", action="store_true")
     parser.add_argument("--max-label-tracks", type=int, default=80)
-    parser.add_argument("--style-preset", choices=["default", "global", "roi", "dense"],
-                        default=None)
     parser.add_argument("--fig-width", type=float, default=12)
     parser.add_argument("--fig-height", type=float, default=10)
     parser.add_argument("--frame-fig-width", type=float, default=10)
     parser.add_argument("--frame-fig-height", type=float, default=8)
+    parser.add_argument("--show-dbs-bg", action="store_true", default=True,
+                        help="Overlay DBS image as background on spatial track figures.")
+    parser.add_argument("--no-dbs-bg", action="store_true",
+                        help="Disable DBS background overlay.")
+    parser.add_argument("--dbs-image", default="/home/shy/AIR/小长/GMTI_Data/Mission068/result_final/GMTI13.png",
+                        help="Path to DBS PNG image.")
+    parser.add_argument("--dbs-corner-file", default="/home/shy/AIR/小长/GMTI_Data/Mission068/result_final/GMTI13.txt",
+                        help="Path to DBS corner lon/lat txt file.")
+    parser.add_argument(
+        "--dbs-bg-mode",
+        choices=["warp", "image"],
+        default="image",
+        help=(
+            "DBS background mode. "
+            "warp: warp DBS image to regular lon/lat grid. "
+            "image: keep original DBS PNG unchanged and project lon/lat points to image pixels."
+        ),
+    )
+    parser.add_argument("--dbs-alpha", type=float, default=1.0,
+                        help="DBS background alpha.")
+    parser.add_argument(
+        "--dbs-color-mode",
+        choices=["original", "gray"],
+        default="original",
+        help=(
+            "DBS background color mode. "
+            "original: keep original PNG colors. "
+            "gray: convert DBS background to grayscale."
+        ),
+    )
+    parser.add_argument("--dbs-warp-width", type=int, default=4096,
+                        help="Output width for warp mode.")
+    parser.add_argument("--dbs-warp-height", type=int, default=6144,
+                        help="Output height for warp mode.")
+    parser.add_argument("--dbs-show-pixel-axis", action="store_true", default=False,
+                        help="In image mode, show DBS image pixel axes.")
+    parser.add_argument(
+        "--dbs-native-resolution",
+        action="store_true",
+        default=True,
+        help=(
+            "In DBS image mode, save spatial PNG outputs at the original DBS PNG "
+            "pixel resolution. This also applies to PNG frames used for GIF."
+        ),
+    )
+    parser.add_argument(
+        "--dbs-native-dpi",
+        type=int,
+        default=100,
+        help="DPI used to map original DBS pixel size to Matplotlib figure inches.",
+    )
+    parser.add_argument("--dbs-debug", action="store_true", default=False,
+                        help="Write DBS transform debug figures.")
+    parser.add_argument("--dbs-clip-to-image", action="store_true", default=True,
+                        help="In image mode, clip transformed points outside DBS image bounds.")
+    parser.add_argument("--no-dbs-clip-to-image", action="store_true")
+    parser.add_argument(
+        "--dbs-image-corner-mode",
+        choices=["direct", "cpp_transpose_fliplr"],
+        default="cpp_transpose_fliplr",
+        help=(
+            "Corner mapping for DBS image/warp modes. "
+            "direct maps txt logical corners directly to PNG corners. "
+            "cpp_transpose_fliplr considers the C++ transpose_copy + fliplr_inplace before PNG output."
+        ),
+    )
+    parser.add_argument("--axis-from", choices=["tracks", "dbs", "union"], default="tracks")
     return parser.parse_args()
 
 
@@ -109,58 +180,21 @@ def bool_arg(value):
     return str(value).lower() in ("true", "1", "yes", "y")
 
 
-def resolve_style(args, is_roi=False, is_frame=False, track_count=0):
-    preset = args.style_preset
-    if preset is None:
-        if track_count > 100:
-            preset = "dense"
-            print("Visible track count exceeds 100; using dense style preset.")
-        elif is_roi:
-            preset = "roi"
-        else:
-            preset = "default"
-
+def resolve_style(args):
     base = {
-        "track_linewidth": 1.2,
-        "track_alpha": 0.85,
-        "marker_scale": 1.0,
-        "detection_marker_size": 10.0,
-        "detection_alpha": 0.35,
-        "output_marker_scale": 1.5,
-        "output_edge_width": 1.2,
-        "label_fontsize": 8.0,
-        "legend_fontsize": 8.0,
+        "track_linewidth": 0.5,
+        "track_alpha": 0.75,
+        "marker_scale": 0.3,
+        "detection_marker_size": 2.0,
+        "detection_alpha": 0.75,
+        "output_marker_scale": 1,
+        "output_edge_width": 0.5,
+        "label_fontsize": 6.0,
+        "legend_fontsize": 6.0,
         "title_fontsize": 11.0,
         "axis_label_fontsize": 10.0,
         "tick_fontsize": 8.0,
     }
-
-    if preset in ("default", "global"):
-        pass
-    elif preset == "roi":
-        base.update({
-            "track_linewidth": 0.8,
-            "marker_scale": 0.75,
-            "detection_marker_size": 6.0,
-            "label_fontsize": 7.0,
-            "legend_fontsize": 7.0,
-        })
-    elif preset == "dense":
-        base.update({
-            "track_linewidth": 0.6,
-            "track_alpha": 0.75,
-            "marker_scale": 0.55,
-            "detection_marker_size": 4.0,
-            "detection_alpha": 0.25,
-            "label_fontsize": 6.0,
-            "legend_fontsize": 6.0,
-        })
-
-    if is_frame and args.style_preset is None:
-        base["track_linewidth"] = min(base["track_linewidth"], 0.8)
-        base["marker_scale"] = min(base["marker_scale"], 0.8)
-        base["label_fontsize"] = min(base["label_fontsize"], 7.0)
-        base["legend_fontsize"] = min(base["legend_fontsize"], 7.0)
 
     overrides = {
         "track_linewidth": args.track_linewidth,
@@ -193,6 +227,277 @@ def read_csv_checked(path, required):
     if missing:
         raise ValueError(f"{path} missing columns: {', '.join(missing)}")
     return df
+
+
+def parse_dbs_corner_txt(path):
+    vals = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            match = re.match(r"(\w+)\s*=\s*([+-]?\d+(?:\.\d+)?)", line)
+            if match:
+                vals[match.group(1)] = float(match.group(2))
+
+    required = ["B0", "B1", "B2", "B3", "L0", "L1", "L2", "L3"]
+    missing = [key for key in required if key not in vals]
+    if missing:
+        raise ValueError(f"{path} missing DBS corner keys: {missing}")
+
+    corners = {
+        0: {"lon": vals["L0"], "lat": vals["B0"]},
+        1: {"lon": vals["L1"], "lat": vals["B1"]},
+        2: {"lon": vals["L2"], "lat": vals["B2"]},
+        3: {"lon": vals["L3"], "lat": vals["B3"]},
+    }
+
+    print("Loaded DBS corners:")
+    print("  corner 0: top-left     lon={}, lat={}".format(corners[0]["lon"], corners[0]["lat"]))
+    print("  corner 1: bottom-right lon={}, lat={}".format(corners[1]["lon"], corners[1]["lat"]))
+    print("  corner 2: top-right    lon={}, lat={}".format(corners[2]["lon"], corners[2]["lat"]))
+    print("  corner 3: bottom-left  lon={}, lat={}".format(corners[3]["lon"], corners[3]["lat"]))
+
+    return corners
+
+
+def read_dbs_image(path):
+    try:
+        import matplotlib.image as mpimg
+        return mpimg.imread(path)
+    except Exception as exc:
+        raise ValueError(f"failed to read DBS image {path}: {exc}") from exc
+
+
+def dbs_extent_from_corners(corners):
+    lons = [corners[idx]["lon"] for idx in [0, 1, 2, 3]]
+    lats = [corners[idx]["lat"] for idx in [0, 1, 2, 3]]
+    return [
+        float(min(lons)),
+        float(max(lons)),
+        float(min(lats)),
+        float(max(lats)),
+    ]
+
+
+def dbs_geo_corners_image_order(corners, image_corner_mode="direct"):
+    if image_corner_mode == "cpp_transpose_fliplr":
+        return np.float32([
+            [corners[3]["lon"], corners[3]["lat"]],
+            [corners[0]["lon"], corners[0]["lat"]],
+            [corners[2]["lon"], corners[2]["lat"]],
+            [corners[1]["lon"], corners[1]["lat"]],
+        ])
+    return np.float32([
+        [corners[0]["lon"], corners[0]["lat"]],
+        [corners[2]["lon"], corners[2]["lat"]],
+        [corners[1]["lon"], corners[1]["lat"]],
+        [corners[3]["lon"], corners[3]["lat"]],
+    ])
+
+
+def build_geo_to_image_transform(corners, image_shape, image_corner_mode="direct"):
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError(
+            "DBS image mode requires OpenCV. Please install it with: "
+            "pip install opencv-python"
+        ) from exc
+
+    h, w = image_shape[:2]
+    src_geo = dbs_geo_corners_image_order(corners, image_corner_mode)
+    dst_pix = np.float32([
+        [0, 0],
+        [w - 1, 0],
+        [w - 1, h - 1],
+        [0, h - 1],
+    ])
+    matrix = cv2.getPerspectiveTransform(src_geo, dst_pix)
+
+    print(f"DBS image mode geo->pixel transform, corner_mode={image_corner_mode}:")
+    print("src_geo [lon, lat] =")
+    print(src_geo)
+    print("dst_pix [x, y] =")
+    print(dst_pix)
+    print("H_geo_to_pix =")
+    print(matrix)
+    return matrix, src_geo, dst_pix
+
+
+def transform_lonlat_to_pixel(lon, lat, matrix):
+    lon = np.asarray(lon, dtype=np.float64)
+    lat = np.asarray(lat, dtype=np.float64)
+    ones = np.ones_like(lon)
+    pts = np.vstack([lon, lat, ones])
+    out = matrix @ pts
+    x = out[0, :] / out[2, :]
+    y = out[1, :] / out[2, :]
+    return x, y
+
+
+def apply_dbs_color_mode(img, args):
+    if args.dbs_color_mode == "original":
+        return img
+
+    if args.dbs_color_mode == "gray":
+        arr = np.asarray(img)
+        if arr.ndim == 2:
+            return arr
+        if arr.ndim == 3:
+            rgb = arr[..., :3].astype(np.float32)
+            if rgb.max() > 1.0:
+                rgb = rgb / 255.0
+            gray = (
+                0.299 * rgb[..., 0] +
+                0.587 * rgb[..., 1] +
+                0.114 * rgb[..., 2]
+            )
+            return gray
+        raise ValueError(f"Unsupported DBS image shape for gray mode: {arr.shape}")
+
+    raise ValueError(f"Unsupported dbs_color_mode: {args.dbs_color_mode}")
+
+
+def build_dbs_background_image(args):
+    if args.coord != "geo":
+        raise ValueError(
+            "DBS image mode requires --coord geo, because lon/lat are needed "
+            "to project tracks and detections into DBS image pixels."
+        )
+    img_raw = plt.imread(args.dbs_image)
+    h, w = img_raw.shape[:2]
+    img = apply_dbs_color_mode(img_raw, args)
+    corners = parse_dbs_corner_txt(args.dbs_corner_file)
+    matrix, src_geo, dst_pix = build_geo_to_image_transform(
+        corners, img_raw.shape, args.dbs_image_corner_mode)
+    return {
+        "mode": "image",
+        "image": img,
+        "original_image": img_raw,
+        "width": w,
+        "height": h,
+        "extent": [0, w - 1, h - 1, 0],
+        "origin": "upper",
+        "alpha": args.dbs_alpha,
+        "color_mode": args.dbs_color_mode,
+        "H_geo_to_pix": matrix,
+        "src_geo": src_geo,
+        "dst_pix": dst_pix,
+        "image_corner_mode": args.dbs_image_corner_mode,
+        "corners": corners,
+    }
+
+
+def build_dbs_background_warp(args):
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError(
+            "DBS warp mode requires OpenCV. Please install it with: "
+            "pip install opencv-python"
+        ) from exc
+
+    img_raw = plt.imread(args.dbs_image)
+    h, w = img_raw.shape[:2]
+    img = apply_dbs_color_mode(img_raw, args)
+    corners = parse_dbs_corner_txt(args.dbs_corner_file)
+
+    src_pix = np.float32([
+        [0, 0],
+        [w - 1, 0],
+        [w - 1, h - 1],
+        [0, h - 1],
+    ])
+    geo = dbs_geo_corners_image_order(corners, args.dbs_image_corner_mode)
+    lon_min = float(geo[:, 0].min())
+    lon_max = float(geo[:, 0].max())
+    lat_min = float(geo[:, 1].min())
+    lat_max = float(geo[:, 1].max())
+    if lon_max == lon_min or lat_max == lat_min:
+        raise ValueError("DBS corner extent has zero width or height")
+
+    out_w = int(args.dbs_warp_width)
+    out_h = int(args.dbs_warp_height)
+    dst_pix = np.zeros((4, 2), dtype=np.float32)
+    dst_pix[:, 0] = (geo[:, 0] - lon_min) / (lon_max - lon_min) * (out_w - 1)
+    dst_pix[:, 1] = (lat_max - geo[:, 1]) / (lat_max - lat_min) * (out_h - 1)
+    matrix = cv2.getPerspectiveTransform(src_pix, dst_pix)
+    warped = cv2.warpPerspective(np.asarray(img), matrix, (out_w, out_h))
+
+    print(f"DBS warp mode pixel->regular-lonlat transform, corner_mode={args.dbs_image_corner_mode}:")
+    print("src_pix [x, y] =")
+    print(src_pix)
+    print("geo in PNG corner order [lon, lat] =")
+    print(geo)
+    print("dst_pix on regular lon/lat grid [x, y] =")
+    print(dst_pix)
+    print("H_pix_to_warp =")
+    print(matrix)
+
+    return {
+        "mode": "warp",
+        "image": warped,
+        "original_image": img_raw,
+        "width": out_w,
+        "height": out_h,
+        "extent": [lon_min, lon_max, lat_min, lat_max],
+        "origin": "upper",
+        "alpha": args.dbs_alpha,
+        "color_mode": args.dbs_color_mode,
+        "src_pix": src_pix,
+        "dst_pix": dst_pix,
+        "H_pix_to_warp": matrix,
+        "geo": geo,
+        "image_corner_mode": args.dbs_image_corner_mode,
+        "corners": corners,
+    }
+
+
+def build_dbs_background(args):
+    if not args.show_dbs_bg:
+        return None
+    if args.coord != "geo":
+        if args.dbs_bg_mode == "image":
+            raise ValueError(
+                "DBS image mode requires --coord geo because tracks/detections must "
+                "be mapped from lon/lat to DBS image pixels."
+            )
+        raise ValueError(
+            "DBS background currently requires --coord geo because the DBS corner file "
+            "is given in lon/lat. Please run with --coord geo, or add lon/lat to EN "
+            "projection conversion later."
+        )
+    if not args.dbs_image:
+        raise ValueError("--show-dbs-bg requires --dbs-image")
+    if not args.dbs_corner_file:
+        raise ValueError("--show-dbs-bg requires --dbs-corner-file")
+    if not os.path.exists(args.dbs_image):
+        raise ValueError(f"DBS image not found: {args.dbs_image}")
+    if not os.path.exists(args.dbs_corner_file):
+        raise ValueError(f"DBS corner file not found: {args.dbs_corner_file}")
+    if args.dbs_bg_mode == "image":
+        return build_dbs_background_image(args)
+    if args.dbs_bg_mode == "warp":
+        return build_dbs_background_warp(args)
+    raise ValueError(f"Unsupported DBS mode: {args.dbs_bg_mode}")
+
+
+def add_dbs_background(ax, dbs_bg):
+    if dbs_bg is None:
+        return
+    origin = "upper" if dbs_bg["mode"] == "image" else dbs_bg["origin"]
+    kwargs = {
+        "extent": dbs_bg["extent"],
+        "origin": origin,
+        "alpha": dbs_bg["alpha"],
+        "zorder": 0,
+    }
+    if dbs_bg.get("color_mode") == "gray":
+        kwargs["cmap"] = "gray"
+        kwargs["vmin"] = 0.0
+        kwargs["vmax"] = 1.0
+    ax.imshow(dbs_bg["image"], **kwargs)
 
 
 def load_debug_csvs(debug_dir):
@@ -240,6 +545,12 @@ def get_coord_columns(coord):
     if coord == "en":
         return "e", "n", "E (m)", "N (m)"
     return "lon", "lat", "Longitude", "Latitude"
+
+
+def get_plot_coord_columns(args):
+    if args.show_dbs_bg and args.dbs_bg_mode == "image":
+        return "dbs_x", "dbs_y", "DBS image x (pixel)", "DBS image y (pixel)"
+    return get_coord_columns(args.coord)
 
 
 def compute_roi_from_args(args):
@@ -341,21 +652,115 @@ def compute_axis_limits(states, detections, roi, coord, padding_ratio):
     return xlim, ylim
 
 
-def apply_axes(ax, coord, style, xlim=None, ylim=None):
+def compute_axis_limits_with_dbs(states, detections, roi, coord, padding_ratio, dbs_bg, axis_from):
+    if dbs_bg is not None and dbs_bg.get("mode") == "image":
+        return (0, dbs_bg["width"] - 1), (dbs_bg["height"] - 1, 0)
+    if dbs_bg is not None and dbs_bg.get("mode") == "warp":
+        extent = dbs_bg["extent"]
+        return (extent[0], extent[1]), (extent[2], extent[3])
+    if dbs_bg is None or axis_from == "tracks":
+        return compute_axis_limits(states, detections, roi, coord, padding_ratio)
+    extent = dbs_bg["extent"]
+    xcol, ycol, _, _ = get_coord_columns(coord)
+    xvals = pd.concat([
+        states[xcol],
+        detections[xcol],
+        pd.Series([extent[0], extent[1]]),
+    ], ignore_index=True)
+    yvals = pd.concat([
+        states[ycol],
+        detections[ycol],
+        pd.Series([extent[2], extent[3]]),
+    ], ignore_index=True)
+    return padded_limits(xvals, None, None, padding_ratio), padded_limits(yvals, None, None, padding_ratio)
+
+
+def apply_axes(ax, args, style, xlim=None, ylim=None):
     if xlim:
         ax.set_xlim(xlim)
     if ylim:
         ax.set_ylim(ylim)
-    if coord == "en":
+    image_mode = args.show_dbs_bg and args.dbs_bg_mode == "image"
+    if args.coord == "en" or image_mode:
         ax.set_aspect("equal", adjustable="box")
     ax.tick_params(labelsize=style.tick_fontsize)
     ax.grid(True, alpha=0.3)
+    if image_mode and not args.dbs_show_pixel_axis:
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.grid(False)
+
+
+def add_dbs_pixel_columns(states, detections, dbs_bg):
+    matrix = dbs_bg["H_geo_to_pix"]
+    states = states.copy()
+    detections = detections.copy()
+    states["dbs_x"], states["dbs_y"] = transform_lonlat_to_pixel(
+        states["lon"], states["lat"], matrix)
+    detections["dbs_x"], detections["dbs_y"] = transform_lonlat_to_pixel(
+        detections["lon"], detections["lat"], matrix)
+    return states, detections
+
+
+def clip_to_dbs_image(df, dbs_bg, xcol="dbs_x", ycol="dbs_y"):
+    if df.empty:
+        return df
+    w = dbs_bg["width"]
+    h = dbs_bg["height"]
+    mask = (
+        (df[xcol] >= 0) &
+        (df[xcol] <= w - 1) &
+        (df[ycol] >= 0) &
+        (df[ycol] <= h - 1)
+    )
+    return df[mask].copy()
+
+
+def use_dbs_native_resolution(args, dbs_bg, fmt):
+    return (
+        args.dbs_native_resolution
+        and dbs_bg is not None
+        and dbs_bg.get("mode") == "image"
+        and fmt == "png"
+    )
+
+
+def create_spatial_figure(args, dbs_bg=None, is_frame=False, fmt=None):
+    out_fmt = fmt or args.format
+    if use_dbs_native_resolution(args, dbs_bg, out_fmt):
+        dpi = max(1, int(args.dbs_native_dpi))
+        width = int(dbs_bg["width"])
+        height = int(dbs_bg["height"])
+        fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        ax.set_position([0, 0, 1, 1])
+        fig._dbs_native_png = True
+        fig._dbs_native_dpi = dpi
+        return fig, ax
+
+    if is_frame:
+        figsize = (args.frame_fig_width, args.frame_fig_height)
+    else:
+        figsize = (args.fig_width, args.fig_height)
+    fig, ax = plt.subplots(figsize=figsize)
+    fig._dbs_native_png = False
+    return fig, ax
 
 
 def save_figure(fig, path, fmt):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if fmt == "png":
-        fig.savefig(path, dpi=300, bbox_inches="tight")
+        if getattr(fig, "_dbs_native_png", False):
+            fig.savefig(
+                path,
+                dpi=getattr(fig, "_dbs_native_dpi", 100),
+                bbox_inches=None,
+                pad_inches=0,
+            )
+        else:
+            fig.savefig(path, dpi=300, bbox_inches="tight")
     else:
         fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
@@ -364,6 +769,115 @@ def save_figure(fig, path, fmt):
 
 def save_named_figure(fig, out_dir, stem, fmt):
     save_figure(fig, os.path.join(out_dir, f"{stem}.{fmt}"), fmt)
+
+
+def corner_pixels_for_dbs_image(image_shape, image_corner_mode="direct"):
+    h, w = image_shape[:2]
+    if image_corner_mode == "cpp_transpose_fliplr":
+        return {
+            3: (0, 0),
+            0: (w - 1, 0),
+            2: (w - 1, h - 1),
+            1: (0, h - 1),
+        }
+    return {
+        0: (0, 0),
+        2: (w - 1, 0),
+        1: (w - 1, h - 1),
+        3: (0, h - 1),
+    }
+
+
+def save_dbs_debug_figures(args, img, corners, dbs_bg, out_dir, detections, states, style):
+    if not args.dbs_debug or dbs_bg is None:
+        return
+    debug_dir = os.path.join(out_dir, "dbs_debug")
+    os.makedirs(debug_dir, exist_ok=True)
+
+    image_corner_mode = dbs_bg.get("image_corner_mode", "direct")
+    corner_pixels = corner_pixels_for_dbs_image(img.shape, image_corner_mode)
+    display_img = apply_dbs_color_mode(img, args)
+    imshow_kwargs = {"origin": "upper"}
+    if dbs_bg.get("color_mode") == "gray":
+        imshow_kwargs.update({"cmap": "gray", "vmin": 0.0, "vmax": 1.0})
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(display_img, **imshow_kwargs)
+    if image_corner_mode == "cpp_transpose_fliplr":
+        labels = {
+            3: "corner 3\nPNG left-top",
+            0: "corner 0\nPNG right-top",
+            2: "corner 2\nPNG right-bottom",
+            1: "corner 1\nPNG left-bottom",
+        }
+        draw_order = [3, 0, 2, 1]
+    else:
+        labels = {
+            0: "corner 0\nPNG left-top",
+            2: "corner 2\nPNG right-top",
+            1: "corner 1\nPNG right-bottom",
+            3: "corner 3\nPNG left-bottom",
+        }
+        draw_order = [0, 2, 1, 3]
+    for idx in draw_order:
+        x, y = corner_pixels[idx]
+        ax.scatter([x], [y], s=80, c="yellow", edgecolors="black", zorder=3)
+        row = corners[idx]
+        ax.text(x, y,
+                f"{labels[idx]}\nlon={row['lon']:.6f}\nlat={row['lat']:.6f}",
+                color="yellow", fontsize=8, zorder=4)
+    ax.set_title(f"DBS original corners, image_corner_mode={image_corner_mode}")
+    save_figure(fig, os.path.join(debug_dir, "dbs_original_with_corner_labels.png"), "png")
+
+    fig, ax = plt.subplots(figsize=(8, 10))
+    add_dbs_background(ax, dbs_bg)
+    ax.set_xlim(dbs_bg["extent"][0], dbs_bg["extent"][1])
+    ax.set_ylim(dbs_bg["extent"][2], dbs_bg["extent"][3])
+    if dbs_bg.get("mode") == "image":
+        ax.set_xlabel("DBS image x (pixel)")
+        ax.set_ylabel("DBS image y (pixel)")
+        ax.set_aspect("equal", adjustable="box")
+    else:
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+    ax.set_title(f"DBS {dbs_bg['mode']} preview")
+    save_figure(fig, os.path.join(debug_dir, "dbs_warped_preview.png"), "png")
+
+    fig, ax = plt.subplots(figsize=(8, 10))
+    add_dbs_background(ax, dbs_bg)
+    if dbs_bg.get("mode") == "image" and not detections.empty and "dbs_x" in detections.columns:
+        plot_detections(ax, detections, "dbs_x", "dbs_y", style)
+    elif not detections.empty:
+        plot_detections(ax, detections, "lon", "lat", style)
+    ax.set_xlim(dbs_bg["extent"][0], dbs_bg["extent"][1])
+    ax.set_ylim(dbs_bg["extent"][2], dbs_bg["extent"][3])
+    if dbs_bg.get("mode") == "image":
+        ax.set_xlabel("DBS image x (pixel)")
+        ax.set_ylabel("DBS image y (pixel)")
+        ax.set_aspect("equal", adjustable="box")
+    else:
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+    ax.set_title("DBS overlay preview with detections")
+    save_figure(fig, os.path.join(debug_dir, "dbs_overlay_preview.png"), "png")
+
+    if dbs_bg.get("mode") == "image":
+        fig, ax = plt.subplots(figsize=(8, 8))
+        add_dbs_background(ax, dbs_bg)
+        if not detections.empty and "dbs_x" in detections.columns:
+            plot_detections(ax, detections, "dbs_x", "dbs_y", style)
+        if not states.empty and "dbs_x" in states.columns:
+            sample = states[states["matched_this_frame"] == 1]
+            if not sample.empty:
+                ax.scatter(sample["dbs_x"], sample["dbs_y"], s=12,
+                           c="#1f77b4", alpha=0.8, marker="s", zorder=4)
+        ax.set_xlim(0, dbs_bg["width"] - 1)
+        ax.set_ylim(dbs_bg["height"] - 1, 0)
+        ax.set_aspect("equal", adjustable="box")
+        if not args.dbs_show_pixel_axis:
+            ax.set_xticks([])
+            ax.set_yticks([])
+        ax.set_title("DBS image-mode overlay preview")
+        save_figure(fig, os.path.join(debug_dir, "dbs_image_mode_overlay_preview.png"), "png")
 
 
 def add_marker_legend(ax, style, include_tracks=True, include_track_id_legend=False):
@@ -389,6 +903,17 @@ def add_marker_legend(ax, style, include_tracks=True, include_track_id_legend=Fa
     ax.legend(handles=handles, loc="best", fontsize=style.legend_fontsize)
 
 
+def add_output_legend(ax, style):
+    handles = [
+        Line2D([0], [0], color="#4c78a8", label="track color = track_id"),
+        Line2D([0], [0], marker="s", color="#4c78a8", markerfacecolor="#4c78a8",
+               markeredgecolor="black", label="final output point", linestyle="none"),
+        Line2D([0], [0], color="#4c78a8", linewidth=style.track_linewidth,
+               label="final output track"),
+    ]
+    ax.legend(handles=handles, loc="best", fontsize=style.legend_fontsize)
+
+
 def plot_detections(ax, dets, xcol, ycol, style):
     if dets.empty:
         return
@@ -396,13 +921,14 @@ def plot_detections(ax, dets, xcol, ycol, style):
     unmatched = dets[dets["matched"] != 1]
     if not matched.empty:
         ax.scatter(matched[xcol], matched[ycol], s=style.detection_marker_size,
-                   c="#bdbdbd", alpha=style.detection_alpha, marker=".")
+                   c="#bdbdbd", alpha=style.detection_alpha, marker=".", zorder=2)
     if not unmatched.empty:
         ax.scatter(unmatched[xcol], unmatched[ycol],
                    s=style.detection_marker_size * 1.8,
                    facecolors="none", edgecolors="#737373",
                    alpha=min(1.0, style.detection_alpha + 0.35),
-                   marker="o", linewidths=max(0.6, style.output_edge_width * 0.7))
+                   marker="o", linewidths=max(0.6, style.output_edge_width * 0.7),
+                   zorder=2)
 
 
 def should_label_tracks(args, track_count, is_frame=False):
@@ -434,29 +960,31 @@ def scatter_state_points(ax, data, xcol, ycol, state, color, style):
             ax.scatter(normal[xcol], normal[ycol],
                        s=marker_size(state, False, style),
                        marker=marker, color=color, alpha=alpha,
-                       linewidths=max(0.8, style.output_edge_width * 0.8))
+                       linewidths=max(0.8, style.output_edge_width * 0.8),
+                       zorder=4)
         else:
             ax.scatter(normal[xcol], normal[ycol],
                        s=marker_size(state, False, style),
                        marker=marker, color=color, edgecolors=color,
-                       alpha=alpha, linewidths=0.5)
+                       alpha=alpha, linewidths=0.5, zorder=4)
     if not output.empty:
         ax.scatter(output[xcol], output[ycol],
                    s=marker_size(state, True, style),
                    marker=marker, color=color, edgecolors="black",
-                   alpha=0.95, linewidths=style.output_edge_width)
+                   alpha=0.95, linewidths=style.output_edge_width, zorder=4)
 
 
 def plot_track_paths(ax, states, colors, args, style, current_id=None,
                      label_ends=True, is_frame=False):
-    xcol, ycol, _, _ = get_coord_columns(args.coord)
+    xcol, ycol, _, _ = get_plot_coord_columns(args)
     track_count = states["track_id"].nunique()
     do_labels = should_label_tracks(args, track_count, is_frame=is_frame)
     for tid in sorted(states["track_id"].unique()):
         g = states[states["track_id"] == tid].sort_values("result_id")
         color = colors.get(tid, "#4c78a8")
         ax.plot(g[xcol], g[ycol], color=color,
-                linewidth=style.track_linewidth, alpha=style.track_alpha)
+                linewidth=style.track_linewidth, alpha=style.track_alpha,
+                zorder=3)
         for state, marker in STATE_MARKERS.items():
             s = g[g["state"] == state]
             scatter_state_points(ax, s, xcol, ycol, state, color, style)
@@ -472,22 +1000,25 @@ def plot_track_paths(ax, states, colors, args, style, current_id=None,
                                s=marker_size(state, is_output, style) * 1.25,
                                marker=marker, color="black" if is_output else color,
                                linewidths=style.output_edge_width if is_output else 0.7,
-                               alpha=0.95 if is_output else 0.85)
+                               alpha=0.95 if is_output else 0.85, zorder=4)
                 else:
                     ax.scatter([row[xcol]], [row[ycol]],
                                s=marker_size(state, is_output, style) * 1.25,
                                marker=marker, color=color,
                                edgecolors="black" if is_output else color,
                                linewidths=style.output_edge_width if is_output else 0.7,
-                               alpha=0.95 if is_output else (0.7 if state == "Coasted" else 0.85))
+                               alpha=0.95 if is_output else (0.7 if state == "Coasted" else 0.85),
+                               zorder=4)
                 label = f"ID={tid}"
                 if args.show_speed:
                     label += f" v={row['speed']:.1f} m/s"
                 if do_labels:
-                    ax.text(row[xcol], row[ycol], label, fontsize=style.label_fontsize)
+                    ax.text(row[xcol], row[ycol], label, fontsize=style.label_fontsize,
+                            zorder=5)
         elif label_ends and do_labels:
             last = g.iloc[-1]
-            ax.text(last[xcol], last[ycol], f"ID={tid}", fontsize=style.label_fontsize)
+            ax.text(last[xcol], last[ycol], f"ID={tid}",
+                    fontsize=style.label_fontsize, zorder=5)
 
 
 def title_suffix(args, roi):
@@ -498,9 +1029,109 @@ def title_suffix(args, roi):
     return "\n".join(pieces)
 
 
-def plot_global_paths(states, detections, frames, args, out_dir, colors, roi, axis_limits, style):
-    xcol, ycol, xlabel, ylabel = get_coord_columns(args.coord)
-    fig, ax = plt.subplots(figsize=(args.fig_width, args.fig_height))
+def plot_output_track_paths(ax, output_states, colors, args, style,
+                            current_id=None, label_ends=True, is_frame=False):
+    xcol, ycol, _, _ = get_plot_coord_columns(args)
+    if output_states.empty:
+        return
+    track_count = output_states["track_id"].nunique()
+    do_labels = should_label_tracks(args, track_count, is_frame=is_frame)
+    for tid in sorted(output_states["track_id"].unique()):
+        g = output_states[output_states["track_id"] == tid].sort_values("result_id")
+        color = colors.get(tid, "#4c78a8")
+        ax.plot(g[xcol], g[ycol], color=color,
+                linewidth=style.track_linewidth * 1.3,
+                alpha=min(1.0, style.track_alpha + 0.15), zorder=3)
+        ax.scatter(g[xcol], g[ycol],
+                   s=marker_size("Confirmed", True, style),
+                   marker=STATE_MARKERS["Confirmed"], color=color,
+                   edgecolors="black", linewidths=style.output_edge_width,
+                   alpha=0.95, zorder=4)
+        if current_id is not None:
+            c = g[g["result_id"] == current_id]
+            if not c.empty:
+                row = c.iloc[-1]
+                ax.scatter([row[xcol]], [row[ycol]],
+                           s=marker_size("Confirmed", True, style) * 1.4,
+                           marker=STATE_MARKERS["Confirmed"], color=color,
+                           edgecolors="black", linewidths=style.output_edge_width * 1.2,
+                           alpha=1.0, zorder=4)
+                if do_labels:
+                    ax.text(row[xcol], row[ycol], f"ID={tid}",
+                            fontsize=style.label_fontsize, zorder=5)
+        elif label_ends and do_labels:
+            last = g.iloc[-1]
+            ax.text(last[xcol], last[ycol], f"ID={tid}",
+                    fontsize=style.label_fontsize, zorder=5)
+
+
+def output_title_suffix(args, roi):
+    roi_text = roi_title(roi, args.coord)
+    return f"\n{roi_text}" if roi_text else ""
+
+
+def plot_output_global_paths(output_states, args, out_dir, colors, roi, axis_limits, style,
+                             dbs_bg=None):
+    if output_states.empty:
+        print("No final output points available for track_outputs_global_paths.")
+        return
+    xcol, ycol, xlabel, ylabel = get_plot_coord_columns(args)
+    fig, ax = create_spatial_figure(args, dbs_bg=dbs_bg, is_frame=False,
+                                    fmt=args.format)
+    add_dbs_background(ax, dbs_bg)
+    plot_output_track_paths(ax, output_states, colors, args, style)
+    ax.set_xlabel(xlabel, fontsize=style.axis_label_fontsize)
+    ax.set_ylabel(ylabel, fontsize=style.axis_label_fontsize)
+    rid_min = int(output_states["result_id"].min())
+    rid_max = int(output_states["result_id"].max())
+    ax.set_title(
+        f"Final output tracks result_id {rid_min}-{rid_max}{output_title_suffix(args, roi)}",
+        fontsize=style.title_fontsize,
+    )
+    apply_axes(ax, args, style, *axis_limits)
+    add_output_legend(ax, style)
+    save_named_figure(fig, out_dir, "track_outputs_global_paths", args.format)
+
+
+def output_frame_stats_text(output_states, rid):
+    num_outputs = len(output_states[output_states["result_id"] == rid])
+    num_tracks = output_states[output_states["result_id"] <= rid]["track_id"].nunique()
+    return f"outputs={num_outputs}, output_tracks_so_far={num_tracks}"
+
+
+def plot_output_snapshot(output_states, frames, args, out_dir, colors, roi, axis_limits,
+                         style, result_id=None, stem="track_outputs_snapshot_last",
+                         fmt=None, is_frame=False, dbs_bg=None):
+    if output_states.empty:
+        print(f"No final output points available for {stem}.")
+        return
+    xcol, ycol, xlabel, ylabel = get_plot_coord_columns(args)
+    rid = int(result_id if result_id is not None else frames["result_id"].max())
+    hist = output_states[output_states["result_id"] <= rid]
+
+    fig, ax = create_spatial_figure(args, dbs_bg=dbs_bg, is_frame=is_frame,
+                                    fmt=fmt or args.format)
+    add_dbs_background(ax, dbs_bg)
+    plot_output_track_paths(ax, hist, colors, args, style, current_id=rid,
+                            label_ends=False, is_frame=is_frame)
+    ax.set_xlabel(xlabel, fontsize=style.axis_label_fontsize)
+    ax.set_ylabel(ylabel, fontsize=style.axis_label_fontsize)
+    title = f"Final output snapshot, result {rid}\n{output_frame_stats_text(output_states, rid)}"
+    if not is_frame:
+        title += output_title_suffix(args, roi)
+    ax.set_title(title, fontsize=style.title_fontsize)
+    apply_axes(ax, args, style, *axis_limits)
+    if not is_frame:
+        add_output_legend(ax, style)
+    save_named_figure(fig, out_dir, stem, fmt or args.format)
+
+
+def plot_global_paths(states, detections, frames, args, out_dir, colors, roi, axis_limits,
+                      style, dbs_bg=None):
+    xcol, ycol, xlabel, ylabel = get_plot_coord_columns(args)
+    fig, ax = create_spatial_figure(args, dbs_bg=dbs_bg, is_frame=False,
+                                    fmt=args.format)
+    add_dbs_background(ax, dbs_bg)
     if args.show_detections:
         plot_detections(ax, detections, xcol, ycol, style)
     plot_track_paths(ax, states, colors, args, style)
@@ -512,7 +1143,7 @@ def plot_global_paths(states, detections, frames, args, out_dir, colors, roi, ax
         f"Track global paths result_id {rid_min}-{rid_max}\n{title_suffix(args, roi)}",
         fontsize=style.title_fontsize,
     )
-    apply_axes(ax, args.coord, style, *axis_limits)
+    apply_axes(ax, args, style, *axis_limits)
     add_marker_legend(ax, style)
     save_named_figure(fig, out_dir, "track_global_paths", args.format)
 
@@ -531,17 +1162,15 @@ def frame_stats_text(frames, rid):
 
 def plot_snapshot(states, detections, frames, args, out_dir, colors, roi, axis_limits,
                   style, result_id=None, stem="track_snapshot_last", fmt=None,
-                  is_frame=False):
-    xcol, ycol, xlabel, ylabel = get_coord_columns(args.coord)
+                  is_frame=False, dbs_bg=None):
+    xcol, ycol, xlabel, ylabel = get_plot_coord_columns(args)
     rid = int(result_id if result_id is not None else frames["result_id"].max())
     hist = states[states["result_id"] <= rid]
     current_dets = detections[detections["result_id"] == rid]
 
-    if is_frame:
-        figsize = (args.frame_fig_width, args.frame_fig_height)
-    else:
-        figsize = (args.fig_width, args.fig_height)
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = create_spatial_figure(args, dbs_bg=dbs_bg, is_frame=is_frame,
+                                    fmt=fmt or args.format)
+    add_dbs_background(ax, dbs_bg)
     if args.show_detections:
         plot_detections(ax, current_dets, xcol, ycol, style)
     plot_track_paths(ax, hist, colors, args, style, current_id=rid,
@@ -554,8 +1183,13 @@ def plot_snapshot(states, detections, frames, args, out_dir, colors, roi, axis_l
     else:
         title = f"TrackManager snapshot, result {rid}\n{frame_stats_text(frames, rid)}\n{title_suffix(args, roi)}"
     ax.set_title(title, fontsize=style.title_fontsize)
-    apply_axes(ax, args.coord, style, *axis_limits)
-    add_marker_legend(ax, style)
+    
+    apply_axes(ax, args, style, *axis_limits)
+
+    # GIF 帧图不显示图例，普通快照图仍然显示图例
+    if not is_frame:
+        add_marker_legend(ax, style)
+
     save_named_figure(fig, out_dir, stem, fmt or args.format)
 
 
@@ -645,7 +1279,7 @@ def plot_short_track_summary(all_states, args, out_dir, style):
 
 
 def make_frame_sequence(states, detections, frames, args, out_dir, colors, roi, axis_limits,
-                        style, fmt=None, frame_dir=None):
+                        style, fmt=None, frame_dir=None, dbs_bg=None):
     frame_fmt = fmt or args.format
     frame_dir = frame_dir or os.path.join(out_dir, "frames")
     os.makedirs(frame_dir, exist_ok=True)
@@ -655,8 +1289,26 @@ def make_frame_sequence(states, detections, frames, args, out_dir, colors, roi, 
         stem = f"frame_{int(rid):06d}"
         plot_snapshot(states, detections, frames, args, frame_dir, colors, roi,
                       axis_limits, style, result_id=int(rid), stem=stem,
-                      fmt=frame_fmt, is_frame=True)
+                      fmt=frame_fmt, is_frame=True, dbs_bg=dbs_bg)
         paths.append(os.path.join(frame_dir, f"{stem}.{frame_fmt}"))
+    return paths
+
+
+def make_output_frame_sequence(output_states, frames, args, out_dir, colors, roi, axis_limits,
+                               style, fmt=None, frame_dir=None, dbs_bg=None):
+    frame_fmt = fmt or args.format
+    frame_dir = frame_dir or os.path.join(out_dir, "output_frames")
+    os.makedirs(frame_dir, exist_ok=True)
+    result_ids = sorted(frames["result_id"].unique())
+    paths = []
+    for rid in result_ids:
+        stem = f"output_frame_{int(rid):06d}"
+        plot_output_snapshot(output_states, frames, args, frame_dir, colors, roi,
+                             axis_limits, style, result_id=int(rid), stem=stem,
+                             fmt=frame_fmt, is_frame=True, dbs_bg=dbs_bg)
+        path = os.path.join(frame_dir, f"{stem}.{frame_fmt}")
+        if os.path.exists(path):
+            paths.append(path)
     return paths
 
 
@@ -700,6 +1352,10 @@ def main():
     args = parse_args()
     args.show_detections = args.show_detections and not args.hide_detections
     args.label_tracks = args.label_tracks and not args.no_label_tracks
+    if args.no_dbs_bg:
+        args.show_dbs_bg = False
+    if args.no_dbs_clip_to_image:
+        args.dbs_clip_to_image = False
     keep_frame_png = bool_arg(args.keep_frame_png)
     out_dir = args.out_dir or os.path.join(args.debug_dir, "figs")
 
@@ -717,6 +1373,16 @@ def main():
             print("No tracks remain after ROI filtering.")
             return 0
 
+        dbs_bg = build_dbs_background(args)
+        if dbs_bg is not None and dbs_bg.get("mode") == "image":
+            states, detections = add_dbs_pixel_columns(states, detections, dbs_bg)
+            if args.dbs_clip_to_image:
+                states = clip_to_dbs_image(states, dbs_bg)
+                detections = clip_to_dbs_image(detections, dbs_bg)
+            if states.empty:
+                print("No tracks remain after DBS image pixel clipping.")
+                return 0
+
         filtered_states, keep_ids, _ = filter_by_min_len(states, args.min_len)
         if filtered_states.empty:
             print(f"No tracks with length >= {args.min_len}. Nothing to plot.")
@@ -730,26 +1396,41 @@ def main():
             )
             args.label_tracks = False
         is_roi_view = roi is not None
-        style = resolve_style(args, is_roi=is_roi_view, is_frame=False,
-                              track_count=track_count)
-        frame_style = resolve_style(args, is_roi=is_roi_view, is_frame=True,
-                                    track_count=track_count)
+        style = resolve_style(args)
+        frame_style = resolve_style(args)
         colors = get_track_colors(filtered_states["track_id"].unique())
-        axis_limits = compute_axis_limits(
-            filtered_states, filtered_detections, roi, args.coord, args.padding_ratio)
+        axis_limits = compute_axis_limits_with_dbs(
+            filtered_states, filtered_detections, roi, args.coord, args.padding_ratio,
+            dbs_bg, args.axis_from)
+        output_states = filtered_states[filtered_states["is_output"] == 1].copy()
+        output_colors = get_track_colors(output_states["track_id"].unique())
+        if dbs_bg is not None:
+            save_dbs_debug_figures(
+                args, dbs_bg["original_image"], dbs_bg["corners"], dbs_bg,
+                out_dir, filtered_detections, filtered_states, style)
 
         plot_global_paths(filtered_states, filtered_detections, frames, args, out_dir,
-                          colors, roi, axis_limits, style)
+                          colors, roi, axis_limits, style, dbs_bg=dbs_bg)
         plot_snapshot(filtered_states, filtered_detections, frames, args, out_dir,
-                      colors, roi, axis_limits, style)
+                      colors, roi, axis_limits, style, dbs_bg=dbs_bg)
+        plot_output_global_paths(output_states, args, out_dir, output_colors, roi,
+                                 axis_limits, style, dbs_bg=dbs_bg)
+        plot_output_snapshot(output_states, frames, args, out_dir, output_colors, roi,
+                             axis_limits, style, dbs_bg=dbs_bg)
         plot_state_timeline(filtered_states, args, out_dir, style)
         plot_speed_timeline(filtered_states, args, out_dir, colors, style)
         plot_short_track_summary(states, args, out_dir, style)
 
         frame_paths = None
+        output_frame_paths = None
         if args.make_frames:
             frame_paths = make_frame_sequence(filtered_states, filtered_detections, frames, args, out_dir,
-                                             colors, roi, axis_limits, frame_style)
+                                             colors, roi, axis_limits, frame_style,
+                                             dbs_bg=dbs_bg)
+            if not output_states.empty:
+                output_frame_paths = make_output_frame_sequence(
+                    output_states, frames, args, out_dir, output_colors, roi,
+                    axis_limits, frame_style, dbs_bg=dbs_bg)
 
         if args.make_gif:
             gif_png_dir = os.path.join(out_dir, "frames")
@@ -761,7 +1442,8 @@ def main():
                 gif_png_dir = temp_dir
                 png_paths = make_frame_sequence(filtered_states, filtered_detections, frames, args,
                                                 out_dir, colors, roi, axis_limits,
-                                                frame_style, fmt="png", frame_dir=gif_png_dir)
+                                                frame_style, fmt="png", frame_dir=gif_png_dir,
+                                                dbs_bg=dbs_bg)
             made = make_gif_from_frames(
                 png_paths, os.path.join(out_dir, "track_growth.gif"), args.gif_duration_ms)
             if made and not keep_frame_png and temp_dir:
@@ -772,6 +1454,33 @@ def main():
                         os.remove(path)
                     except OSError:
                         pass
+
+        if args.make_gif or args.make_output_gif:
+            if not output_states.empty:
+                output_temp_dir = None
+                if args.format == "png" and output_frame_paths is not None:
+                    output_png_paths = output_frame_paths
+                else:
+                    output_temp_dir = os.path.join(out_dir, "_output_gif_png_frames")
+                    output_png_paths = make_output_frame_sequence(
+                        output_states, frames, args, out_dir, output_colors, roi,
+                        axis_limits, frame_style, fmt="png", frame_dir=output_temp_dir,
+                        dbs_bg=dbs_bg)
+                output_made = make_gif_from_frames(
+                    output_png_paths,
+                    os.path.join(out_dir, "track_outputs_growth.gif"),
+                    args.gif_duration_ms,
+                )
+                if output_made and not keep_frame_png and output_temp_dir:
+                    shutil.rmtree(output_temp_dir, ignore_errors=True)
+                elif output_made and not keep_frame_png and args.format == "png" and output_frame_paths is None:
+                    for path in output_png_paths:
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+            else:
+                print("No final output points available for track_outputs_growth.gif.")
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

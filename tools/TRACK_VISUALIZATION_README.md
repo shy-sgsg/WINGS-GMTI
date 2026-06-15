@@ -168,22 +168,30 @@ is_output
 ```text
 track_global_paths.<format>
 track_snapshot_last.<format>
+track_outputs_global_paths.<format>
+track_outputs_snapshot_last.<format>
 track_state_timeline.<format>
 track_speed_timeline.<format>
 track_short_track_summary.<format>
 frames/frame_000016.<format>
+output_frames/output_frame_000016.<format>
 track_growth.gif
+track_outputs_growth.gif
 ```
 
 用途：
 
 - `track_global_paths`：查看全局航迹路径、状态点、最终输出点和原始检测点。
 - `track_snapshot_last`：查看最后一个周期或指定周期处理完后的 TrackManager 全局状态。
+- `track_outputs_global_paths`：只查看最终确认并输出的点，以及由这些点连成的输出航迹。
+- `track_outputs_snapshot_last`：只查看最后一个周期或指定周期的最终输出点和输出航迹历史。
 - `track_state_timeline`：查看每条航迹随周期变化的状态，适合观察频繁新建 ID、短 Tentative、过快 Deleted。
 - `track_speed_timeline`：查看每条航迹命中检测时的速度变化，默认不画 Coasted 预测速度。
 - `track_short_track_summary`：统计短航迹数量，用于对比优化前后短 ID 是否减少。
 - `frames/frame_000016.<format>`：每个周期一张快照，用于逐帧检查航迹生长过程。
+- `output_frames/output_frame_000016.<format>`：每个周期一张最终输出专用快照，只显示 `is_output=1` 的点和航迹。
 - `track_growth.gif`：由 PNG 帧合成的航迹生长动画。
+- `track_outputs_growth.gif`：由 PNG 帧合成的最终输出航迹生长动画。
 
 ## 4. 常用命令示例
 
