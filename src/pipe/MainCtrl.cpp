@@ -43,7 +43,7 @@ int extractFileIdFromPath(const std::string& path)
     const size_t pos = path.find_last_of("/\\");
     const std::string filename = (pos == std::string::npos) ? path : path.substr(pos + 1);
     std::smatch match;
-    const std::regex idPattern(R"((\d+)(?:\.bin)?$)", std::regex::icase);
+    const std::regex idPattern(R"((\d+)(?:\.(bin|dat))?)", std::regex::icase);
     if (std::regex_search(filename, match, idPattern) && match.size() >= 2) {
         return std::stoi(match[1].str());
     }

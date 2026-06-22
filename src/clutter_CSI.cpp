@@ -1,4 +1,5 @@
 #include "GMTIProcessor.hpp"
+#include "trig_lut.hpp"
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -257,7 +258,7 @@ bool GMTIProcessor::clutter_cancel_38_paper_1(
     for (size_t r=0;r<Na;++r){
         // exp(j*phi) 改为 cos/sin，少一次复指数
         const double phi = k*y_faAxis[r] + b;
-        const double cs = std::cos(phi), sn = std::sin(phi);
+        const double cs = gmti::trig_lut::cos(phi), sn = gmti::trig_lut::sin(phi);
         const std::complex<double> az_fai(cs, sn);
         const size_t off = r*Nr;
 
@@ -279,4 +280,3 @@ bool GMTIProcessor::clutter_cancel_38_paper_1(
 
     return true;
 }
-

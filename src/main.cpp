@@ -5,6 +5,7 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include "config_structs.hpp" // 含 Config / GMTIOutput::Plane / Result 等声明
@@ -13,8 +14,27 @@
 #include "trackModule.hpp"
 #include "TrackManager.hpp"
 #include "pesudoTargetGen.hpp" // 伪目标生成函数声明
+#include "trig_lut.hpp"
 
 namespace {
+
+bool parseTrigModeArg(const std::string& arg, const char* next, bool& consumedNext)
+{
+    consumedNext = false;
+    const std::string prefix = "--trig-mode=";
+    if (arg.compare(0, prefix.size(), prefix) == 0) {
+        return gmti::trig_lut::setModeFromString(arg.c_str() + prefix.size(), false);
+    }
+    if (arg == "--trig-mode") {
+        if (!next) {
+            std::cerr << "[ERR] --trig-mode 需要参数: lut|math|compare\n";
+            return false;
+        }
+        consumedNext = true;
+        return gmti::trig_lut::setModeFromString(next, false);
+    }
+    return true;
+}
 
 bool deriveRuntimeConfig(Config &cfg)
 {
@@ -55,6 +75,28 @@ bool deriveRuntimeConfig(Config &cfg)
 int main(int argc, char **argv)
 {
     TIMING_SCOPE(main_total);
+    gmti::trig_lut::configureFromEnv();
+
+    std::string xmlPath = "/home/shy/AIR/小长/GMTI程序/GMTI/GMTI_algorithm/temp_config.xml";
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        bool consumedNext = false;
+        if (arg == "--trig-mode" || arg.compare(0, std::string("--trig-mode=").size(), "--trig-mode=") == 0) {
+            if (!parseTrigModeArg(arg, (i + 1 < argc) ? argv[i + 1] : nullptr, consumedNext)) {
+                return 1;
+            }
+            if (consumedNext) ++i;
+        } else {
+            xmlPath = arg;
+        }
+    }
+
+    if (!gmti::trig_lut::initialize(true)) {
+        std::cerr << "[ERR] 三角函数路径初始化失败\n";
+        return 1;
+    }
+    // gmti::trig_lut::benchmark(1u << 22);
+
     std::vector<double> MT_acc;
     std::vector<std::vector<double>> all_frames_MT;
 
@@ -64,10 +106,6 @@ int main(int argc, char **argv)
 #endif
 
     // ===== 1. 读取 XML 配置 ==============================================
-    std::string xmlPath = "/home/shy/AIR/小长/GMTI程序/GMTI/GMTI_algorithm/temp_config.xml";
-    if (argc >= 2)
-        xmlPath = argv[1];
-
     GMTIProcessor proc;
     Config cfg; // 用于回传 cfg，方便 main 修改/查看
     if (!proc.readXmlParam(xmlPath, cfg)) { 

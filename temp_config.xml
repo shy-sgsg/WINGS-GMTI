@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <GMTI>
     <GMTI_parameter>
-        <GMTI_data>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID19_8H19M_GMTI0</GMTI_data>
-        <GMTI_data2>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID19_8H19M_GMTI1</GMTI_data2>
+        <GMTI_data>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID9_8H9M_GMTI0</GMTI_data>
+        <GMTI_data2>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID9_8H9M_GMTI1</GMTI_data2>
         <result_add>/home/shy/AIR/小长/GMTI_Data/Mission068/result_final</result_add>
-        <Plane_POS>/home/shy/AIR/小长/GMTI_Data/Mission068/RTIPOS/RTIPOS_ID19.out</Plane_POS>
+        <Plane_POS>/home/shy/AIR/小长/GMTI_Data/Mission068/RTIPOS/RTIPOS_ID9.out</Plane_POS>
         <reffunc_add>/home/shy/AIR/小长/GMTI_Data/Mission068/RefFun_Br50MHz_Tr38us_Len4096.dat</reffunc_add>
         <isSeparated>separate</isSeparated>
         <INFO_Type>1</INFO_Type>
-        <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/M68ID19.bin</GMTI_data_new>
+        <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/M68ID13.bin</GMTI_data_new>
         <pipe_root_path>/home/raco</pipe_root_path>
         <estimate_error_angle>0</estimate_error_angle>
         <wavepos_parallel>1</wavepos_parallel>
@@ -73,13 +73,36 @@
         <track_confirm_hits>2</track_confirm_hits>
         <track_max_missed>2</track_max_missed>
         <track_tentative_max_missed>1</track_tentative_max_missed>
-        <track_gate_m>500</track_gate_m>
-        <track_v_max>50</track_v_max>
+        <track_distance_mode>1</track_distance_mode>
+        <track_assignment_mode>1</track_assignment_mode>
+        <track_use_distance_cost>true</track_use_distance_cost>
+        <track_use_speed_cost>true</track_use_speed_cost>
+        <track_use_heading_cost>true</track_use_heading_cost>
+        <track_use_detection_speed_cost>false</track_use_detection_speed_cost>
+        <track_distance_weight>1.0</track_distance_weight>
+        <track_speed_smooth_weight>0.3</track_speed_smooth_weight>
+        <track_heading_weight>0.5</track_heading_weight>
+        <track_detection_speed_weight>0.0</track_detection_speed_weight>
+        <track_use_euclidean_gate>true</track_use_euclidean_gate>
+        <track_use_mahalanobis_gate>true</track_use_mahalanobis_gate>
+        <track_use_max_speed_gate>true</track_use_max_speed_gate>
+        <track_use_heading_gate>false</track_use_heading_gate>
+        <track_use_detection_speed_gate>false</track_use_detection_speed_gate>
+        <track_gate_m>300</track_gate_m>
+        <track_v_max>100</track_v_max>
         <track_chi2_gate>9.21</track_chi2_gate>
+        <track_heading_gate_deg>90</track_heading_gate_deg>
+        <track_detection_speed_gate_mps>30</track_detection_speed_gate_mps>
+        <track_euclidean_cost_scale_m>0</track_euclidean_cost_scale_m>
+        <track_mahalanobis_cost_scale>0</track_mahalanobis_cost_scale>
+        <track_speed_cost_scale_mps>0</track_speed_cost_scale_mps>
+        <track_heading_cost_scale_deg>180</track_heading_cost_scale_deg>
+        <track_detection_speed_cost_scale_mps>0</track_detection_speed_cost_scale_mps>
         <track_tentative_gate_scale>1.5</track_tentative_gate_scale>
         <track_tentative_chi2_scale>1.5</track_tentative_chi2_scale>
-        <track_speed_smooth_weight>0.5</track_speed_smooth_weight>
-        <track_heading_weight>0.2</track_heading_weight>
+        <track_dummy_cost>1.5</track_dummy_cost>
+        <track_invalid_cost>1.0e12</track_invalid_cost>
+        <track_allow_equal_dummy_cost>false</track_allow_equal_dummy_cost>
         <track_default_dt>1.0</track_default_dt>
         <track_debug_dump>true</track_debug_dump>
         <track_debug_dump_level>1</track_debug_dump_level>

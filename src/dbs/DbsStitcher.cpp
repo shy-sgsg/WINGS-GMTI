@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <dirent.h> // opendir, readdir, closedir
 #include "dbs/rotation_xy.hpp"
+#include "trig_lut.hpp"
 
 static inline float c0() { return 299792458.0f; }
 
@@ -288,7 +289,7 @@ bool DbsStitcher::loadPosAndEstimateVelocity(const Params &P, PosData &POS)
     double max_delta_sin = 0;
     for (int i = 1; i <= azN; i++)
     {
-      double d = std::abs(std::sin((i + (P.beamwidth_deg + 1) / 2) * M_PI / 180.0) - std::sin((i - (P.beamwidth_deg + 1) / 2) * M_PI / 180.0));
+      double d = std::abs(gmti::trig_lut::sin((i + (P.beamwidth_deg + 1) / 2) * M_PI / 180.0) - gmti::trig_lut::sin((i - (P.beamwidth_deg + 1) / 2) * M_PI / 180.0));
       max_delta_sin = std::max(max_delta_sin, d);
     }
     double lam = c0() / P.fc_hz;
@@ -343,9 +344,9 @@ bool DbsStitcher::estimateMosaicExtent(const Config &cfg, const RDData &RD, cons
     vE[b] = meta.beams[b].vE;
     V_feiji[b] = std::sqrt(vN[b] * vN[b] + vE[b] * vE[b]);
     const float denom = (std::fabs(vE[b]) > 1e-12f) ? std::fabs(vE[b]) : 1e-12f;
-    const float jiaodu = std::atan(std::fabs(vN[b] / denom));
-    sin_jiaodu[b] = std::sin(jiaodu);
-    cos_jiaodu[b] = std::cos(jiaodu);
+    const float jiaodu = gmti::trig_lut::atan(std::fabs(vN[b] / denom));
+    sin_jiaodu[b] = gmti::trig_lut::sin(jiaodu);
+    cos_jiaodu[b] = gmti::trig_lut::cos(jiaodu);
   }
 
   for (int n = 0; n < B; n++)

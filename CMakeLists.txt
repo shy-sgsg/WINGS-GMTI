@@ -1,11 +1,11 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.16)
 
 # ============================================================
 # 0. Build mode
 # ============================================================
 # OFF: normal CUDA/nvcc build, for your own CUDA development PC
 # ON : CoreX clang++ ivcore build, for CoreX environment
-option(USE_COREX "Build with CoreX clang++ ivcore instead of native CUDA/nvcc" ON)
+option(USE_COREX "Build with CoreX clang++ ivcore instead of native CUDA/nvcc" OFF)
 
 set(COREX_ROOT "/usr/local/corex-4.3.7" CACHE PATH "CoreX installation root")
 
@@ -145,6 +145,7 @@ endif()
 # ============================================================
 
 set(GPU_CUDA_SRC
+  src/gpu/trig_lut_device.cu
   src/gpu/rangeCompress_cu.cu
   src/gpu/rangeCompress_device.cu
   src/gpu/gpu_kernels.cu
@@ -179,6 +180,7 @@ set(AUTH_SRC
 
 set(COMMON_CORE_SRC
   src/alignFFTAndDBS.cpp
+  src/trig_lut.cpp
   src/clutter_CSI.cpp
   src/computeDynamicSupportDomain.cpp
   src/detectAndLocating.cpp
@@ -232,6 +234,8 @@ add_executable(GMTI_core
 
 add_executable(convert_old_echo_to_new_format
   src/tools/convert_old_echo_to_new_format.cpp
+  src/trig_lut.cpp
+  src/trig_lut_host_only.cpp
   src/pulseCompression.cpp
   src/xml/tinystr.cpp
   src/xml/tinyxml.cpp
@@ -243,6 +247,13 @@ add_executable(GMTI_pipe_core
   ${GMTI_PIPE_ONLY_SRC}
   ${COMMON_CORE_SRC}
   ${AUTH_SRC}
+)
+
+add_executable(track_assignment_selftest
+  tests/track_assignment_selftest.cpp
+  src/TrackManager.cpp
+  src/trig_lut.cpp
+  src/trig_lut_host_only.cpp
 )
 
 # ============================================================
@@ -418,3 +429,4 @@ target_include_directories(GMTI_pipe_core PRIVATE
 )
 
 configure_non_cuda_tool(convert_old_echo_to_new_format)
+configure_non_cuda_tool(track_assignment_selftest)

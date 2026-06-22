@@ -2,6 +2,7 @@
 #include "dbs/DbsStitcher.hpp"
 #include "rotation_xy.hpp"
 #include "unwrap_fd.hpp"
+#include "trig_lut.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -20,7 +21,7 @@ static bool estimate_angle_from_fd(const FusionBeamMeta &m, double &angleDeg)
 
     double ratio = -m.fd_ctr_wrapped * lambda / (2.0 * v);
     ratio = std::max(-1.0, std::min(1.0, ratio));
-    angleDeg = std::asin(ratio) * 180.0 / M_PI;
+    angleDeg = gmti::trig_lut::asin(ratio) * 180.0 / M_PI;
     return std::isfinite(angleDeg);
 }
 
@@ -226,10 +227,10 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
         out.MT.reserve(rawList.size() * 8);
 
         const double thetaRot = m.plane.V_angle;
-        const double cosT = std::abs(std::cos(deg2rad(thetaRot)));
-        const double sinT = std::abs(std::sin(deg2rad(thetaRot)));
-        const double vE = m.plane.V * std::cos(deg2rad(m.plane.V_angle));
-        const double vN = m.plane.V * std::sin(deg2rad(m.plane.V_angle));
+        const double cosT = std::abs(gmti::trig_lut::cos(deg2rad(thetaRot)));
+        const double sinT = std::abs(gmti::trig_lut::sin(deg2rad(thetaRot)));
+        const double vE = m.plane.V * gmti::trig_lut::cos(deg2rad(m.plane.V_angle));
+        const double vN = m.plane.V * gmti::trig_lut::sin(deg2rad(m.plane.V_angle));
         int flag = flight_flag_by_sign_local(vE, vN);
         flag += cfg.squint_side * 4;
 
@@ -277,7 +278,7 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
 
             const double dE = xP - m.plane.E;
             const double dN = yP - m.plane.N;
-            const double targetAzimuthDeg = normalize_azimuth_deg(std::atan2(dN, dE) * 180.0 / M_PI);
+            const double targetAzimuthDeg = normalize_azimuth_deg(gmti::trig_lut::atan2(dN, dE) * 180.0 / M_PI);
             const double direction = wrap180_deg(m.plane.V_angle - targetAzimuthDeg);
             const double beamCenterDir = beam_center_relative_dir_deg(cfg.squint_side, m.theta_true);
             const double beamHalfWidth = location_beam_gate_deg(cfg);

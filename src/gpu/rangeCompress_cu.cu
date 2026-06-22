@@ -7,6 +7,7 @@
 #include <cmath>
 #include <iostream>
 #include "GMTIProcessor.hpp"
+#include "trig_lut.hpp"
 
 static inline cuFloatComplex to_cu(const std::complex<float>& x) {
     return make_cuFloatComplex(x.real(), x.imag());
@@ -45,8 +46,8 @@ bool GMTIProcessor::rangeCompressCUFFT(const std::vector<std::complex<float>> &i
     for (int n=0;n<Lraw;++n) {
         double fn = (n <= (Lraw/2 - 1)) ? n*df : (n - Lraw)*df;
         double phase = M_PI * (fn*fn) / Kr;
-        float re = (float)std::cos(phase);
-        float im = (float)std::sin(phase);
+        float re = (float)gmti::trig_lut::cos(phase);
+        float im = (float)gmti::trig_lut::sin(phase);
         h_Hf[n] = make_cuFloatComplex(re, im);
     }
     for (int k=0;k<W;++k) {

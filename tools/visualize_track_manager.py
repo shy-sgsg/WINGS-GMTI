@@ -182,18 +182,18 @@ def bool_arg(value):
 
 def resolve_style(args):
     base = {
-        "track_linewidth": 0.5,
-        "track_alpha": 0.75,
-        "marker_scale": 0.3,
-        "detection_marker_size": 2.0,
-        "detection_alpha": 0.75,
-        "output_marker_scale": 1,
-        "output_edge_width": 0.5,
-        "label_fontsize": 6.0,
-        "legend_fontsize": 6.0,
-        "title_fontsize": 11.0,
+        "track_linewidth": 0.8,
+        "track_alpha": 0.8,
+        "marker_scale": 0.5,
+        "detection_marker_size": 3.0,
+        "detection_alpha": 0.8,
+        "output_marker_scale": 1.2,
+        "output_edge_width": 0.6,
+        "label_fontsize": 7.0,
+        "legend_fontsize": 7.0,
+        "title_fontsize": 12.0,
         "axis_label_fontsize": 10.0,
-        "tick_fontsize": 8.0,
+        "tick_fontsize": 7.0,
     }
 
     overrides = {

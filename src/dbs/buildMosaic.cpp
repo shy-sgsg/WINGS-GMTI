@@ -8,6 +8,7 @@
 #include "dbs/stitcher_kernel.hpp"
 #include <cuda_runtime.h>
 #include <iostream>
+#include "trig_lut.hpp"
 
 #include "dbs/PerfLogger.hpp"
 
@@ -92,9 +93,9 @@ bool DbsStitcher::buildMosaic(const Config &cfg,
     vE[b] = meta.beams[b].vE;
     V_feiji[b] = std::sqrt(vN[b] * vN[b] + vE[b] * vE[b]);
     const float denom = (std::fabs(vE[b]) > 1e-12f) ? std::fabs(vE[b]) : 1e-12f;
-    const float jiaodu = std::atan(std::fabs(vN[b] / denom));
-    sin_jiaodu[b] = std::sin(jiaodu);
-    cos_jiaodu[b] = std::cos(jiaodu);
+    const float jiaodu = gmti::trig_lut::atan(std::fabs(vN[b] / denom));
+    sin_jiaodu[b] = gmti::trig_lut::sin(jiaodu);
+    cos_jiaodu[b] = gmti::trig_lut::cos(jiaodu);
   }
 
   // —— 输出缓存
@@ -334,9 +335,9 @@ bool DbsStitcher::buildMosaicGPU(const Config &cfg,
     vE[b] = meta.beams[b].vE;
     V_feiji[b] = std::sqrt(vN[b] * vN[b] + vE[b] * vE[b]);
     const float denom = (std::fabs(vE[b]) > 1e-12f) ? std::fabs(vE[b]) : 1e-12f;
-    const float jiaodu = std::atan(std::fabs(vN[b] / denom));
-    sin_jiaodu[b] = std::sin(jiaodu);
-    cos_jiaodu[b] = std::cos(jiaodu);
+    const float jiaodu = gmti::trig_lut::atan(std::fabs(vN[b] / denom));
+    sin_jiaodu[b] = gmti::trig_lut::sin(jiaodu);
+    cos_jiaodu[b] = gmti::trig_lut::cos(jiaodu);
   }
 
   // output
@@ -387,7 +388,7 @@ bool DbsStitcher::buildMosaicGPU(const Config &cfg,
     float vE_b = mb.vE;
     float V = std::sqrt(vN_b * vN_b + vE_b * vE_b);
     float denom_local = (std::fabs(vE_b) > 1e-12f) ? std::fabs(vE_b) : 1e-12f;
-    float angle = std::atan(std::fabs(vN_b / denom_local));
+    float angle = gmti::trig_lut::atan(std::fabs(vN_b / denom_local));
 
     BeamDevParams bp;
     bp.x = (float)mb.x;
@@ -396,8 +397,8 @@ bool DbsStitcher::buildMosaicGPU(const Config &cfg,
     bp.vN = vN_b;
     bp.vE = vE_b;
     bp.V_feiji = V;
-    bp.sin_j = std::sin(angle);
-    bp.cos_j = std::cos(angle);
+    bp.sin_j = gmti::trig_lut::sin(angle);
+    bp.cos_j = gmti::trig_lut::cos(angle);
     // Use the min/max-based fd definitions computed above (matches CPU logic)
     bp.min_fd = min_RD_y[b];
     bp.delta_fd = delta_RD_y[b];

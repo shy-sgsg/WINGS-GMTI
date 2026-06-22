@@ -16,6 +16,7 @@
 #include "rotation_xy.hpp"
 #include "unwrap_fd.hpp"
 #include "dbs/NewProtocolReader.hpp"
+#include "trig_lut.hpp"
 
 using cudacd = cuFloatComplex;
 using cd = std::complex<float>;
@@ -130,7 +131,7 @@ double GMTIProcessor::estimateSquintAngleDeg(const GMTIOutput::Plane &plane, con
 
         const double ratio = -fd_ctr * lambda / (2.0 * v);
         const double clipped = std::max(-1.0, std::min(1.0, ratio));
-        const double squint_deg = std::asin(clipped) * 180.0 / M_PI;
+        const double squint_deg = gmti::trig_lut::asin(clipped) * 180.0 / M_PI;
 
         // std::cout << "[SQUINT] fd_ctr=" << fd_ctr
         //           << ", v=" << v
@@ -146,7 +147,7 @@ double GMTIProcessor::estimateSquintAngleDeg(const GMTIOutput::Plane &plane, con
     Gaussp3(cfg.roi_ll_deg[0], cfg.roi_ll_deg[1], cfg.L0, refE, refN);
     const double dE = refE - plane.E;
     const double dN = refN - plane.N;
-    const double bearing_deg = std::atan2(dN, dE) * 180.0 / M_PI;
+    const double bearing_deg = gmti::trig_lut::atan2(dN, dE) * 180.0 / M_PI;
     const double squint_deg = wrap180_deg(bearing_deg - plane.V_angle + 90.0);
     
     // std::cout << "[SQUINT] fd_ctr=nan"
@@ -882,10 +883,10 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     DBG("多普勒斜率 k = " << k << ", 截距 b = " << b);
     const double thetaRot = plane.V_angle; // 度
     DBG("旋转角 thetaRot = " << thetaRot << " 度");
-    const double cosT = std::abs(std::cos(deg2rad(thetaRot)));
-    const double sinT = std::abs(std::sin(deg2rad(thetaRot)));
-    const double VE = plane.V * std::cos(deg2rad(plane.V_angle));
-    const double VN = plane.V * std::sin(deg2rad(plane.V_angle));
+    const double cosT = std::abs(gmti::trig_lut::cos(deg2rad(thetaRot)));
+    const double sinT = std::abs(gmti::trig_lut::sin(deg2rad(thetaRot)));
+    const double VE = plane.V * gmti::trig_lut::cos(deg2rad(plane.V_angle));
+    const double VN = plane.V * gmti::trig_lut::sin(deg2rad(plane.V_angle));
 
     int flag = flight_flag_by_sign(VE, VN); // 1/2/3/4
     flag += cfg_.squint_side * 4;           // 根据斜视侧调整方向标志
@@ -956,7 +957,7 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
 
         const double dE = xP - plane.E;
         const double dN = yP - plane.N;
-        const double target_azimuth_deg = normalize_azimuth_deg(std::atan2(dN, dE) * 180.0 / M_PI);  // 东为0°, 逆时针为正
+        const double target_azimuth_deg = normalize_azimuth_deg(gmti::trig_lut::atan2(dN, dE) * 180.0 / M_PI);  // 东为0°, 逆时针为正
         // 相对方向：顺时针为正 => 计算 plane - target，再映射到 [-180,180]
         const double direction = wrap180_deg(plane.V_angle - target_azimuth_deg);
         const double beam_center_dir = beam_center_relative_dir_deg(cfg.squint_side, theta_deg);
@@ -1536,7 +1537,7 @@ bool GMTIProcessor::extractPlanePos(const std::vector<double> &t_utc,
     double Vz = (alt_m.back() - alt_m.front()) * scale;
 
     plane.V = std::sqrt(Vx * Vx + Vy * Vy + Vz * Vz);
-    plane.V_angle = std::atan2(Vy, Vx) * 180.0 / M_PI; // 东北平面速度方向角(°)
+    plane.V_angle = gmti::trig_lut::atan2(Vy, Vx) * 180.0 / M_PI; // 东北平面速度方向角(°)
 
     DBG("飞机速度分量: Vx=" << Vx << " Vy=" << Vy << " Vz=" << Vz);
 
@@ -1716,7 +1717,7 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
         double ratio = -fd_unwrapped * lambda / (2.0 * plane.V);
         if (ratio > 1.0) ratio = 1.0;
         if (ratio < -1.0) ratio = -1.0;
-        double angle_deg = std::asin(ratio) * 180.0 / M_PI;
+        double angle_deg = gmti::trig_lut::asin(ratio) * 180.0 / M_PI;
 
         // Use the raw local angle as the reference and take the difference.
         // This is the actual error angle that should be applied globally.
@@ -1815,8 +1816,8 @@ bool GMTIProcessor::exportDbsCacheAfterRecenter(const Config& cfg,
     rd.rg_axis[slot] = rg_axis;
 
     MetaPerBeam m;
-    m.vN = static_cast<float>(beamMeta.plane.V * std::sin(beamMeta.plane.V_angle * M_PI / 180.0));
-    m.vE = static_cast<float>(beamMeta.plane.V * std::cos(beamMeta.plane.V_angle * M_PI / 180.0));
+    m.vN = static_cast<float>(beamMeta.plane.V * gmti::trig_lut::sin(beamMeta.plane.V_angle * M_PI / 180.0));
+    m.vE = static_cast<float>(beamMeta.plane.V * gmti::trig_lut::cos(beamMeta.plane.V_angle * M_PI / 180.0));
     m.vU = 0.0f;
     m.x = static_cast<float>(beamMeta.plane.E);
     m.y = static_cast<float>(beamMeta.plane.N);

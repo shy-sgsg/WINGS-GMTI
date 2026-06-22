@@ -9,6 +9,7 @@
 #include <cmath>
 #include <iostream>
 #include "GMTIProcessor.hpp"
+#include "trig_lut.hpp"
 
 __global__ void mul_Hf_dev(cuFloatComplex* data, const cuFloatComplex* Hf, int Lraw, int W) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -57,8 +58,8 @@ bool GMTIProcessor::rangeCompressCUFFT_device(int Lraw, int M, const Config &cfg
     for (int n=0;n<Lraw;++n) {
         double fn = (n <= (Lraw/2 - 1)) ? n*df : (n - Lraw)*df;
         double phase = M_PI * (fn*fn) / Kr;
-        float re = (float)std::cos(phase);
-        float im = (float)std::sin(phase);
+        float re = (float)gmti::trig_lut::cos(phase);
+        float im = (float)gmti::trig_lut::sin(phase);
         h_Hf[n] = make_cuFloatComplex(re, im);
     }
     cuFloatComplex* d_Hf = nullptr;
@@ -153,7 +154,7 @@ bool GMTIProcessor::rangeCompressCUFFT_device_pair(int Lraw, int M, const Config
     for (int n = 0; n < Lraw; ++n) {
         double fn = (n <= (Lraw / 2 - 1)) ? n * df : (n - Lraw) * df;
         double phase = M_PI * (fn * fn) / Kr;
-        h_Hf[n] = make_cuFloatComplex((float)std::cos(phase), (float)std::sin(phase));
+        h_Hf[n] = make_cuFloatComplex((float)gmti::trig_lut::cos(phase), (float)gmti::trig_lut::sin(phase));
     }
     if (cudaMemcpyAsync(d_Hf, h_Hf.data(), (size_t)Lraw * sizeof(cuFloatComplex),
                         cudaMemcpyHostToDevice, stream_compute_) != cudaSuccess) {

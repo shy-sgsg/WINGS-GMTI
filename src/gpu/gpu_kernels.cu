@@ -16,6 +16,10 @@
 #include <iostream>
 #include <chrono>
 #include "GMTIProcessor.hpp"
+#include "trig_lut.hpp"
+#include "trig_lut_device.cuh"
+
+extern "C" gmti::trig_lut_device::TrigLutConfig gmtiGetDeviceTrigLutConfig();
 
 // Use cuFFT / CUDA types for device kernels
 using cudacd = cuFloatComplex;
@@ -45,9 +49,11 @@ __global__ void accumulate_stats_kernel(const float* mydata, const float* phase_
                                         const int* labels, int total,
                                         int* counts, float* sum_cos, float* sum_sin,
                                         float* max_power, int* max_idx,
-                                        bool use_phase);
+                                        bool use_phase,
+                                        gmti::trig_lut_device::TrigLutConfig trig_cfg);
 __global__ void compute_mean_phase_kernel(const int* counts, const float* sum_cos,
-                                          const float* sum_sin, float* mean_phi, int total);
+                                          const float* sum_sin, float* mean_phi, int total,
+                                          gmti::trig_lut_device::TrigLutConfig trig_cfg);
 __global__ void accumulate_phase_var_kernel(const float* phase_map, const int* labels,
                                             const float* mean_phi, int total,
                                             float* sum_sq);
@@ -103,14 +109,15 @@ __global__ void apply_phase_correction_kernel(
     cuFloatComplex* F1, 
     cuFloatComplex* F2,
     const float* phi_fit, 
-    int Na, int Nr) 
+    int Na, int Nr,
+    gmti::trig_lut_device::TrigLutConfig trig_cfg)
 {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= Nr) return;
 
     float angle = phi_fit[c];
     float s, cr;
-    sincosf(angle, &s, &cr);
+    gmti::trig_lut_device::sincosf(angle, &s, &cr, trig_cfg);
     cuFloatComplex phi_factor = make_cuFloatComplex(cr, s);
 
     for (int r = 0; r < Na; ++r) {
@@ -161,7 +168,8 @@ __global__ void compute_row_phase_kernel(
     int Na,
     int Nr,
     int az_st,
-    int az_ed)
+    int az_ed,
+    gmti::trig_lut_device::TrigLutConfig trig_cfg)
 {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
     if (r < az_st || r > az_ed || r >= Na) return;
@@ -183,14 +191,15 @@ __global__ void compute_row_phase_kernel(
         num_re /= den;
         num_im /= den;
     }
-    phase_out[r] = atan2f(num_im, num_re);
+    phase_out[r] = gmti::trig_lut_device::atan2f(num_im, num_re, trig_cfg);
 }
 
 __global__ void phase_map_kernel(
     const cuFloatComplex* F1,
     const cuFloatComplex* F2,
     float* out,
-    size_t total)
+    size_t total,
+    gmti::trig_lut_device::TrigLutConfig trig_cfg)
 {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
@@ -199,7 +208,7 @@ __global__ void phase_map_kernel(
     const cuFloatComplex b = F2[idx];
     float num_re = (cuCrealf(a) * cuCrealf(b) + cuCimagf(a) * cuCimagf(b));
     float num_im = (cuCimagf(a) * cuCrealf(b) - cuCrealf(a) * cuCimagf(b));
-    out[idx] = atan2f(num_im, num_re);
+    out[idx] = gmti::trig_lut_device::atan2f(num_im, num_re, trig_cfg);
 }
 
 __global__ void mix_detect_data_kernel(
@@ -419,7 +428,8 @@ __global__ void accumulate_stats_kernel(const float* mydata, const float* phase_
                                         const int* labels, int total,
                                         int* counts, float* sum_cos, float* sum_sin,
                                         float* max_power, int* max_idx,
-                                        bool use_phase)
+                                        bool use_phase,
+                                        gmti::trig_lut_device::TrigLutConfig trig_cfg)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
@@ -431,8 +441,8 @@ __global__ void accumulate_stats_kernel(const float* mydata, const float* phase_
 
     if (use_phase) {
         float phi = phase_map[idx];
-        atomic_add_float(&sum_cos[label], cosf(phi));
-        atomic_add_float(&sum_sin[label], sinf(phi));
+        atomic_add_float(&sum_cos[label], gmti::trig_lut_device::cosf(phi, trig_cfg));
+        atomic_add_float(&sum_sin[label], gmti::trig_lut_device::sinf(phi, trig_cfg));
     }
 
     float p = mydata[idx];
@@ -443,12 +453,14 @@ __global__ void accumulate_stats_kernel(const float* mydata, const float* phase_
 }
 
 __global__ void compute_mean_phase_kernel(const int* counts, const float* sum_cos,
-                                          const float* sum_sin, float* mean_phi, int total)
+                                          const float* sum_sin, float* mean_phi, int total,
+                                          gmti::trig_lut_device::TrigLutConfig trig_cfg)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
     if (counts[idx] > 0) {
-        mean_phi[idx] = atan2f(sum_sin[idx], sum_cos[idx]);
+        mean_phi[idx] = gmti::trig_lut_device::atan2f(
+            sum_sin[idx], sum_cos[idx], trig_cfg);
     } else {
         mean_phi[idx] = 0.0f;
     }
@@ -514,7 +526,8 @@ __global__ void clutter_cancel_kernel(
     int Na,
     int Nr,
     float k,
-    float b)
+    float b,
+    gmti::trig_lut_device::TrigLutConfig trig_cfg)
 {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     size_t total = static_cast<size_t>(Na) * static_cast<size_t>(Nr);
@@ -526,7 +539,7 @@ __global__ void clutter_cancel_kernel(
 
     float phi = k * y_faAxis[r] + b;
     float s, c;
-    sincosf(phi, &s, &c);
+    gmti::trig_lut_device::sincosf(phi, &s, &c, trig_cfg);
     const cuFloatComplex az_fai = make_cuFloatComplex(c, s);
     const cuFloatComplex b2 = cuCmulf(az_fai, f2);
 
@@ -1011,7 +1024,7 @@ bool GMTIProcessor::cuda_compute_fd_ctr_from_d1(int k, const Config& cfg, double
         re += static_cast<double>(v.x);
         im += static_cast<double>(v.y);
     }
-    fd_ctr = (cfg.PRF / (2.0 * M_PI)) * std::atan2(im, re);
+    fd_ctr = (cfg.PRF / (2.0 * M_PI)) * gmti::trig_lut::atan2(im, re);
     return true;
 }
 
@@ -1057,11 +1070,14 @@ bool GMTIProcessor::cuda_apply_rg_correction_async(const std::vector<float>& phi
     // 2. 启动 Kernel
     int threads = 256;
     int blocks = (Nr + threads - 1) / threads;
+    const gmti::trig_lut_device::TrigLutConfig trig_cfg =
+        gmtiGetDeviceTrigLutConfig();
     apply_phase_correction_kernel<<<blocks, threads, 0, stream_compute_>>>(
         (cuFloatComplex*)gpu_ptrs_.a1, 
         (cuFloatComplex*)gpu_ptrs_.a2,
         d_phi_fit_, // 使用专属指针
-        Na, Nr
+        Na, Nr,
+        trig_cfg
     );
     return true;
 }
@@ -1090,11 +1106,14 @@ bool GMTIProcessor::cuda_download_phase_map(std::vector<float>& phase_map, size_
 
     int threads = 256;
     int blocks = static_cast<int>((total + threads - 1) / threads);
+    const gmti::trig_lut_device::TrigLutConfig trig_cfg =
+        gmtiGetDeviceTrigLutConfig();
     phase_map_kernel<<<blocks, threads, 0, stream_compute_>>>(
         (const cuFloatComplex*)gpu_ptrs_.t1,
         (const cuFloatComplex*)gpu_ptrs_.t2,
         d_phase,
-        total);
+        total,
+        trig_cfg);
     CUDA_CHECK(cudaGetLastError());
 
     phase_map.resize(total);
@@ -1351,6 +1370,8 @@ bool GMTIProcessor::cluster_filter_gap_phase_cuda(const std::vector<float> &myda
     CUDA_CHECK(cudaMemsetAsync(d_max_power, 0, total * sizeof(float), stream_compute_));
     CUDA_CHECK(cudaMemsetAsync(d_max_idx, 0xff, total * sizeof(int), stream_compute_));
 
+    const gmti::trig_lut_device::TrigLutConfig trig_cfg =
+        gmtiGetDeviceTrigLutConfig();
     accumulate_stats_kernel<<<blocks, threads, 0, stream_compute_>>>(
         d_mydata,
         use_phase ? d_phase : d_mydata,
@@ -1361,12 +1382,13 @@ bool GMTIProcessor::cluster_filter_gap_phase_cuda(const std::vector<float> &myda
         d_sum_sin,
         d_max_power,
         d_max_idx,
-        use_phase);
+        use_phase,
+        trig_cfg);
     CUDA_CHECK(cudaGetLastError());
 
     if (use_phase) {
         compute_mean_phase_kernel<<<blocks, threads, 0, stream_compute_>>>(
-            d_counts, d_sum_cos, d_sum_sin, d_mean_phi, total);
+            d_counts, d_sum_cos, d_sum_sin, d_mean_phi, total, trig_cfg);
         CUDA_CHECK(cudaGetLastError());
 
         accumulate_phase_var_kernel<<<blocks, threads, 0, stream_compute_>>>(
@@ -1522,6 +1544,8 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_p38_cuda(
 
     int threads = 256;
     int blocks = (static_cast<int>(Na) + threads - 1) / threads;
+    const gmti::trig_lut_device::TrigLutConfig trig_cfg =
+        gmtiGetDeviceTrigLutConfig();
     compute_row_phase_kernel<<<blocks, threads, 0, stream_compute_>>>(
         (const cuFloatComplex*)gpu_ptrs_.t1,
         (const cuFloatComplex*)gpu_ptrs_.t2,
@@ -1529,7 +1553,8 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_p38_cuda(
         (int)Na,
         (int)Nr,
         az_st,
-        az_ed);
+        az_ed,
+        trig_cfg);
     CUDA_CHECK(cudaGetLastError());
 
     std::vector<float> phase_tra_f(Na, 0.0f);
@@ -1636,6 +1661,8 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_cuda(
 
     int threads = 256;
     int blocks = (static_cast<int>(total) + threads - 1) / threads;
+    const gmti::trig_lut_device::TrigLutConfig trig_cfg =
+        gmtiGetDeviceTrigLutConfig();
     clutter_cancel_kernel<<<blocks, threads, 0, stream_compute_>>>(
         (const cuFloatComplex*)gpu_ptrs_.t1,
         (const cuFloatComplex*)gpu_ptrs_.t2,
@@ -1644,7 +1671,8 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_cuda(
         (int)Na,
         (int)Nr,
         static_cast<float>(p_38[0]),
-        static_cast<float>(p_38[1]));
+        static_cast<float>(p_38[1]),
+        trig_cfg);
     CUDA_CHECK(cudaGetLastError());
 
     std::vector<std::complex<float>> prosig_38_f(total);

@@ -6,6 +6,7 @@
 #include <csignal>
 #include <atomic>
 #include <unistd.h>
+#include "trig_lut.hpp"
 
 
 using namespace std;
@@ -19,36 +20,77 @@ void handle_signal(int)
 
 namespace {
 
+bool applyTrigArg(const string& arg, const char* next, bool& consumedNext)
+{
+    consumedNext = false;
+    const string prefix = "--trig-mode=";
+    if (arg.compare(0, prefix.size(), prefix) == 0) {
+        return gmti::trig_lut::setModeFromString(arg.c_str() + prefix.size(), false);
+    }
+    if (arg == "--trig-mode") {
+        if (!next) {
+            cerr << "[ERR] --trig-mode 需要参数: lut|math|compare\n";
+            return false;
+        }
+        consumedNext = true;
+        return gmti::trig_lut::setModeFromString(next, false);
+    }
+    return true;
+}
+
 void printUsage(const char* prog)
 {
     cerr << "Usage:\n"
-         << "  " << prog << "\n"
-         << "  " << prog << " --local-test <xml> <echo_file1> [echo_file2 ...]\n"
-         << "  " << prog << " --local-test <xml> <id=echo_file1> [id=echo_file2 ...]\n";
+         << "  " << prog << " [--trig-mode lut|math|compare]\n"
+         << "  " << prog << " [--trig-mode lut|math|compare] --local-test <xml> <echo_file1> [echo_file2 ...]\n"
+         << "  " << prog << " [--trig-mode lut|math|compare] --local-test <xml> <id=echo_file1> [id=echo_file2 ...]\n";
 }
 
 } // namespace
 
 int main(int argc, char** argv)
 {
-    if (argc >= 2 && string(argv[1]) == "--local-test") {
-        if (argc < 4) {
+    gmti::trig_lut::configureFromEnv();
+
+    vector<string> args;
+    args.reserve(static_cast<size_t>(argc > 0 ? argc - 1 : 0));
+    for (int i = 1; i < argc; ++i) {
+        const string arg = argv[i];
+        bool consumedNext = false;
+        if (arg == "--trig-mode" || arg.compare(0, string("--trig-mode=").size(), "--trig-mode=") == 0) {
+            if (!applyTrigArg(arg, (i + 1 < argc) ? argv[i + 1] : nullptr, consumedNext)) {
+                return 1;
+            }
+            if (consumedNext) ++i;
+        } else {
+            args.push_back(arg);
+        }
+    }
+
+    if (!gmti::trig_lut::initialize(true)) {
+        std::cerr << "[ERR] 三角函数路径初始化失败\n";
+        return 1;
+    }
+    gmti::trig_lut::benchmark(1u << 22);
+
+    if (!args.empty() && args[0] == "--local-test") {
+        if (args.size() < 3) {
             printUsage(argv[0]);
             return 1;
         }
 
-        const string xmlPath = argv[2];
+        const string xmlPath = args[1];
         vector<string> echoFiles;
-        echoFiles.reserve(static_cast<size_t>(argc - 3));
-        for (int i = 3; i < argc; ++i) {
-            echoFiles.push_back(argv[i]);
+        echoFiles.reserve(args.size() - 2);
+        for (size_t i = 2; i < args.size(); ++i) {
+            echoFiles.push_back(args[i]);
         }
 
         MainCtrl gmtiCtrl("", false);
         return gmtiCtrl.RunLocalTest(xmlPath, echoFiles) ? 0 : 1;
     }
 
-    if (argc != 1) {
+    if (!args.empty()) {
         printUsage(argv[0]);
         return 1;
     }

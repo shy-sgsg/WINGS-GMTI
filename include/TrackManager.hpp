@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,8 @@ enum class TrackState {
     Coasted,
     Deleted
 };
+
+bool runTrackAssociationSelfTests(std::ostream& out);
 
 struct TrackPoint {
     double e = 0.0;
@@ -84,5 +87,6 @@ private:
 
     uint16_t next_id_ = 1;
     int last_update_result_id_ = 0;
+    bool association_config_logged_ = false;
     std::vector<ManagedTrack> tracks_;
 };

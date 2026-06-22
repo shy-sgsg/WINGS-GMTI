@@ -1,5 +1,6 @@
 #include "TrackManager.hpp"
 #include "geo/geoProj.hpp"
+#include "trig_lut.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -17,13 +18,23 @@
 namespace {
 
 constexpr double kInvalidCost = 1.0e12;
-constexpr double kMissCost = 25.0;
-constexpr double kMahalanobisGate = 16.0;
 constexpr double kMinMeasurementStdM = 20.0;
 constexpr double kProcessAccelMps2 = 5.0;
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kRadToDeg = 180.0 / kPi;
+constexpr double kNumericEpsilon = 1.0e-9;
 constexpr double kSmallDistanceM = 1.0;
 constexpr double kSmallSpeedMps = 0.5;
+
+enum class TrackDistanceMode {
+    Euclidean = 0,
+    MahalanobisSquared = 1
+};
+
+enum class TrackAssignmentMode {
+    GreedyNearestNeighbor = 0,
+    Hungarian = 1
+};
 
 struct DetectionPoint {
     GMTIDetection det;
@@ -33,11 +44,102 @@ struct DetectionPoint {
 
 struct AssocScore {
     bool valid = false;
-    double cost = kInvalidCost;
-    double dist = 0.0;
-    double instant_speed = 0.0;
+    double total_cost = kInvalidCost;
+    double euclidean_dist_m = 0.0;
     double mahalanobis_d2 = kInvalidCost;
+    double instant_speed_mps = 0.0;
+    double speed_diff_mps = 0.0;
+    double heading_diff_deg = 0.0;
+    double detection_speed_diff_mps = 0.0;
+    double distance_cost = 0.0;
+    double speed_cost = 0.0;
+    double heading_cost = 0.0;
+    double detection_speed_cost = 0.0;
+    bool speed_reference_available = false;
+    bool heading_reference_available = false;
+    bool detection_speed_available = false;
+
+    enum class RejectReason {
+        None,
+        EuclideanGate,
+        MahalanobisGate,
+        MaxSpeedGate,
+        HeadingGate,
+        DetectionSpeedGate,
+        InvalidCovariance,
+        InvalidNumber
+    };
+
+    RejectReason reject_reason = RejectReason::None;
 };
+
+static double safeNonnegative(double value)
+{
+    return std::isfinite(value) ? std::max(0.0, value) : 0.0;
+}
+
+static int normalizedDistanceMode(const Config& cfg)
+{
+    if (cfg.track_distance_mode == 0 || cfg.track_distance_mode == 1) {
+        return cfg.track_distance_mode;
+    }
+    static bool warned = false;
+    if (!warned) {
+        std::cerr << "[TRACK][WARN] invalid track_distance_mode="
+                  << cfg.track_distance_mode << ", fallback to 1 (MahalanobisSquared)."
+                  << std::endl;
+        warned = true;
+    }
+    return 1;
+}
+
+static int normalizedAssignmentMode(const Config& cfg)
+{
+    if (cfg.track_assignment_mode == 0 || cfg.track_assignment_mode == 1) {
+        return cfg.track_assignment_mode;
+    }
+    static bool warned = false;
+    if (!warned) {
+        std::cerr << "[TRACK][WARN] invalid track_assignment_mode="
+                  << cfg.track_assignment_mode << ", fallback to 1 (Hungarian)."
+                  << std::endl;
+        warned = true;
+    }
+    return 1;
+}
+
+static const char* distanceModeName(int mode)
+{
+    return mode == static_cast<int>(TrackDistanceMode::Euclidean)
+        ? "Euclidean" : "MahalanobisSquared";
+}
+
+static const char* assignmentModeName(int mode)
+{
+    return mode == static_cast<int>(TrackAssignmentMode::GreedyNearestNeighbor)
+        ? "GreedyNearestNeighbor" : "Hungarian";
+}
+
+static const char* rejectReasonName(AssocScore::RejectReason reason)
+{
+    switch (reason) {
+    case AssocScore::RejectReason::None: return "None";
+    case AssocScore::RejectReason::EuclideanGate: return "EuclideanGate";
+    case AssocScore::RejectReason::MahalanobisGate: return "MahalanobisGate";
+    case AssocScore::RejectReason::MaxSpeedGate: return "MaxSpeedGate";
+    case AssocScore::RejectReason::HeadingGate: return "HeadingGate";
+    case AssocScore::RejectReason::DetectionSpeedGate: return "DetectionSpeedGate";
+    case AssocScore::RejectReason::InvalidCovariance: return "InvalidCovariance";
+    case AssocScore::RejectReason::InvalidNumber: return "InvalidNumber";
+    }
+    return "Unknown";
+}
+
+static bool costBeatsDummy(double cost, double dummy_cost, bool allow_equal)
+{
+    return std::isfinite(cost) &&
+        (allow_equal ? cost <= dummy_cost : cost < dummy_cost);
+}
 
 static bool validUtc(double utc)
 {
@@ -170,7 +272,10 @@ static double mahalanobis2(const ManagedTrack& tr,
     const double s10 = tr.P[4];
     const double s11 = tr.P[5] + measurement_var;
     const double det_s = s00 * s11 - s01 * s10;
-    if (std::fabs(det_s) < 1e-9) {
+    if (!std::isfinite(rx) || !std::isfinite(ry) || !std::isfinite(dist_out) ||
+        !std::isfinite(s00) || !std::isfinite(s01) ||
+        !std::isfinite(s10) || !std::isfinite(s11) ||
+        !std::isfinite(det_s) || det_s <= kNumericEpsilon) {
         return kInvalidCost;
     }
 
@@ -178,7 +283,12 @@ static double mahalanobis2(const ManagedTrack& tr,
     const double inv01 = -s01 / det_s;
     const double inv10 = -s10 / det_s;
     const double inv11 = s00 / det_s;
-    return rx * (inv00 * rx + inv01 * ry) + ry * (inv10 * rx + inv11 * ry);
+    const double d2 =
+        rx * (inv00 * rx + inv01 * ry) + ry * (inv10 * rx + inv11 * ry);
+    if (!std::isfinite(d2) || d2 < 0.0) {
+        return kInvalidCost;
+    }
+    return d2;
 }
 
 static void kalmanUpdate(ManagedTrack& tr,
@@ -268,10 +378,10 @@ static double circularMean(const std::deque<double>& angles)
     double s = 0.0;
     double c = 0.0;
     for (double a : angles) {
-        s += std::sin(a);
-        c += std::cos(a);
+        s += gmti::trig_lut::sin(a);
+        c += gmti::trig_lut::cos(a);
     }
-    return std::atan2(s, c);
+    return gmti::trig_lut::atan2(s, c);
 }
 
 static void pushBounded(std::deque<int>& values, int value, int window)
@@ -401,9 +511,215 @@ static void updateMotionHistoryFromEN(ManagedTrack& tr,
         tr.speed = std::sqrt(tr.ve * tr.ve + tr.vn * tr.vn);
         pushBounded(tr.speed_history, tr.speed, cfg.track_linearity_window);
         if (dist >= kSmallDistanceM && tr.speed >= kSmallSpeedMps) {
-            pushBounded(tr.heading_history, std::atan2(dn, de), cfg.track_linearity_window);
+            pushBounded(tr.heading_history, gmti::trig_lut::atan2(dn, de), cfg.track_linearity_window);
         }
     }
+}
+
+static AssocScore computeAssocScoreEN(const Config& cfg,
+                                      const ManagedTrack& tr,
+                                      double det_e,
+                                      double det_n,
+                                      double det_utc,
+                                      double det_speed,
+                                      double frame_utc,
+                                      double measurement_var)
+{
+    AssocScore score;
+    if (!std::isfinite(det_e) || !std::isfinite(det_n) ||
+        !std::isfinite(tr.e) || !std::isfinite(tr.n) ||
+        !std::isfinite(measurement_var) || measurement_var < 0.0) {
+        score.reject_reason = AssocScore::RejectReason::InvalidNumber;
+        return score;
+    }
+
+    score.mahalanobis_d2 =
+        mahalanobis2(tr, det_e, det_n, measurement_var, score.euclidean_dist_m);
+    const bool mahalanobis_available =
+        std::isfinite(score.mahalanobis_d2) && score.mahalanobis_d2 < kInvalidCost;
+
+    double effective_gate_m = safeNonnegative(cfg.track_gate_m);
+    double effective_chi2_gate = safeNonnegative(cfg.track_chi2_gate);
+    if (tr.state == TrackState::Tentative) {
+        effective_gate_m *= std::max(1.0, safeNonnegative(cfg.track_tentative_gate_scale));
+        effective_chi2_gate *= std::max(1.0, safeNonnegative(cfg.track_tentative_chi2_scale));
+    }
+
+    GMTIDetection det{};
+    det.e = det_e;
+    det.n = det_n;
+    det.utcMid = det_utc;
+    const double dt = computeDtForDetection(cfg, tr, det, frame_utc);
+    const TrackPoint* last_hit = tr.point_history.empty() ? nullptr : &tr.point_history.back();
+    const double motion_dist = last_hit
+        ? distanceEN(last_hit->e, last_hit->n, det_e, det_n)
+        : score.euclidean_dist_m;
+    score.instant_speed_mps = motion_dist / std::max(1e-3, dt);
+
+    const bool early_track = (tr.hit_count < 2 || tr.point_history.size() < 2);
+    double reference_speed = 0.0;
+    if (!early_track && tr.speed_history.size() >= 2) {
+        reference_speed = median(tr.speed_history);
+        if (std::isfinite(reference_speed) && reference_speed >= 0.0) {
+            score.speed_reference_available = true;
+            score.speed_diff_mps = std::fabs(score.instant_speed_mps - reference_speed);
+        }
+    }
+
+    if (!early_track && last_hit && tr.heading_history.size() >= 2 &&
+        motion_dist >= kSmallDistanceM) {
+        const double heading_inst = gmti::trig_lut::atan2(det_n - last_hit->n,
+                                                         det_e - last_hit->e);
+        const double heading_ref = circularMean(tr.heading_history);
+        if (std::isfinite(heading_inst) && std::isfinite(heading_ref)) {
+            score.heading_reference_available = true;
+            score.heading_diff_deg = absAngleDiff(heading_inst, heading_ref) * kRadToDeg;
+        }
+    }
+
+    score.detection_speed_available =
+        score.speed_reference_available && std::isfinite(det_speed) && det_speed > 0.0;
+    if (score.detection_speed_available) {
+        score.detection_speed_diff_mps = std::fabs(det_speed - reference_speed);
+    }
+
+    if (!std::isfinite(score.euclidean_dist_m) ||
+        !std::isfinite(score.instant_speed_mps) ||
+        !std::isfinite(score.speed_diff_mps) ||
+        !std::isfinite(score.heading_diff_deg) ||
+        !std::isfinite(score.detection_speed_diff_mps)) {
+        score.reject_reason = AssocScore::RejectReason::InvalidNumber;
+        return score;
+    }
+
+    if (cfg.track_use_euclidean_gate && effective_gate_m > 0.0 &&
+        score.euclidean_dist_m > effective_gate_m) {
+        score.reject_reason = AssocScore::RejectReason::EuclideanGate;
+        return score;
+    }
+    if (cfg.track_use_mahalanobis_gate) {
+        if (!mahalanobis_available) {
+            score.reject_reason = AssocScore::RejectReason::InvalidCovariance;
+            return score;
+        }
+        if (effective_chi2_gate > 0.0 &&
+            score.mahalanobis_d2 > effective_chi2_gate) {
+            score.reject_reason = AssocScore::RejectReason::MahalanobisGate;
+            return score;
+        }
+    }
+    if (cfg.track_use_max_speed_gate && safeNonnegative(cfg.track_v_max) > 0.0 &&
+        score.instant_speed_mps > safeNonnegative(cfg.track_v_max)) {
+        score.reject_reason = AssocScore::RejectReason::MaxSpeedGate;
+        return score;
+    }
+    if (cfg.track_use_heading_gate && score.heading_reference_available &&
+        safeNonnegative(cfg.track_heading_gate_deg) > 0.0 &&
+        score.heading_diff_deg > safeNonnegative(cfg.track_heading_gate_deg)) {
+        score.reject_reason = AssocScore::RejectReason::HeadingGate;
+        return score;
+    }
+    if (cfg.track_use_detection_speed_gate && score.detection_speed_available &&
+        safeNonnegative(cfg.track_detection_speed_gate_mps) > 0.0 &&
+        score.detection_speed_diff_mps >
+            safeNonnegative(cfg.track_detection_speed_gate_mps)) {
+        score.reject_reason = AssocScore::RejectReason::DetectionSpeedGate;
+        return score;
+    }
+
+    const int distance_mode = normalizedDistanceMode(cfg);
+    if (distance_mode == static_cast<int>(TrackDistanceMode::MahalanobisSquared)) {
+        if (!mahalanobis_available) {
+            score.reject_reason = AssocScore::RejectReason::InvalidCovariance;
+            return score;
+        }
+        const double scale = safeNonnegative(cfg.track_mahalanobis_cost_scale) > 0.0
+            ? safeNonnegative(cfg.track_mahalanobis_cost_scale)
+            : effective_chi2_gate;
+        score.distance_cost = scale > kNumericEpsilon
+            ? score.mahalanobis_d2 / scale
+            : score.mahalanobis_d2;
+    } else {
+        const double scale = safeNonnegative(cfg.track_euclidean_cost_scale_m) > 0.0
+            ? safeNonnegative(cfg.track_euclidean_cost_scale_m)
+            : effective_gate_m;
+        if (scale > kNumericEpsilon) {
+            const double normalized = score.euclidean_dist_m / scale;
+            score.distance_cost = normalized * normalized;
+        } else {
+            static bool warned_unscaled_euclidean = false;
+            if (!warned_unscaled_euclidean) {
+                std::cerr << "[TRACK][WARN] Euclidean distance cost has no positive scale/gate; "
+                          << "raw meters will be compared with dummy_cost." << std::endl;
+                warned_unscaled_euclidean = true;
+            }
+            score.distance_cost = score.euclidean_dist_m;
+        }
+    }
+
+    if (score.speed_reference_available) {
+        double scale = safeNonnegative(cfg.track_speed_cost_scale_mps);
+        if (scale <= 0.0) {
+            scale = std::max(reference_speed, 1.0);
+        }
+        score.speed_cost = score.speed_diff_mps / std::max(scale, kNumericEpsilon);
+    }
+    if (score.heading_reference_available) {
+        double scale = safeNonnegative(cfg.track_heading_cost_scale_deg);
+        if (scale <= 0.0) {
+            scale = 180.0;
+        }
+        score.heading_cost = score.heading_diff_deg / std::max(scale, kNumericEpsilon);
+    }
+    if (score.detection_speed_available) {
+        const double scale = safeNonnegative(cfg.track_detection_speed_cost_scale_mps) > 0.0
+            ? safeNonnegative(cfg.track_detection_speed_cost_scale_mps)
+            : safeNonnegative(cfg.track_detection_speed_gate_mps);
+        score.detection_speed_cost = scale > kNumericEpsilon
+            ? score.detection_speed_diff_mps / scale
+            : score.detection_speed_diff_mps;
+    }
+
+    const bool no_cost_component_enabled =
+        !cfg.track_use_distance_cost &&
+        !cfg.track_use_speed_cost &&
+        !cfg.track_use_heading_cost &&
+        !cfg.track_use_detection_speed_cost;
+    if (no_cost_component_enabled) {
+        static bool warned_no_cost = false;
+        if (!warned_no_cost) {
+            std::cerr << "[TRACK][WARN] all association cost components are disabled; "
+                      << "fallback to distance cost with weight 1.0." << std::endl;
+            warned_no_cost = true;
+        }
+        score.total_cost = score.distance_cost;
+    } else {
+        score.total_cost = 0.0;
+        if (cfg.track_use_distance_cost) {
+            score.total_cost += safeNonnegative(cfg.track_distance_weight) *
+                                score.distance_cost;
+        }
+        if (cfg.track_use_speed_cost && score.speed_reference_available) {
+            score.total_cost += safeNonnegative(cfg.track_speed_smooth_weight) *
+                                score.speed_cost;
+        }
+        if (cfg.track_use_heading_cost && score.heading_reference_available) {
+            score.total_cost += safeNonnegative(cfg.track_heading_weight) *
+                                score.heading_cost;
+        }
+        if (cfg.track_use_detection_speed_cost && score.detection_speed_available) {
+            score.total_cost += safeNonnegative(cfg.track_detection_speed_weight) *
+                                score.detection_speed_cost;
+        }
+    }
+
+    if (!std::isfinite(score.total_cost) || score.total_cost < 0.0) {
+        score.total_cost = kInvalidCost;
+        score.reject_reason = AssocScore::RejectReason::InvalidNumber;
+        return score;
+    }
+    score.valid = true;
+    return score;
 }
 
 static AssocScore computeAssocScore(const Config& cfg,
@@ -412,49 +728,8 @@ static AssocScore computeAssocScore(const Config& cfg,
                                     double frame_utc,
                                     double measurement_var)
 {
-    AssocScore score;
-    score.mahalanobis_d2 = mahalanobis2(tr, det.e, det.n, measurement_var, score.dist);
-    double gate_m = cfg.track_gate_m;
-    double chi2_gate = cfg.track_chi2_gate;
-    if (tr.state == TrackState::Tentative) {
-        gate_m *= std::max(1.0, cfg.track_tentative_gate_scale);
-        chi2_gate *= std::max(1.0, cfg.track_tentative_chi2_scale);
-    }
-    if (gate_m > 0.0 && score.dist > gate_m) {
-        return score;
-    }
-    if (score.mahalanobis_d2 > chi2_gate) {
-        return score;
-    }
-
-    const double dt = computeDtForDetection(cfg, tr, det, frame_utc);
-    const TrackPoint* last_hit = tr.point_history.empty() ? nullptr : &tr.point_history.back();
-    const double motion_dist = last_hit ? distanceEN(last_hit->e, last_hit->n, det.e, det.n) : score.dist;
-    score.instant_speed = motion_dist / std::max(1e-3, dt);
-    if (cfg.track_v_max > 0.0 && score.instant_speed > cfg.track_v_max) {
-        return score;
-    }
-
-    const bool early_track = (tr.hit_count < 2 || tr.point_history.size() < 2);
-    double speed_penalty = 0.0;
-    if (!early_track && tr.speed_history.size() >= 2) {
-        const double v_ref = median(tr.speed_history);
-        speed_penalty = std::fabs(score.instant_speed - v_ref) / std::max(v_ref, 1.0);
-    }
-
-    double heading_penalty = 0.0;
-    if (!early_track && last_hit && tr.heading_history.size() >= 2 &&
-        motion_dist >= kSmallDistanceM && tr.speed >= kSmallSpeedMps) {
-        const double heading_inst = std::atan2(det.n - last_hit->n, det.e - last_hit->e);
-        const double heading_ref = circularMean(tr.heading_history);
-        heading_penalty = absAngleDiff(heading_inst, heading_ref) / kPi;
-    }
-
-    score.valid = true;
-    score.cost = score.mahalanobis_d2
-        + cfg.track_speed_smooth_weight * speed_penalty
-        + cfg.track_heading_weight * heading_penalty;
-    return score;
+    return computeAssocScoreEN(cfg, tr, det.e, det.n, det.utcMid, det.speed,
+                               frame_utc, measurement_var);
 }
 
 static std::vector<int> solveAssignment(const std::vector<std::vector<double>>& cost)
@@ -525,6 +800,130 @@ static std::vector<int> solveAssignment(const std::vector<std::vector<double>>& 
     return assignment;
 }
 
+struct GreedyEdge {
+    int row = -1;
+    int det = -1;
+    double cost = kInvalidCost;
+};
+
+static std::vector<int> solveGreedyNearestNeighbor(
+    const std::vector<std::vector<double>>& cost,
+    int det_count,
+    double dummy_cost,
+    bool allow_equal_dummy_cost)
+{
+    const int row_count = static_cast<int>(cost.size());
+    std::vector<int> assignment(row_count, -1);
+    if (row_count == 0 || det_count <= 0) {
+        return assignment;
+    }
+
+    std::vector<GreedyEdge> edges;
+    edges.reserve(static_cast<size_t>(row_count) * static_cast<size_t>(det_count));
+    for (int row = 0; row < row_count; ++row) {
+        const int usable_dets = std::min<int>(det_count, cost[row].size());
+        for (int det = 0; det < usable_dets; ++det) {
+            if (!costBeatsDummy(cost[row][det], dummy_cost, allow_equal_dummy_cost)) {
+                continue;
+            }
+            GreedyEdge edge;
+            edge.row = row;
+            edge.det = det;
+            edge.cost = cost[row][det];
+            edges.push_back(edge);
+        }
+    }
+    std::sort(edges.begin(), edges.end(), [](const GreedyEdge& a, const GreedyEdge& b) {
+        if (a.cost != b.cost) return a.cost < b.cost;
+        if (a.row != b.row) return a.row < b.row;
+        return a.det < b.det;
+    });
+
+    std::vector<char> row_used(row_count, 0);
+    std::vector<char> det_used(det_count, 0);
+    for (const auto& edge : edges) {
+        if (!row_used[edge.row] && !det_used[edge.det]) {
+            assignment[edge.row] = edge.det;
+            row_used[edge.row] = 1;
+            det_used[edge.det] = 1;
+        }
+    }
+    return assignment;
+}
+
+static std::vector<int> solveConfiguredAssignment(
+    const Config& cfg,
+    const std::vector<std::vector<double>>& cost,
+    int det_count,
+    double dummy_cost)
+{
+    if (normalizedAssignmentMode(cfg) ==
+        static_cast<int>(TrackAssignmentMode::GreedyNearestNeighbor)) {
+        return solveGreedyNearestNeighbor(cost, det_count, dummy_cost,
+                                          cfg.track_allow_equal_dummy_cost);
+    }
+
+    std::vector<int> assignment = solveAssignment(cost);
+    for (size_t row = 0; row < assignment.size(); ++row) {
+        const int col = assignment[row];
+        if (col < 0 || col >= det_count ||
+            row >= cost.size() || col >= static_cast<int>(cost[row].size()) ||
+            !costBeatsDummy(cost[row][col], dummy_cost,
+                            cfg.track_allow_equal_dummy_cost)) {
+            assignment[row] = -1;
+        }
+    }
+    return assignment;
+}
+
+static double effectiveDummyCost(const Config& cfg)
+{
+    const double value = safeNonnegative(cfg.track_dummy_cost);
+    return value > kNumericEpsilon ? value : 1.5;
+}
+
+static double effectiveInvalidCost(const Config& cfg, double dummy_cost)
+{
+    double value = safeNonnegative(cfg.track_invalid_cost);
+    if (!std::isfinite(value) || value <= dummy_cost) {
+        value = std::max(kInvalidCost, dummy_cost * 1.0e6);
+    }
+    return value;
+}
+
+static void printAssociationConfig(const Config& cfg)
+{
+    const int distance_mode = normalizedDistanceMode(cfg);
+    const int assignment_mode = normalizedAssignmentMode(cfg);
+    std::cout << "[TRACK_CONFIG]\n"
+              << "distance_mode=" << distanceModeName(distance_mode) << "\n"
+              << "assignment_mode=" << assignmentModeName(assignment_mode) << "\n\n"
+              << "costs:\n"
+              << "distance=" << (cfg.track_use_distance_cost ? "on" : "off")
+              << " weight=" << safeNonnegative(cfg.track_distance_weight) << "\n"
+              << "speed=" << (cfg.track_use_speed_cost ? "on" : "off")
+              << " weight=" << safeNonnegative(cfg.track_speed_smooth_weight) << "\n"
+              << "heading=" << (cfg.track_use_heading_cost ? "on" : "off")
+              << " weight=" << safeNonnegative(cfg.track_heading_weight) << "\n"
+              << "detection_speed=" << (cfg.track_use_detection_speed_cost ? "on" : "off")
+              << " weight=" << safeNonnegative(cfg.track_detection_speed_weight) << "\n\n"
+              << "gates:\n"
+              << "euclidean=" << (cfg.track_use_euclidean_gate ? "on" : "off")
+              << " threshold=" << safeNonnegative(cfg.track_gate_m) << "m\n"
+              << "mahalanobis=" << (cfg.track_use_mahalanobis_gate ? "on" : "off")
+              << " threshold=" << safeNonnegative(cfg.track_chi2_gate) << "\n"
+              << "max_speed=" << (cfg.track_use_max_speed_gate ? "on" : "off")
+              << " threshold=" << safeNonnegative(cfg.track_v_max) << "m/s\n"
+              << "heading=" << (cfg.track_use_heading_gate ? "on" : "off")
+              << " threshold=" << safeNonnegative(cfg.track_heading_gate_deg) << "deg\n"
+              << "detection_speed=" << (cfg.track_use_detection_speed_gate ? "on" : "off")
+              << " threshold=" << safeNonnegative(cfg.track_detection_speed_gate_mps)
+              << "m/s\n\n"
+              << "dummy_cost=" << effectiveDummyCost(cfg)
+              << " invalid_cost=" << effectiveInvalidCost(cfg, effectiveDummyCost(cfg))
+              << std::endl;
+}
+
 static bool ensureDirectory(const std::string& path)
 {
     if (path.empty()) {
@@ -593,10 +992,226 @@ static std::ofstream openCsvAppend(const std::string& path, const char* header)
 
 } // namespace
 
+bool runTrackAssociationSelfTests(std::ostream& out)
+{
+    int passed = 0;
+    int failed = 0;
+    const auto check = [&](bool condition, const char* name) {
+        if (condition) {
+            ++passed;
+            out << "[PASS] " << name << "\n";
+        } else {
+            ++failed;
+            out << "[FAIL] " << name << "\n";
+        }
+    };
+
+    Config cfg;
+    cfg.track_assignment_mode = 0;
+    cfg.track_allow_equal_dummy_cost = false;
+    {
+        const std::vector<std::vector<double>> cost{{0.2, 1.0, 1.5}};
+        const std::vector<int> a = solveConfiguredAssignment(cfg, cost, 2, 1.5);
+        check(a.size() == 1 && a[0] == 0, "single track single/best measurement");
+    }
+    {
+        const std::vector<std::vector<double>> cost{
+            {2.0, 3.0, 10.0, 10.0},
+            {2.1, 100.0, 10.0, 10.0}};
+        const std::vector<int> greedy =
+            solveGreedyNearestNeighbor(cost, 2, 10.0, false);
+        check(greedy[0] == 0 && greedy[1] == -1,
+              "global greedy edge ordering");
+        cfg.track_assignment_mode = 1;
+        const std::vector<int> hungarian =
+            solveConfiguredAssignment(cfg, cost, 2, 10.0);
+        check(hungarian[0] == 1 && hungarian[1] == 0,
+              "Hungarian differs from greedy and minimizes total");
+        cfg.track_assignment_mode = 0;
+    }
+    {
+        const std::vector<std::vector<double>> cost{
+            {1.0e12, 1.0e12, 1.5},
+            {1.0e12, 1.0e12, 1.5}};
+        const std::vector<int> a = solveConfiguredAssignment(cfg, cost, 2, 1.5);
+        check(a[0] == -1 && a[1] == -1, "no valid candidate");
+    }
+    {
+        const std::vector<std::vector<double>> cost{
+            {2.0, 3.0, 1.5},
+            {4.0, 5.0, 1.5}};
+        const std::vector<int> a = solveConfiguredAssignment(cfg, cost, 2, 1.5);
+        check(a[0] == -1 && a[1] == -1, "real costs above dummy");
+    }
+    {
+        const std::vector<std::vector<double>> cost{
+            {0.5, 0.5, 1.5},
+            {0.5, 0.5, 1.5}};
+        const std::vector<int> a = solveConfiguredAssignment(cfg, cost, 2, 1.5);
+        check(a[0] == 0 && a[1] == 1, "greedy tie is reproducible");
+    }
+    {
+        const std::vector<std::vector<double>> fewer{
+            {0.1, 1.5, 1.5, 1.5},
+            {0.2, 1.5, 1.5, 1.5},
+            {0.3, 1.5, 1.5, 1.5}};
+        const std::vector<int> a = solveConfiguredAssignment(cfg, fewer, 1, 1.5);
+        int matched = 0;
+        for (int v : a) matched += (v >= 0 ? 1 : 0);
+        check(matched == 1, "fewer detections than tracks");
+    }
+    {
+        const std::vector<std::vector<double>> more{
+            {0.4, 0.3, 0.2, 1.5},
+            {0.1, 0.5, 0.6, 1.5}};
+        const std::vector<int> a = solveConfiguredAssignment(cfg, more, 3, 1.5);
+        check(a[0] == 2 && a[1] == 0, "more detections than tracks");
+    }
+    {
+        ManagedTrack tr;
+        tr.e = 0.0;
+        tr.n = 0.0;
+        tr.P.fill(0.0);
+        tr.hit_count = 1;
+        tr.point_history.push_back(TrackPoint{0.0, 0.0, 1.0, 1});
+        Config euclidean_cfg;
+        euclidean_cfg.track_distance_mode = 0;
+        euclidean_cfg.track_use_mahalanobis_gate = false;
+        euclidean_cfg.track_use_euclidean_gate = false;
+        euclidean_cfg.track_use_max_speed_gate = false;
+        const AssocScore euclidean = computeAssocScoreEN(
+            euclidean_cfg, tr, 1.0, 0.0, 2.0, 0.0, 2.0, 0.0);
+        check(euclidean.valid, "singular covariance allowed in Euclidean mode");
+        euclidean_cfg.track_distance_mode = 1;
+        const AssocScore mahal = computeAssocScoreEN(
+            euclidean_cfg, tr, 1.0, 0.0, 2.0, 0.0, 2.0, 0.0);
+        check(!mahal.valid &&
+              mahal.reject_reason == AssocScore::RejectReason::InvalidCovariance,
+              "singular covariance rejected in Mahalanobis mode");
+    }
+    {
+        ManagedTrack tr;
+        tr.e = 0.0;
+        tr.n = 0.0;
+        initCovarianceOnline(tr);
+        Config fallback_cfg;
+        fallback_cfg.track_distance_mode = 0;
+        fallback_cfg.track_use_mahalanobis_gate = false;
+        fallback_cfg.track_use_max_speed_gate = false;
+        fallback_cfg.track_use_distance_cost = false;
+        fallback_cfg.track_use_speed_cost = false;
+        fallback_cfg.track_use_heading_cost = false;
+        fallback_cfg.track_use_detection_speed_cost = false;
+        const AssocScore score = computeAssocScoreEN(
+            fallback_cfg, tr, 30.0, 0.0, 1.0, 0.0, 1.0, 100.0);
+        check(score.valid && score.total_cost == score.distance_cost &&
+              score.total_cost > 0.0, "all costs disabled fallback");
+        fallback_cfg.track_distance_weight = 0.0;
+        fallback_cfg.track_use_distance_cost = true;
+        const AssocScore zero_weight = computeAssocScoreEN(
+            fallback_cfg, tr, 30.0, 0.0, 1.0, 0.0, 1.0, 100.0);
+        check(zero_weight.valid && zero_weight.total_cost == 0.0,
+              "zero weight removes enabled component");
+    }
+    {
+        ManagedTrack confirmed;
+        confirmed.state = TrackState::Confirmed;
+        initCovarianceOnline(confirmed);
+        ManagedTrack tentative = confirmed;
+        tentative.state = TrackState::Tentative;
+        Config gate_cfg;
+        gate_cfg.track_distance_mode = 0;
+        gate_cfg.track_use_mahalanobis_gate = false;
+        gate_cfg.track_use_max_speed_gate = false;
+        gate_cfg.track_gate_m = 100.0;
+        gate_cfg.track_tentative_gate_scale = 1.5;
+        const AssocScore confirmed_score = computeAssocScoreEN(
+            gate_cfg, confirmed, 120.0, 0.0, 1.0, 0.0, 1.0, 100.0);
+        const AssocScore tentative_score = computeAssocScoreEN(
+            gate_cfg, tentative, 120.0, 0.0, 1.0, 0.0, 1.0, 100.0);
+        check(!confirmed_score.valid && tentative_score.valid,
+              "tentative gate scaling");
+    }
+    {
+        ManagedTrack tr;
+        tr.e = 10.0;
+        tr.n = 0.0;
+        tr.utc = 2.0;
+        tr.hit_count = 3;
+        initCovarianceOnline(tr);
+        tr.point_history.push_back(TrackPoint{0.0, 0.0, 1.0, 1});
+        tr.point_history.push_back(TrackPoint{10.0, 0.0, 2.0, 2});
+        tr.speed_history.push_back(10.0);
+        tr.speed_history.push_back(10.0);
+        tr.heading_history.push_back(0.0);
+        tr.heading_history.push_back(0.0);
+
+        for (int distance_mode = 0; distance_mode <= 1; ++distance_mode) {
+            for (int assignment_mode = 0; assignment_mode <= 1; ++assignment_mode) {
+                Config mode_cfg;
+                mode_cfg.track_distance_mode = distance_mode;
+                mode_cfg.track_assignment_mode = assignment_mode;
+                mode_cfg.track_use_max_speed_gate = false;
+                const AssocScore score = computeAssocScoreEN(
+                    mode_cfg, tr, 20.0, 0.0, 3.0, 10.0, 3.0, 100.0);
+                std::vector<std::vector<double>> cost(
+                    1, std::vector<double>(2, effectiveDummyCost(mode_cfg)));
+                cost[0][0] = score.total_cost;
+                const std::vector<int> a = solveConfiguredAssignment(
+                    mode_cfg, cost, 1, effectiveDummyCost(mode_cfg));
+                check(score.valid && a.size() == 1 && a[0] == 0,
+                      distance_mode == 0
+                          ? (assignment_mode == 0
+                              ? "Euclidean + Greedy"
+                              : "Euclidean + Hungarian")
+                          : (assignment_mode == 0
+                              ? "Mahalanobis + Greedy"
+                              : "Mahalanobis + Hungarian"));
+            }
+        }
+
+        for (int cost_case = 0; cost_case < 4; ++cost_case) {
+            Config cost_cfg;
+            cost_cfg.track_use_max_speed_gate = false;
+            cost_cfg.track_use_speed_cost = (cost_case == 1 || cost_case == 3);
+            cost_cfg.track_use_heading_cost = (cost_case == 2 || cost_case == 3);
+            cost_cfg.track_speed_smooth_weight = 0.3;
+            cost_cfg.track_heading_weight = 0.5;
+            const AssocScore score = computeAssocScoreEN(
+                cost_cfg, tr, 20.0, 0.0, 3.0, 10.0, 3.0, 100.0);
+            check(score.valid && std::isfinite(score.total_cost),
+                  cost_case == 0 ? "distance-only cost"
+                  : cost_case == 1 ? "distance + speed cost"
+                  : cost_case == 2 ? "distance + heading cost"
+                                   : "distance + speed + heading cost");
+        }
+
+        Config cross_gate_cfg;
+        cross_gate_cfg.track_distance_mode = 1;
+        cross_gate_cfg.track_use_mahalanobis_gate = false;
+        cross_gate_cfg.track_use_max_speed_gate = false;
+        check(computeAssocScoreEN(cross_gate_cfg, tr, 20.0, 0.0, 3.0,
+                                  10.0, 3.0, 100.0).valid,
+              "Mahalanobis cost with Mahalanobis gate disabled");
+        cross_gate_cfg.track_distance_mode = 0;
+        cross_gate_cfg.track_use_mahalanobis_gate = true;
+        check(computeAssocScoreEN(cross_gate_cfg, tr, 20.0, 0.0, 3.0,
+                                  10.0, 3.0, 100.0).valid,
+              "Euclidean cost with Mahalanobis gate enabled");
+    }
+
+    out << "[TRACK_SELFTEST] passed=" << passed << " failed=" << failed << "\n";
+    return failed == 0;
+}
+
 std::vector<GMTIDetection> TrackManager::update(
     const Config& cfg,
     const std::vector<GMTIDetection>& current_targets)
 {
+    if (!association_config_logged_) {
+        printAssociationConfig(cfg);
+        association_config_logged_ = true;
+    }
     const int result_id = currentResultId(cfg);
     if (result_id > 0 && last_update_result_id_ > 0 && result_id < last_update_result_id_) {
         std::cout << "[TRACK][WARN] TrackManager result id moved backward: current="
@@ -614,11 +1229,12 @@ std::vector<GMTIDetection> TrackManager::update(
         DetectionPoint pt;
         pt.det = det;
         Gaussp3(det.lat, det.lon, cfg.L0, pt.e, pt.n);
+        pt.det.e = pt.e;
+        pt.det.n = pt.n;
         detections.push_back(pt);
     }
 
     const double gate_m = std::max(0.0, cfg.track_gate_m);
-    const double v_max = std::max(0.0, cfg.track_v_max);
     const int max_miss = maxMiss(cfg);
     const double measurement_std = std::max(kMinMeasurementStdM, gate_m * 0.25);
     const double measurement_var = measurement_std * measurement_std;
@@ -648,40 +1264,70 @@ std::vector<GMTIDetection> TrackManager::update(
     const int det_count = static_cast<int>(detections.size());
     if (row_count > 0) {
         const int col_count = det_count + row_count;
-        std::vector<std::vector<double>> cost(row_count, std::vector<double>(col_count, kMissCost));
+        const double dummy_cost = effectiveDummyCost(cfg);
+        const double invalid_cost = effectiveInvalidCost(cfg, dummy_cost);
+        std::vector<std::vector<double>> cost(
+            row_count, std::vector<double>(col_count, dummy_cost));
+        std::vector<std::vector<AssocScore>> scores(
+            row_count, std::vector<AssocScore>(det_count));
 
         for (int row = 0; row < row_count; ++row) {
             const ManagedTrack& tr = tracks_[active_tracks[row]];
             for (int di = 0; di < det_count; ++di) {
-                double dist = 0.0;
-                const double d2 = mahalanobis2(tr, detections[di].e, detections[di].n,
-                                               measurement_var, dist);
-                if (gate_m > 0.0 && dist > gate_m) {
-                    cost[row][di] = kInvalidCost;
-                    continue;
-                }
-
-                const double dt = frameDtLegacy(tr, detections[di].det.utcMid, result_id);
-                const double speed = dist / std::max(1e-3, dt);
-                if (v_max > 0.0 && speed > v_max) {
-                    cost[row][di] = kInvalidCost;
-                    continue;
-                }
-                if (d2 > kMahalanobisGate) {
-                    cost[row][di] = kInvalidCost;
-                    continue;
-                }
-
-                const double norm_dist = (gate_m > 0.0) ? dist / gate_m : 0.0;
-                cost[row][di] = d2 + 0.5 * norm_dist;
+                scores[row][di] = computeAssocScore(
+                    cfg, tr, detections[di].det, update_utc, measurement_var);
+                cost[row][di] = scores[row][di].valid
+                    ? scores[row][di].total_cost : invalid_cost;
             }
         }
 
-        const std::vector<int> assignment = solveAssignment(cost);
+        const std::vector<int> assignment =
+            solveConfiguredAssignment(cfg, cost, det_count, dummy_cost);
+        if (cfg.track_debug_dump_level >= 2) {
+            const std::string dir = debugDir(cfg);
+            if (ensureDirectory(dir)) {
+                std::ofstream candidates = openCsvAppend(
+                    dir + "/association_candidates.csv",
+                    "result_id,track_id,track_state,det_index,valid,reject_reason,distance_mode,assignment_mode,euclidean_dist_m,mahalanobis_d2,instant_speed_mps,speed_diff_mps,heading_diff_deg,detection_speed_diff_mps,distance_cost,speed_cost,heading_cost,detection_speed_cost,total_cost,dummy_cost,assigned");
+                if (candidates.is_open()) {
+                    for (int row = 0; row < row_count; ++row) {
+                        const ManagedTrack& tr = tracks_[active_tracks[row]];
+                        for (int di = 0; di < det_count; ++di) {
+                            const AssocScore& score = scores[row][di];
+                            candidates << std::setprecision(12)
+                                       << result_id << "," << tr.id << ","
+                                       << stateName(tr.state) << "," << di << ","
+                                       << (score.valid ? 1 : 0) << ","
+                                       << rejectReasonName(score.reject_reason) << ","
+                                       << distanceModeName(normalizedDistanceMode(cfg)) << ","
+                                       << assignmentModeName(normalizedAssignmentMode(cfg)) << ","
+                                       << score.euclidean_dist_m << ","
+                                       << score.mahalanobis_d2 << ","
+                                       << score.instant_speed_mps << ","
+                                       << score.speed_diff_mps << ","
+                                       << score.heading_diff_deg << ","
+                                       << score.detection_speed_diff_mps << ","
+                                       << score.distance_cost << ","
+                                       << score.speed_cost << ","
+                                       << score.heading_cost << ","
+                                       << score.detection_speed_cost << ","
+                                       << score.total_cost << ","
+                                       << dummy_cost << ","
+                                       << ((row < static_cast<int>(assignment.size()) &&
+                                            assignment[row] == di) ? 1 : 0)
+                                       << "\n";
+                        }
+                    }
+                }
+            }
+        }
         for (int row = 0; row < row_count; ++row) {
             const int ti = active_tracks[row];
             const int col = (row < static_cast<int>(assignment.size())) ? assignment[row] : -1;
-            if (col < 0 || col >= det_count || cost[row][col] >= kMissCost) {
+            if (col < 0 || col >= det_count || det_used[col] ||
+                !scores[row][col].valid ||
+                !costBeatsDummy(scores[row][col].total_cost, dummy_cost,
+                                cfg.track_allow_equal_dummy_cost)) {
                 continue;
             }
 
@@ -773,6 +1419,10 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
     int result_id,
     double frame_utc)
 {
+    if (!association_config_logged_) {
+        printAssociationConfig(cfg);
+        association_config_logged_ = true;
+    }
     if (result_id > 0 && last_update_result_id_ > 0 && result_id < last_update_result_id_) {
         std::cout << "[TRACK][WARN] TrackManager result id moved backward: current="
                   << result_id << ", previous=" << last_update_result_id_
@@ -809,7 +1459,8 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
     int num_new_tracks = 0;
     const int row_count = static_cast<int>(active_tracks.size());
     const int det_count = static_cast<int>(dets.size());
-    const double dummy_cost = std::max(1.0, cfg.track_dummy_cost);
+    const double dummy_cost = effectiveDummyCost(cfg);
+    const double invalid_cost = effectiveInvalidCost(cfg, dummy_cost);
     const double measurement_std = std::max(1.0, cfg.track_measurement_noise_pos);
     const double measurement_var = measurement_std * measurement_std;
 
@@ -823,29 +1474,76 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
             for (int di = 0; di < det_count; ++di) {
                 scores[row][di] = computeAssocScore(cfg, tr, dets[di], frame_utc, measurement_var);
                 if (scores[row][di].valid) {
-                    cost[row][di] = scores[row][di].cost;
-                } else if (cfg.track_debug_level >= 3) {
-                    std::cout << "[TRACK_ONLINE] cost invalid track=" << tr.id
-                              << " det=" << di
-                              << " d=" << scores[row][di].dist
-                              << " d2=" << scores[row][di].mahalanobis_d2
-                              << " v=" << scores[row][di].instant_speed << std::endl;
+                    cost[row][di] = scores[row][di].total_cost;
+                } else {
+                    cost[row][di] = invalid_cost;
+                    if (cfg.track_debug_level >= 3) {
+                        std::cout << "[TRACK_ONLINE] cost invalid track=" << tr.id
+                                  << " det=" << di
+                                  << " reject_reason="
+                                  << rejectReasonName(scores[row][di].reject_reason)
+                                  << " d=" << scores[row][di].euclidean_dist_m
+                                  << " d2=" << scores[row][di].mahalanobis_d2
+                                  << " v=" << scores[row][di].instant_speed_mps
+                                  << std::endl;
+                    }
                 }
             }
         }
 
-        const std::vector<int> assignment = solveAssignment(cost);
+        const std::vector<int> assignment =
+            solveConfiguredAssignment(cfg, cost, det_count, dummy_cost);
+        if (cfg.track_debug_dump_level >= 2) {
+            const std::string dir = debugDir(cfg);
+            if (ensureDirectory(dir)) {
+                std::ofstream candidates = openCsvAppend(
+                    dir + "/association_candidates.csv",
+                    "result_id,track_id,track_state,det_index,valid,reject_reason,distance_mode,assignment_mode,euclidean_dist_m,mahalanobis_d2,instant_speed_mps,speed_diff_mps,heading_diff_deg,detection_speed_diff_mps,distance_cost,speed_cost,heading_cost,detection_speed_cost,total_cost,dummy_cost,assigned");
+                if (candidates.is_open()) {
+                    for (int row = 0; row < row_count; ++row) {
+                        const ManagedTrack& tr = tracks_[active_tracks[row]];
+                        for (int di = 0; di < det_count; ++di) {
+                            const AssocScore& score = scores[row][di];
+                            candidates << std::setprecision(12)
+                                       << result_id << "," << tr.id << ","
+                                       << stateName(tr.state) << "," << di << ","
+                                       << (score.valid ? 1 : 0) << ","
+                                       << rejectReasonName(score.reject_reason) << ","
+                                       << distanceModeName(normalizedDistanceMode(cfg)) << ","
+                                       << assignmentModeName(normalizedAssignmentMode(cfg)) << ","
+                                       << score.euclidean_dist_m << ","
+                                       << score.mahalanobis_d2 << ","
+                                       << score.instant_speed_mps << ","
+                                       << score.speed_diff_mps << ","
+                                       << score.heading_diff_deg << ","
+                                       << score.detection_speed_diff_mps << ","
+                                       << score.distance_cost << ","
+                                       << score.speed_cost << ","
+                                       << score.heading_cost << ","
+                                       << score.detection_speed_cost << ","
+                                       << score.total_cost << ","
+                                       << dummy_cost << ","
+                                       << ((row < static_cast<int>(assignment.size()) &&
+                                            assignment[row] == di) ? 1 : 0)
+                                       << "\n";
+                        }
+                    }
+                }
+            }
+        }
         for (int row = 0; row < row_count; ++row) {
             const int ti = active_tracks[row];
             const int col = (row < static_cast<int>(assignment.size())) ? assignment[row] : -1;
-            if (col < 0 || col >= det_count || cost[row][col] >= dummy_cost) {
+            if (col < 0 || col >= det_count || det_used[col]) {
                 continue;
             }
 
             ManagedTrack& tr = tracks_[ti];
             GMTIDetection& det = dets[col];
             const AssocScore& score = scores[row][col];
-            if (!score.valid) {
+            if (!score.valid ||
+                !costBeatsDummy(score.total_cost, dummy_cost,
+                                cfg.track_allow_equal_dummy_cost)) {
                 continue;
             }
 
@@ -881,9 +1579,17 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
             if (cfg.track_debug_level >= 2) {
                 std::cout << "[TRACK_ONLINE] assign track=" << tr.id
                           << " det=" << col
-                          << " cost=" << score.cost
-                          << " d=" << score.dist
-                          << " v=" << score.instant_speed
+                          << " total_cost=" << score.total_cost
+                          << " distance_cost=" << score.distance_cost
+                          << " speed_cost=" << score.speed_cost
+                          << " heading_cost=" << score.heading_cost
+                          << " detection_speed_cost=" << score.detection_speed_cost
+                          << " euclidean_dist_m=" << score.euclidean_dist_m
+                          << " mahalanobis_d2=" << score.mahalanobis_d2
+                          << " instant_speed_mps=" << score.instant_speed_mps
+                          << " heading_diff_deg=" << score.heading_diff_deg
+                          << " assignment_mode="
+                          << assignmentModeName(normalizedAssignmentMode(cfg))
                           << " state=" << (tr.state == TrackState::Confirmed ? "Confirmed" : "Tentative")
                           << std::endl;
             }
@@ -1071,6 +1777,7 @@ void TrackManager::reset()
     tracks_.clear();
     next_id_ = 1;
     last_update_result_id_ = 0;
+    association_config_logged_ = false;
 }
 
 uint16_t TrackManager::allocateId()
@@ -1230,7 +1937,7 @@ void TrackManager::dumpDebugSnapshot(const Config& cfg,
                 double lat = 0.0;
                 double lon = 0.0;
                 Gaussp3RV(tr.e, tr.n, cfg.L0, lat, lon);
-                const double heading = std::atan2(tr.vn, tr.ve);
+                const double heading = gmti::trig_lut::atan2(tr.vn, tr.ve);
                 const int recent = recentHits(tr, cfg.track_confirm_window);
                 const double linearity = computeLinearity(tr, cfg.track_linearity_window);
                 states << std::setprecision(12)

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include "GMTIProcessor.hpp"
+#include "trig_lut.hpp"
 #include <iostream>
 
 bool GMTIProcessor::target_select(const std::vector<std::complex<double>> &GMTI_dataf_1,
@@ -459,11 +460,11 @@ bool GMTIProcessor::cluster_filter_gap_phase(const std::vector<double> &mydata,
                 {
                     const size_t id = comp[k];
                     const double phi = phase_map[id]; // 弧度
-                    sumCos += std::cos(phi);
-                    sumSin += std::sin(phi);
+                    sumCos += gmti::trig_lut::cos(phi);
+                    sumSin += gmti::trig_lut::sin(phi);
                 }
 
-                const double phi0 = std::atan2(sumSin, sumCos); // 平均相位方向
+                const double phi0 = gmti::trig_lut::atan2(sumSin, sumCos); // 平均相位方向
 
                 // 把相位绕 phi0 展开，计算标准差
                 double mean  = 0.0;

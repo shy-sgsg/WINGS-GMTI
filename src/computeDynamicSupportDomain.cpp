@@ -1,4 +1,5 @@
 #include "GMTIProcessor.hpp"
+#include "trig_lut.hpp"
 
 
 // 角度->弧度
@@ -55,7 +56,7 @@ bool GMTIProcessor::computeDynamicSupportDomain(
     rg_ed_out = cfg.rg_ed;
 
     // 带宽（注意 sind(2) -> sin(2°)）
-    BW_az = 2.0 * plane.V * std::sin(deg2rad(2.0)) / cfg.lambda;
+    BW_az = 2.0 * plane.V * gmti::trig_lut::sin(deg2rad(2.0)) / cfg.lambda;
 
     // 动态上下边界频率
     fd_st = fa2 - BW_az;

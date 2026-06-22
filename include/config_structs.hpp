@@ -75,8 +75,29 @@ struct Config {
     int track_debug_points = 3; // 每帧打印前 N 个点
     int track_idx_window = 4;   // 生成 track_idx_range 的窗长
     int track_truth_threshold = 3; // 判真阈值
-    double track_gate_m = 500.0; // 航迹关联门限
-    double track_v_max = 50.0;   // 航迹关联速度上限
+    // 在线 TrackManager 关联模式。旧滑窗 trackModule() 不使用这些模式开关。
+    int track_distance_mode = 1;   // 0=Euclidean, 1=MahalanobisSquared
+    int track_assignment_mode = 1; // 0=GreedyNearestNeighbor, 1=Hungarian
+    bool track_use_distance_cost = true;
+    bool track_use_speed_cost = true;
+    bool track_use_heading_cost = true;
+    bool track_use_detection_speed_cost = false;
+    double track_distance_weight = 1.0;
+    double track_detection_speed_weight = 0.0;
+    bool track_use_euclidean_gate = true;
+    bool track_use_mahalanobis_gate = true;
+    bool track_use_max_speed_gate = true;
+    bool track_use_heading_gate = false;
+    bool track_use_detection_speed_gate = false;
+    double track_gate_m = 300.0; // 欧氏物理距离门限，m
+    double track_v_max = 100.0;  // 瞬时速度门限，m/s
+    double track_heading_gate_deg = 90.0;
+    double track_detection_speed_gate_mps = 30.0;
+    double track_euclidean_cost_scale_m = 0.0;
+    double track_mahalanobis_cost_scale = 0.0;
+    double track_speed_cost_scale_mps = 0.0;
+    double track_heading_cost_scale_deg = 180.0;
+    double track_detection_speed_cost_scale_mps = 0.0;
     int track_confirm_window = 3; // 在线航迹 n屏选m确认窗口 N
     int track_confirm_hits = 2;   // 在线航迹 n屏选m确认命中数 M
     int track_max_missed = 2;     // Confirmed/Coasted 最大连续漏检保留帧数
@@ -85,11 +106,13 @@ struct Config {
     double track_chi2_gate = 9.21; // 二维量测 99% Mahalanobis 门限
     double track_tentative_gate_scale = 1.5; // Tentative 空间门限放宽倍率
     double track_tentative_chi2_scale = 1.5; // Tentative Mahalanobis 门限放宽倍率
-    double track_dummy_cost = 1000.0; // Hungarian dummy 未匹配代价
+    double track_dummy_cost = 1.5; // 真实匹配必须优于该漏检代价
+    double track_invalid_cost = 1.0e12; // 有限大无效代价，避免 Hungarian 使用 inf
+    bool track_allow_equal_dummy_cost = false;
     int track_linearity_window = 5; // 直线度评价窗口
     double track_min_linearity_confirm = 0.65; // Tentative 确认最小直线度
-    double track_speed_smooth_weight = 0.5; // EN 差分速度平滑代价权重
-    double track_heading_weight = 0.2; // EN 差分航向平滑代价权重
+    double track_speed_smooth_weight = 0.0; // EN 差分速度平滑代价权重
+    double track_heading_weight = 0.0; // EN 差分航向平滑代价权重
     double track_process_noise_pos = 25.0; // Kalman 位置过程噪声方差项
     double track_process_noise_vel = 10.0; // Kalman 速度过程噪声方差项
     double track_measurement_noise_pos = 50.0; // Kalman 位置量测噪声标准差

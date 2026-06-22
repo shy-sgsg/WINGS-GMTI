@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 #include <limits>
+#include "trig_lut.hpp"
 
 // ------------------------------------------------------------
 // Gaussp3 / Gaussp3RV
@@ -27,18 +28,18 @@ inline void Gaussp3(double B_deg, double L_deg, double L0_deg,
     const double L1   = L_deg;
     const double Brad = B1 * M_PI / 180.0;
 
-    const double t  = std::tan(Brad);
-    const double k  = E1 * std::cos(Brad) * std::cos(Brad);
+    const double t  = gmti::trig_lut::tan(Brad);
+    const double k  = E1 * gmti::trig_lut::cos(Brad) * gmti::trig_lut::cos(Brad);
     const double v  = 1.0 + k;
     const double N  = c / std::sqrt(v);
     const double l0 = L1 - L0_deg;
-    const double p  = std::cos(Brad) * l0 / p0;
+    const double p  = gmti::trig_lut::cos(Brad) * l0 / p0;
 
     const double X = a0*B1
-                   + a2*std::sin(2*Brad)
-                   + a4*std::sin(4*Brad)
-                   + a6*std::sin(6*Brad)
-                   + a8*std::sin(8*Brad);
+                   + a2*gmti::trig_lut::sin(2*Brad)
+                   + a4*gmti::trig_lut::sin(4*Brad)
+                   + a6*gmti::trig_lut::sin(6*Brad)
+                   + a8*gmti::trig_lut::sin(8*Brad);
 
     // y (北)
     {
@@ -91,14 +92,14 @@ inline bool Gaussp3RV(double x, double y, double L0_deg,
 
     // 反算
     const double B0 = m_X2 * q0;
-    const double sB0 = std::sin(B0);
-    const double Bf  = B0 + std::sin(2*B0) * ( q2
+    const double sB0 = gmti::trig_lut::sin(B0);
+    const double Bf  = B0 + gmti::trig_lut::sin(2*B0) * ( q2
                     + sB0*sB0 * ( q4
                     + sB0*sB0 * ( q6 + q8*sB0*sB0 ) ) );
 
     const double Y   = m_Y2 - 500000.0;
-    const double tf  = std::tan(Bf);
-    const double k   = E1 * std::cos(Bf) * std::cos(Bf);
+    const double tf  = gmti::trig_lut::tan(Bf);
+    const double k   = E1 * gmti::trig_lut::cos(Bf) * gmti::trig_lut::cos(Bf);
     const double vf  = 1.0 + k;
     const double Nf  = c / std::sqrt(vf);
     const double q   = Y / Nf;
@@ -131,7 +132,7 @@ inline bool Gaussp3RV(double x, double y, double L0_deg,
                 - (61 + (662 + (1320 + 720*tf2)*tf2)*tf2) * q2v / 42.0
               ) * q2v / 20.0;
 
-        const double l0 = p0 * q / std::cos(Bf) * ( 1 + innerL * q2v / 6.0 );
+        const double l0 = p0 * q / gmti::trig_lut::cos(Bf) * ( 1 + innerL * q2v / 6.0 );
         L_deg_out = L0_deg + l0;
     }
 

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <mutex>
 #include "rangeCompress.hpp"
+#include "trig_lut.hpp"
 #include <fftw3.h>
 #include <cstdint>
 
@@ -27,7 +28,7 @@ buildHfSpec(int N, double fs, double Kr)
     for (int n = 0; n < N; ++n) {
         double fn = (n <= (N/2 - 1)) ? n*df : (n - N)*df;
         double phase = M_PI * (fn*fn) / Kr;  // -pi*f^2/Kr
-        Hf[n] = std::complex<double>(std::cos(phase), std::sin(phase));
+        Hf[n] = std::complex<double>(gmti::trig_lut::cos(phase), gmti::trig_lut::sin(phase));
     }
     return Hf;
 }
@@ -57,8 +58,8 @@ buildHfSpecFromRefFunc(const Config &P){
       std::fclose(fp);
       return {};
     }
-    re = H_amp[n] * std::cos(1.0*phase);
-    im = H_amp[n] * std::sin(1.0*phase);
+    re = H_amp[n] * gmti::trig_lut::cos(1.0*phase);
+    im = H_amp[n] * gmti::trig_lut::sin(1.0*phase);
     Hf[n] = std::complex<double>(re, im);
   }
   std::fclose(fp);

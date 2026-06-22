@@ -1,5 +1,6 @@
 #include "GMTIProcessor.hpp"
 #include "geo/geoProj.hpp" // 包含 wrap180
+#include "trig_lut.hpp"
 
 #include <cmath>
 #include <algorithm>
@@ -35,7 +36,7 @@ bool GMTIProcessor::makePeriodListROI51(const Config& cfg,
     // 2) 观测方位角（飞机→ROI中心），坐标系：东为0°，逆时针为正
     double dE=0.0, dN=0.0;
     geoDiff_EN_m(plane.E, plane.N, E_c, N_c, dE, dN);
-    const double bearing_deg = std::atan2(dN, dE) * 180.0 / 3.14159265358979323846;
+    const double bearing_deg = gmti::trig_lut::atan2(dN, dE) * 180.0 / 3.14159265358979323846;
 
     // 3) ★ 斜视角定义：以“飞行方向的右侧法线”为 0°，逆时针为正
     //    right-normal = heading - 90°

@@ -3,6 +3,7 @@
 #define UNWRAP_PRF_TO_MODEL_HPP
 
 #include <cmath>
+#include "trig_lut.hpp"
 
 // 兼容 g++4.5：自定义“就近取整”到整数
 static inline int nearest_int(double x) {
@@ -31,7 +32,7 @@ static inline float unwrap_prf_to_model(double d_est,
     const double pi = 3.14159265358979323846;
     const double lambda = c / fc;              // 波长
     const double theta = theta_deg * (pi / 180.0);
-    const double f_theory = -2.0 * v / lambda * std::sin(theta);
+    const double f_theory = -2.0 * v / lambda * gmti::trig_lut::sin(theta);
 
     // 保护：PRF 非法时直接返回观测值
     if (PRF <= 0.0 || !std::isfinite(PRF)) {

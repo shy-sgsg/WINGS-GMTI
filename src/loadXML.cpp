@@ -129,10 +129,11 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
             }
             return value;
         } catch (const std::exception& e) {
-            std::ostringstream oss;
-            oss << "[XML][ERR] Invalid optional integer field <" << name << ">=\"" << text
-                << "\" in " << xmlFile << ": " << e.what();
-            throw std::runtime_error(oss.str());
+            std::cerr << "[XML][WARN] Invalid optional integer field <" << name
+                      << ">=\"" << text << "\" in " << xmlFile
+                      << "; keep default/current value " << current
+                      << ". reason=" << e.what() << std::endl;
+            return current;
         }
     };
 
@@ -150,10 +151,11 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
             }
             return value;
         } catch (const std::exception& e) {
-            std::ostringstream oss;
-            oss << "[XML][ERR] Invalid optional numeric field <" << name << ">=\"" << text
-                << "\" in " << xmlFile << ": " << e.what();
-            throw std::runtime_error(oss.str());
+            std::cerr << "[XML][WARN] Invalid optional numeric field <" << name
+                      << ">=\"" << text << "\" in " << xmlFile
+                      << "; keep default/current value " << current
+                      << ". reason=" << e.what() << std::endl;
+            return current;
         }
     };
 
@@ -190,10 +192,11 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
         if (text == "false" || text == "0") {
             return false;
         }
-        std::ostringstream oss;
-        oss << "[XML][ERR] Invalid boolean field <" << name << ">=\"" << text
-            << "\" in " << xmlFile << ". Expected true/false/1/0.";
-        throw std::runtime_error(oss.str());
+        std::cerr << "[XML][WARN] Invalid optional boolean field <" << name
+                  << ">=\"" << text << "\" in " << xmlFile
+                  << "; keep default/current value " << (current ? "true" : "false")
+                  << ". Expected true/false/1/0." << std::endl;
+        return current;
     };
 
     auto parseOptionalString = [&](const char *name, const std::string& current) -> std::string
@@ -233,7 +236,7 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
         const size_t pos = path.find_last_of("/\\");
         const std::string filename = (pos == std::string::npos) ? path : path.substr(pos + 1);
         std::smatch match;
-        const std::regex idPattern(R"((\d+)(?:\.bin)?$)", std::regex::icase);
+        const std::regex idPattern(R"((\d+)(?:\.(bin|dat))?)", std::regex::icase);
         if (std::regex_search(filename, match, idPattern) && match.size() >= 2) {
             return std::stoi(match[1].str());
         }
@@ -351,6 +354,33 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     cfg.track_debug_points = parseOptionalInt("track_debug_points", cfg.track_debug_points);
     cfg.track_idx_window = parseOptionalInt("track_idx_window", cfg.track_idx_window);
     cfg.track_truth_threshold = parseOptionalInt("track_truth_threshold", cfg.track_truth_threshold);
+    cfg.track_distance_mode = parseOptionalInt("track_distance_mode", cfg.track_distance_mode);
+    cfg.track_assignment_mode = parseOptionalInt("track_assignment_mode", cfg.track_assignment_mode);
+    cfg.track_use_distance_cost = parseOptionalBool("track_use_distance_cost",
+                                                     cfg.track_use_distance_cost);
+    cfg.track_use_speed_cost = parseOptionalBool("track_use_speed_cost",
+                                                  cfg.track_use_speed_cost);
+    cfg.track_use_heading_cost = parseOptionalBool("track_use_heading_cost",
+                                                    cfg.track_use_heading_cost);
+    cfg.track_use_detection_speed_cost =
+        parseOptionalBool("track_use_detection_speed_cost",
+                          cfg.track_use_detection_speed_cost);
+    cfg.track_distance_weight = parseOptionalDouble("track_distance_weight",
+                                                     cfg.track_distance_weight);
+    cfg.track_detection_speed_weight =
+        parseOptionalDouble("track_detection_speed_weight",
+                            cfg.track_detection_speed_weight);
+    cfg.track_use_euclidean_gate = parseOptionalBool("track_use_euclidean_gate",
+                                                      cfg.track_use_euclidean_gate);
+    cfg.track_use_mahalanobis_gate = parseOptionalBool("track_use_mahalanobis_gate",
+                                                        cfg.track_use_mahalanobis_gate);
+    cfg.track_use_max_speed_gate = parseOptionalBool("track_use_max_speed_gate",
+                                                      cfg.track_use_max_speed_gate);
+    cfg.track_use_heading_gate = parseOptionalBool("track_use_heading_gate",
+                                                    cfg.track_use_heading_gate);
+    cfg.track_use_detection_speed_gate =
+        parseOptionalBool("track_use_detection_speed_gate",
+                          cfg.track_use_detection_speed_gate);
     cfg.track_confirm_window = parseOptionalInt("track_confirm_window", cfg.track_idx_window);
     cfg.track_confirm_hits = parseOptionalInt("track_confirm_hits", cfg.track_truth_threshold);
     cfg.track_max_missed = parseOptionalInt("track_max_missed", cfg.track_max_missed);
@@ -363,12 +393,36 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     cfg.track_tentative_chi2_scale = parseOptionalDouble("track_tentative_chi2_scale",
                                                          cfg.track_tentative_chi2_scale);
     cfg.track_dummy_cost = parseOptionalDouble("track_dummy_cost", cfg.track_dummy_cost);
+    cfg.track_invalid_cost = parseOptionalDouble("track_invalid_cost", cfg.track_invalid_cost);
+    cfg.track_allow_equal_dummy_cost =
+        parseOptionalBool("track_allow_equal_dummy_cost",
+                          cfg.track_allow_equal_dummy_cost);
     cfg.track_linearity_window = parseOptionalInt("track_linearity_window", cfg.track_linearity_window);
     cfg.track_min_linearity_confirm = parseOptionalDouble("track_min_linearity_confirm",
                                                           cfg.track_min_linearity_confirm);
     cfg.track_speed_smooth_weight = parseOptionalDouble("track_speed_smooth_weight",
                                                         cfg.track_speed_smooth_weight);
     cfg.track_heading_weight = parseOptionalDouble("track_heading_weight", cfg.track_heading_weight);
+    cfg.track_heading_gate_deg = parseOptionalDouble("track_heading_gate_deg",
+                                                      cfg.track_heading_gate_deg);
+    cfg.track_detection_speed_gate_mps =
+        parseOptionalDouble("track_detection_speed_gate_mps",
+                            cfg.track_detection_speed_gate_mps);
+    cfg.track_euclidean_cost_scale_m =
+        parseOptionalDouble("track_euclidean_cost_scale_m",
+                            cfg.track_euclidean_cost_scale_m);
+    cfg.track_mahalanobis_cost_scale =
+        parseOptionalDouble("track_mahalanobis_cost_scale",
+                            cfg.track_mahalanobis_cost_scale);
+    cfg.track_speed_cost_scale_mps =
+        parseOptionalDouble("track_speed_cost_scale_mps",
+                            cfg.track_speed_cost_scale_mps);
+    cfg.track_heading_cost_scale_deg =
+        parseOptionalDouble("track_heading_cost_scale_deg",
+                            cfg.track_heading_cost_scale_deg);
+    cfg.track_detection_speed_cost_scale_mps =
+        parseOptionalDouble("track_detection_speed_cost_scale_mps",
+                            cfg.track_detection_speed_cost_scale_mps);
     cfg.track_process_noise_pos = parseOptionalDouble("track_process_noise_pos",
                                                       cfg.track_process_noise_pos);
     cfg.track_process_noise_vel = parseOptionalDouble("track_process_noise_vel",
