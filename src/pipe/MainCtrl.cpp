@@ -375,7 +375,8 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, i
     }
 
     if (host->cfg_.INFO_Type) {
-        host->cfg_.pkg_bytes = 256 + 4096 * 16;
+        host->cfg_.pkg_bytes =
+            host->cfg_.info_len + host->cfg_.pulse_len * 16;
     } else if (host->cfg_.channel_mode == "separate") {
         host->cfg_.pkg_bytes = host->cfg_.info_len + host->cfg_.pulse_len * 2 * 4;
     } else if (host->cfg_.channel_mode == "interleaved") {

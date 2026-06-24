@@ -93,6 +93,7 @@ find_package(Threads REQUIRED)
 # FFTW3
 set(FFTW3_TARGET "")
 set(FFTW3_THREADS_TARGET "")
+set(FFTW3F_TARGET "")
 
 find_package(FFTW3 QUIET COMPONENTS FFTW3 FFTW3_THREADS)
 
@@ -138,6 +139,26 @@ if(NOT FFTW3_TARGET)
   else()
     set(FFTW3_TARGET fftw3)
   endif()
+endif()
+
+# Single-precision FFTW is used by the target-profile echo generator.
+find_library(FFTW3F_LIB
+  NAMES fftw3f
+  PATHS
+    /usr/lib64
+    /usr/lib
+    /usr/lib/x86_64-linux-gnu
+    /usr/local/lib
+    /usr/local/lib64
+    /opt/homebrew/lib
+)
+
+if(FFTW3F_LIB)
+  add_library(FFTW3::fftw3f INTERFACE IMPORTED)
+  target_link_libraries(FFTW3::fftw3f INTERFACE "${FFTW3F_LIB}")
+  set(FFTW3F_TARGET FFTW3::fftw3f)
+else()
+  set(FFTW3F_TARGET fftw3f)
 endif()
 
 # ============================================================
@@ -243,6 +264,17 @@ add_executable(convert_old_echo_to_new_format
   src/xml/tinyxmlparser.cpp
 )
 
+add_executable(generate_target_profile_echo
+  src/tools/generate_target_profile_echo.cpp
+  src/trig_lut.cpp
+  src/trig_lut_host_only.cpp
+  src/pulseCompression.cpp
+  src/xml/tinystr.cpp
+  src/xml/tinyxml.cpp
+  src/xml/tinyxmlerror.cpp
+  src/xml/tinyxmlparser.cpp
+)
+
 add_executable(GMTI_pipe_core
   ${GMTI_PIPE_ONLY_SRC}
   ${COMMON_CORE_SRC}
@@ -252,6 +284,13 @@ add_executable(GMTI_pipe_core
 add_executable(track_assignment_selftest
   tests/track_assignment_selftest.cpp
   src/TrackManager.cpp
+  src/trig_lut.cpp
+  src/trig_lut_host_only.cpp
+)
+
+add_executable(range_compression_window_selftest
+  tests/range_compression_window_selftest.cpp
+  src/pulseCompression.cpp
   src/trig_lut.cpp
   src/trig_lut_host_only.cpp
 )
@@ -429,4 +468,7 @@ target_include_directories(GMTI_pipe_core PRIVATE
 )
 
 configure_non_cuda_tool(convert_old_echo_to_new_format)
+configure_non_cuda_tool(generate_target_profile_echo)
+target_link_libraries(generate_target_profile_echo PRIVATE ${FFTW3F_TARGET})
 configure_non_cuda_tool(track_assignment_selftest)
+configure_non_cuda_tool(range_compression_window_selftest)

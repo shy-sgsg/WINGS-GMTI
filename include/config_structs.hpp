@@ -41,6 +41,8 @@ struct Config {
     int read_pulse_offset = -1; // 新协议读取起始偏移，<0 表示居中读取
     int process_pulse_num = 0;  // 当前处理矩阵脉冲数，<=0 表示使用 pulse_num
     int range_compress_len = 0; // 脉压/抽取后距离点数，>0 时覆盖 rg_len
+    int range_fft_len = 0;      // 距离脉压 FFT 长度，<=0 表示使用 pulse_len
+    int range_crop_start = 0;   // 距离脉压 IFFT 后截取起点，0-based
     int pulse_dec;              // 脉冲压缩比例
     double fc;                  // 中心频率（GHz）
     double Br;                  // 带宽（MHz）
@@ -167,6 +169,22 @@ inline int effectivePulseNum(const Config& cfg)
         return cfg.read_pulse_num;
     }
     return cfg.pulse_num;
+}
+
+inline int effectiveRangeFftLen(const Config& cfg)
+{
+    return cfg.range_fft_len > 0 ? cfg.range_fft_len : cfg.pulse_len;
+}
+
+inline int effectiveRangeCompressLen(const Config& cfg)
+{
+    return cfg.range_compress_len > 0 ? cfg.range_compress_len : cfg.rg_len;
+}
+
+inline bool usesRangeCropWindow(const Config& cfg)
+{
+    return effectiveRangeFftLen(cfg) != cfg.pulse_len ||
+           cfg.range_crop_start != 0;
 }
 
 // 定义结构体用于存储输出数据

@@ -284,6 +284,26 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     cfg.pulse_num = parseRequiredInt("pulse_num");
     cfg.read_pulse_num = parseOptionalInt("read_pulse_num", cfg.read_pulse_num);
     cfg.read_pulse_offset = parseOptionalInt("read_pulse_offset", cfg.read_pulse_offset);
+    cfg.range_fft_len = parseOptionalInt("range_fft_len", cfg.range_fft_len);
+    cfg.range_crop_start = parseOptionalInt("range_crop_start", cfg.range_crop_start);
+    cfg.range_compress_len =
+        parseOptionalInt("range_compress_len", cfg.range_compress_len);
+    if (cfg.range_fft_len <= 0) {
+        cfg.range_fft_len = cfg.pulse_len;
+    }
+    if (cfg.range_compress_len <= 0) {
+        cfg.range_compress_len = cfg.rg_len;
+    }
+    if (cfg.range_fft_len < cfg.pulse_len) {
+        throw std::runtime_error(
+            "field <range_fft_len> must be >= <pulse_len>");
+    }
+    if (cfg.range_crop_start < 0 ||
+        cfg.range_crop_start + cfg.range_compress_len > cfg.range_fft_len) {
+        throw std::runtime_error(
+            "fields <range_crop_start> + <range_compress_len> exceed <range_fft_len>");
+    }
+    cfg.rg_len = cfg.range_compress_len;
     cfg.pulse_dec = parseRequiredInt("pulse_dec");
     cfg.fc = parseRequiredDouble("fc") * 1e9;  // 转换为赫兹
     cfg.Br = parseRequiredDouble("Br") * 1e6;  // 转换为赫兹

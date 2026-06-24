@@ -1,14 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <GMTI>
     <GMTI_parameter>
-        <GMTI_data>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID13_8H13M_GMTI0</GMTI_data>
-        <GMTI_data2>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID13_8H13M_GMTI1</GMTI_data2>
-        <result_add>/home/shy/AIR/小长/GMTI_Data/Mission068/result_final</result_add>
-        <Plane_POS>/home/shy/AIR/小长/GMTI_Data/Mission068/RTIPOS/RTIPOS_ID13.out</Plane_POS>
+        <!--
+          本文件供 GMTI_core/GMTI_pipe_core 读取已经生成的 61 波位新协议文件。
+          造数时仍使用 temp_config.xml 描述老格式源文件，并把输出路径显式指定为下方 GMTI_data_new。
+          GMTI 主流程在 INFO_Type=1 时实际读取 GMTI_data_new。
+        -->
+        <GMTI_data>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID19_8H19M_GMTI0</GMTI_data>
+        <GMTI_data2>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID19_8H19M_GMTI1</GMTI_data2>
+        <result_add>/home/shy/AIR/小长/GMTI_Data/Mission068/result_61beam</result_add>
+        <Plane_POS>/home/shy/AIR/小长/GMTI_Data/Mission068/RTIPOS/RTIPOS_ID19.out</Plane_POS>
         <reffunc_add>/home/shy/AIR/小长/GMTI_Data/Mission068/RefFun_Br50MHz_Tr38us_Len4096.dat</reffunc_add>
         <isSeparated>separate</isSeparated>
         <INFO_Type>1</INFO_Type>
-        <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/M68ID13.bin</GMTI_data_new>
+        <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/gmti_data_13.dat</GMTI_data_new>
         <pipe_root_path>/home/raco</pipe_root_path>
         <estimate_error_angle>0</estimate_error_angle>
         <wavepos_parallel>1</wavepos_parallel>
@@ -16,57 +21,71 @@
         <iq_compose>I+jQ</iq_compose>
         <isPC>0</isPC>
         <hasRefFunc>0</hasRefFunc>
+
+        <!-- 新协议：每个 PRT 为 256 字节头 + 11820 点双通道复数 float32。 -->
         <info_len>256</info_len>
-        <pulse_len>4096</pulse_len>
+        <pulse_len>11820</pulse_len>
         <rg_len>4096</rg_len>
-        <pulse_num>256</pulse_num>
-        <read_pulse_num>256</read_pulse_num>
-        <read_pulse_offset>-1</read_pulse_offset>
+        <!-- 11820 点输入尾部补零至 12288，IFFT 后从 0-based 3864 截取 4096 点。 -->
+        <range_fft_len>12288</range_fft_len>
+        <range_crop_start>3864</range_crop_start>
+        <range_compress_len>4096</range_compress_len>
+
+        <!-- 每个波位存储 130 个 PRT；从偏移 1 开始读取中间 128 个用于方位 FFT。 -->
+        <pulse_num>130</pulse_num>
+        <read_pulse_num>128</read_pulse_num>
+        <read_pulse_offset>1</read_pulse_offset>
         <pulse_dec>1</pulse_dec>
+
         <fc>17</fc>
         <Br>50</Br>
-        <fs>75</fs>
+        <!-- 4096 点原始采样经 3 倍 FFT 插值后，等效距离采样率为 225 MHz。 -->
+        <fs>225</fs>
         <Tr>38</Tr>
-        <PRF>2000</PRF>
+        <PRF>1300</PRF>
         <Rmin>13950</Rmin>
         <d_chan>0.17</d_chan>
         <ref_lon>117</ref_lon>
         <ref_H>20</ref_H>
         <pf>1e-6</pf>
         <secBias>18</secBias>
-        <skip_pulses>256</skip_pulses>
+
+        <!-- 造数文件已经是完整的 61 波位目标文件，不再跳过源脉冲。 -->
+        <skip_pulses>0</skip_pulses>
         <wavepos_use_roi>false</wavepos_use_roi>
         <roi_lat1>40.45121057</roi_lat1>
         <roi_lng1>116.98377429</roi_lng1>
         <roi_Ry1>400</roi_Ry1>
         <roi_Rx1>400</roi_Rx1>
+
         <wavepos_st>1</wavepos_st>
-        <wavepos_ed>25</wavepos_ed>
+        <wavepos_ed>61</wavepos_ed>
         <wavepos_skip>1</wavepos_skip>
-        <scan_min_deg>-25</scan_min_deg>
-        <scan_max_deg>25</scan_max_deg>
+        <scan_min_deg>-59</scan_min_deg>
+        <scan_max_deg>61</scan_max_deg>
         <min_points>10</min_points>
         <min_len>1</min_len>
         <rg_st>1</rg_st>
         <rg_ed>4095</rg_ed>
         <calib_coef>1.0</calib_coef>
         <squint_side>1</squint_side>
-        <az_count>25</az_count>
-        <boshu>6</boshu>
-        <loc_beam_gate_deg>6</loc_beam_gate_deg>
-        <max_theta>30</max_theta>
-        <period_first>8</period_first>
-        <period_num>1</period_num>
+        <az_count>61</az_count>
+        <boshu>2</boshu>
+        <loc_beam_gate_deg>2</loc_beam_gate_deg>
+        <max_theta>60</max_theta>
+        <period_first>1</period_first>
+        <period_num>61</period_num>
         <n_tiaoguo>1</n_tiaoguo>
         <raw_fenbianlv>8</raw_fenbianlv>
         <len_tiaoguo>200</len_tiaoguo>
-        <dbs_max_mosaic_pixels>300000000</dbs_max_mosaic_pixels>
+        <dbs_max_mosaic_pixels>100000000</dbs_max_mosaic_pixels>
         <week_offset>0</week_offset>
-        <squint_angle>-2.9363293647766113</squint_angle>
+        <squint_angle>0</squint_angle>
         <lat_st>2</lat_st>
         <lat_ed>2</lat_ed>
         <lon_st>2</lon_st>
         <lon_ed>2</lon_ed>
+
         <track_idx_window>3</track_idx_window>
         <track_truth_threshold>2</track_truth_threshold>
         <track_confirm_window>3</track_confirm_window>

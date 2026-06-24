@@ -39,8 +39,8 @@ bool parseTrigModeArg(const std::string& arg, const char* next, bool& consumedNe
 bool deriveRuntimeConfig(Config &cfg)
 {
     if (cfg.INFO_Type) {
-        // 新协议：每个 PRT 256 字节头 + 4096 个采样点，每点双通道 complex float32。
-        cfg.pkg_bytes = 256 + 4096 * 16;
+        // 新协议：每个 PRT 256 字节头，距离点数由 pulse_len 配置。
+        cfg.pkg_bytes = cfg.info_len + cfg.pulse_len * 16;
     } else if (cfg.channel_mode == "separate") {
         // 旧协议：双文件单通道，每脉冲为包头 + (I,Q)*float32。
         cfg.pkg_bytes = cfg.info_len + cfg.pulse_len * 2 * 4;

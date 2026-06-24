@@ -173,8 +173,8 @@ bool GMTIProcessor::initcuFFTPlans(const Config &cfg) {
     // 使用 size_t 避免 32位 溢出
     size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     size_t Nr = static_cast<size_t>(cfg.rg_len);
-    size_t rawNr = static_cast<size_t>(std::max(cfg.pulse_len, cfg.rg_len));
-    size_t total = Na * Nr;
+    size_t rawNr = static_cast<size_t>(
+        std::max(effectiveRangeFftLen(cfg), cfg.rg_len));
     size_t rawTotal = Na * rawNr;
     
     // 显存中每个复数占 8 字节 (float2)

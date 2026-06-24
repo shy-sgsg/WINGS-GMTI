@@ -65,14 +65,14 @@ bool readPulseBlockNewProtocol(const Config &cfg,
                                std::vector<std::vector<double>> &posRaw)
 {
     constexpr size_t kHeaderBytes = 256;
-    constexpr size_t kSamplesPerPrt = 4096;
     constexpr size_t kBytesPerSample = 16; // ch1(I,Q) float32 + ch2(I,Q) float32
-    constexpr size_t kPrtBytes = kHeaderBytes + kSamplesPerPrt * kBytesPerSample;
-
-    if (cfg.pulse_len != static_cast<int>(kSamplesPerPrt)) {
-        std::cerr << "[ERR] 新协议要求 pulse_len=4096，当前 pulse_len=" << cfg.pulse_len << std::endl;
+    if (cfg.pulse_len <= 0) {
+        std::cerr << "[ERR] 新协议 pulse_len 非法: " << cfg.pulse_len << std::endl;
         return false;
     }
+    const size_t samples_per_prt = static_cast<size_t>(cfg.pulse_len);
+    const size_t prt_bytes =
+        kHeaderBytes + samples_per_prt * kBytesPerSample;
 
     if (cfg.pulse_num <= 0) {
         std::cerr << "[ERR] 新协议 pulse_num 非法: pulse_num=" << cfg.pulse_num << std::endl;
@@ -111,12 +111,13 @@ bool readPulseBlockNewProtocol(const Config &cfg,
 
     fp.seekg(0, std::ios::end);
     const std::streamsize file_size = fp.tellg();
-    if (file_size <= 0 || (static_cast<uint64_t>(file_size) % kPrtBytes) != 0U) {
+    if (file_size <= 0 || (static_cast<uint64_t>(file_size) % prt_bytes) != 0U) {
         std::cerr << "[ERR] 新协议回波文件大小非法，不是完整 PRT 包整数倍: " << echoPath << std::endl;
         return false;
     }
 
-    const size_t total_prt = static_cast<size_t>(static_cast<uint64_t>(file_size) / kPrtBytes);
+    const size_t total_prt =
+        static_cast<size_t>(static_cast<uint64_t>(file_size) / prt_bytes);
     const size_t period_start_with_skip = (static_cast<size_t>(beamskip) - 1) * period_pulses + static_cast<size_t>(cfg.skip_az_num);
     const size_t period_start_without_skip = (static_cast<size_t>(beamskip) - 1) * period_pulses;
 
@@ -136,24 +137,26 @@ bool readPulseBlockNewProtocol(const Config &cfg,
         }
     }
 
-    const size_t start_byte = start_prt * kPrtBytes;
-    if (static_cast<uint64_t>(file_size) < start_byte + read_pulses * kPrtBytes) {
+    const size_t start_byte = start_prt * prt_bytes;
+    if (static_cast<uint64_t>(file_size) <
+        start_byte + read_pulses * prt_bytes) {
         std::cerr << "[ERR] 新协议回波文件大小不足，无法读取 period=" << beamskip << std::endl;
         return false;
     }
     fp.seekg(static_cast<std::streamoff>(start_byte), std::ios::beg);
 
-    data1.resize(read_pulses * kSamplesPerPrt);
-    data2.resize(read_pulses * kSamplesPerPrt);
+    data1.resize(read_pulses * samples_per_prt);
+    data2.resize(read_pulses * samples_per_prt);
     utc.resize(read_pulses);
     posRaw.assign(read_pulses, std::vector<double>(7, 0.0));
 
-    std::vector<uint8_t> packet(kPrtBytes);
+    std::vector<uint8_t> packet(prt_bytes);
     std::vector<double> fw_angle_deg(read_pulses, 0.0);
 
     for (size_t k = 0; k < read_pulses; ++k) {
-        fp.read(reinterpret_cast<char *>(packet.data()), static_cast<std::streamsize>(kPrtBytes));
-        if (fp.gcount() != static_cast<std::streamsize>(kPrtBytes)) {
+        fp.read(reinterpret_cast<char *>(packet.data()),
+                static_cast<std::streamsize>(prt_bytes));
+        if (fp.gcount() != static_cast<std::streamsize>(prt_bytes)) {
             std::cerr << "[ERR] 读取新协议 PRT 失败, period=" << beamskip << " pulse=" << k << std::endl;
             return false;
         }
@@ -170,14 +173,16 @@ bool readPulseBlockNewProtocol(const Config &cfg,
         fw_angle_deg[k] = static_cast<double>(load_i16_le(hdr + 218)) / 100.0;
 
         const uint8_t *payload = hdr + kHeaderBytes;
-        for (size_t n = 0; n < kSamplesPerPrt; ++n) {
+        for (size_t n = 0; n < samples_per_prt; ++n) {
             const size_t off = n * kBytesPerSample;
             const float ch1_i = load_f32_le(payload + off + 0);
             const float ch1_q = load_f32_le(payload + off + 4);
             const float ch2_i = load_f32_le(payload + off + 8);
             const float ch2_q = load_f32_le(payload + off + 12);
-            data1[k * kSamplesPerPrt + n] = std::complex<float>(ch1_i, ch1_q);
-            data2[k * kSamplesPerPrt + n] = std::complex<float>(ch2_i, ch2_q);
+            data1[k * samples_per_prt + n] =
+                std::complex<float>(ch1_i, ch1_q);
+            data2[k * samples_per_prt + n] =
+                std::complex<float>(ch2_i, ch2_q);
         }
     }
 

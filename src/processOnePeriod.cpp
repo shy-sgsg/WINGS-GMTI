@@ -427,7 +427,9 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     }
 
     // 脉压完成后再更新采样率，避免影响 rangeCompressFFT / cuFFT 的匹配滤波器构造
-    cfg.fs = cfg.fs * cfg.rg_len / cfg.pulse_len;
+    if (!usesRangeCropWindow(cfg)) {
+        cfg.fs = cfg.fs * cfg.rg_len / cfg.pulse_len;
+    }
     cfg.pulse_len = cfg.rg_len; // 更新脉冲长度为距离采样长度
     // 通用方位向抽取：cfg.pulse_dec 合 1 抽取
     if (!data_on_gpu &&
@@ -1056,7 +1058,9 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
         data2.swap(rc_out);
     }
 
-    cfg.fs = cfg.fs * cfg.rg_len / cfg.pulse_len;
+    if (!usesRangeCropWindow(cfg)) {
+        cfg.fs = cfg.fs * cfg.rg_len / cfg.pulse_len;
+    }
     cfg.pulse_len = cfg.rg_len;
 
     const int W_orig = effectivePulseNum(cfg);
@@ -1526,15 +1530,42 @@ bool GMTIProcessor::extractPlanePos(const std::vector<double> &t_utc,
     plane.E = mean(E);
     plane.N = mean(N);
 
-    // 6) 速度估计（与 MATLAB 一致：Δ/脉冲数 * PRF）
-    //   注：若 t_utc 非等间隔，用下行替代：
-    //   const double dt = (t_utc.back() - t_utc.front()); // 秒
-    //   plane.Vx = (E.back() - E.front()) / dt; ...
-    const int W = effectivePulseNum(cfg);
-    const double scale = (W > 0) ? (cfg.PRF / double(W)) : 0.0;
-    double Vx = (E.back() - E.front()) * scale;
-    double Vy = (N.back() - N.front()) * scale;
-    double Vz = (alt_m.back() - alt_m.front()) * scale;
+    // 6) 速度估计
+    // 新协议包头已经携带 vn/ve/vd，优先直接使用，避免 float32 UTC
+    // 分辨率或 POS 时间范围钳制造成首末位置相同、反推速度为 0。
+    // POS 列定义为 [utc, lat, lon, alt, vn, ve, vd]，而投影坐标
+    // Vx/Vy 分别对应 east/north，因此 Vx=ve, Vy=vn, Vz=-vd。
+    double Vx = 0.0;
+    double Vy = 0.0;
+    double Vz = 0.0;
+    if (cfg.INFO_Type &&
+        std::all_of(POS.begin(), POS.end(),
+                    [](const std::vector<double> &row) {
+                        return row.size() >= 7 &&
+                               std::isfinite(row[4]) &&
+                               std::isfinite(row[5]) &&
+                               std::isfinite(row[6]);
+                    })) {
+        double sum_vn = 0.0;
+        double sum_ve = 0.0;
+        double sum_vd = 0.0;
+        for (const auto &row : POS) {
+            sum_vn += row[4];
+            sum_ve += row[5];
+            sum_vd += row[6];
+        }
+        const double inv_count = 1.0 / static_cast<double>(POS.size());
+        Vx = sum_ve * inv_count;
+        Vy = sum_vn * inv_count;
+        Vz = -sum_vd * inv_count;
+    } else {
+        // 旧协议保持原算法：首末位置差 / 波位时长。
+        const int W = effectivePulseNum(cfg);
+        const double scale = (W > 0) ? (cfg.PRF / double(W)) : 0.0;
+        Vx = (E.back() - E.front()) * scale;
+        Vy = (N.back() - N.front()) * scale;
+        Vz = (alt_m.back() - alt_m.front()) * scale;
+    }
 
     plane.V = std::sqrt(Vx * Vx + Vy * Vy + Vz * Vz);
     plane.V_angle = gmti::trig_lut::atan2(Vy, Vx) * 180.0 / M_PI; // 东北平面速度方向角(°)
@@ -1639,7 +1670,10 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
         }
 
         // After range compression/extraction, update sampling parameters like processOnePeriod does
-        local_cfg.fs = local_cfg.fs * local_cfg.rg_len / local_cfg.pulse_len;
+        if (!usesRangeCropWindow(local_cfg)) {
+            local_cfg.fs =
+                local_cfg.fs * local_cfg.rg_len / local_cfg.pulse_len;
+        }
         local_cfg.pulse_len = local_cfg.rg_len;
 
         // Apply azimuth decimation (pulse_dec) same as processOnePeriod

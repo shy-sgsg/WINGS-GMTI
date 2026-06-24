@@ -69,7 +69,7 @@ buildHfSpecFromRefFunc(const Config &P){
 inline std::vector<std::complex<double>>
 buildHfSpecFromParams(const Config& P)
 {
-    const int    N   = P.pulse_len;
+    const int    N   = effectiveRangeFftLen(P);
     const double fs  = P.fs;
     const double Kr  = (P.Tr > 0.0) ? (P.Br / P.Tr) : 0.0;
     return buildHfSpec(N, fs, Kr);
@@ -81,7 +81,14 @@ bool rangeCompressFFT(const Config& P,
 {
   const int W    = effectivePulseNum(P);
   const int Lraw = P.pulse_len;
-  const int M    = P.rg_len;
+  const int Nfft = effectiveRangeFftLen(P);
+  const int M    = effectiveRangeCompressLen(P);
+  const int crop = P.range_crop_start;
+  const bool crop_window = usesRangeCropWindow(P);
+  if (W <= 0 || Lraw <= 0 || Nfft < Lraw || M <= 0 ||
+      crop < 0 || crop + M > Nfft) {
+    return false;
+  }
 
   std::vector<std::complex<double>> HfSpec;
   if(P.hasRefFunc){
@@ -90,10 +97,11 @@ bool rangeCompressFFT(const Config& P,
   else{
     HfSpec = buildHfSpecFromParams(P);
   }
-  if ((int)HfSpec.size() != Lraw) return false;
+  if ((int)HfSpec.size() != Nfft) return false;
 
-  // 准备 FFTW 缓冲：W×Lraw（行主）
-  fftw_complex* buf = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (size_t)W * Lraw);
+  // W×Nfft 行主缓冲；每行前 Lraw 点放输入，尾部补零。
+  fftw_complex* buf = (fftw_complex*) fftw_malloc(
+      sizeof(fftw_complex) * (size_t)W * Nfft);
   if (!buf) return false;
 
   // FFTW planner 不是线程安全的：并发 period 时先串行创建/销毁 plan
@@ -103,9 +111,9 @@ bool rangeCompressFFT(const Config& P,
   {
     std::lock_guard<std::mutex> lock(fftw_plan_mutex);
 
-    // plan_many：沿 Lraw 做 FFT（每行一个 FFT），howmany=W
-    int rank=1, n[1]={Lraw}, howmany=W;
-    int istride=1, ostride=1, idist=Lraw, odist=Lraw;
+    // plan_many：沿 Nfft 做 FFT（每行一个 FFT），howmany=W
+    int rank=1, n[1]={Nfft}, howmany=W;
+    int istride=1, ostride=1, idist=Nfft, odist=Nfft;
     int* inembed=n; int* onembed=n;
 
     fwd = fftw_plan_many_dft(rank, n, howmany, buf, inembed, istride, idist,
@@ -118,10 +126,11 @@ bool rangeCompressFFT(const Config& P,
     if (!inv) { fftw_destroy_plan(fwd); fftw_free(buf); return false; }
   }
 
-  // 拷贝输入到 buf
+  std::memset(buf, 0, sizeof(fftw_complex) * (size_t)W * Nfft);
+  // 拷贝输入到每个 Nfft 行的前 Lraw 点，剩余点保持为零。
   for (int k = 0; k < W; ++k) {
     const std::complex<double>* src = &in[(size_t)k * Lraw];
-    fftw_complex* dst = &buf[(size_t)k * Lraw];
+    fftw_complex* dst = &buf[(size_t)k * Nfft];
     std::memcpy(dst, src, sizeof(std::complex<double>) * (size_t)Lraw);
   }
 
@@ -130,8 +139,8 @@ bool rangeCompressFFT(const Config& P,
 
   // 频域乘以 conj(HfSpec)
   for (int k = 0; k < W; ++k) {
-    fftw_complex* row = &buf[(size_t)k * Lraw];
-    for (int f = 0; f < Lraw; ++f) {
+    fftw_complex* row = &buf[(size_t)k * Nfft];
+    for (int f = 0; f < Nfft; ++f) {
       std::complex<double>& X = *reinterpret_cast<std::complex<double>*>(&row[f]);
       X *= HfSpec[(size_t)f];
     }
@@ -140,15 +149,16 @@ bool rangeCompressFFT(const Config& P,
   // 逆向 FFT
   fftw_execute(inv);
 
-  // 归一化 + 裁剪到 M，输出到 rc_out（W×M 行主）
-  const int Lraw2M = Lraw / M;
+  // 按 XML 指定的 0-based 起点连续截取 M 点。
   rc_out.resize((size_t)W * M);
-  const double scale = 1.0 / double(Lraw);
+  const double scale = 1.0 / double(Nfft);
   for (int k = 0; k < W; ++k) {
-    const fftw_complex* row = &buf[(size_t)k * Lraw];
+    const fftw_complex* row = &buf[(size_t)k * Nfft];
     for (int m = 0; m < M; ++m) {
+      const int src_index =
+          crop_window ? (crop + m) : (m * Nfft / M);
       rc_out[(size_t)k * M + m] =
-        (*reinterpret_cast<const std::complex<double>*>(&row[m * Lraw2M])) * scale;
+        (*reinterpret_cast<const std::complex<double>*>(&row[src_index])) * scale;
     }
   }
 

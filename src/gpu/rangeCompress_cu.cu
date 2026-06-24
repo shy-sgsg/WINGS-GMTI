@@ -31,20 +31,24 @@ bool GMTIProcessor::rangeCompressCUFFT(const std::vector<std::complex<float>> &i
 {
     const int W = effectivePulseNum(cfg);
     const int Lraw = cfg.pulse_len;
-    const int M = cfg.rg_len;
-    if (W <= 0 || Lraw <= 0 || M <= 0) return false;
+    const int Nfft = effectiveRangeFftLen(cfg);
+    const int M = effectiveRangeCompressLen(cfg);
+    const int crop = cfg.range_crop_start;
+    const bool crop_window = usesRangeCropWindow(cfg);
+    if (W <= 0 || Lraw <= 0 || Nfft < Lraw || M <= 0 ||
+        crop < 0 || crop + M > Nfft) return false;
 
-    const size_t total = (size_t)W * (size_t)Lraw;
+    const size_t total = (size_t)W * (size_t)Nfft;
 
     // build HfSpec (float) from params: HfSpec[n] = exp(j * pi * f(n)^2 / Kr)
     const double Kr = (cfg.Tr > 0.0) ? (cfg.Br / cfg.Tr) : 0.0;
     const double fs = cfg.fs;
-    std::vector<cuFloatComplex> h_buf(total);
-    std::vector<cuFloatComplex> h_Hf(Lraw);
+    std::vector<cuFloatComplex> h_buf(total, make_cuFloatComplex(0.0f, 0.0f));
+    std::vector<cuFloatComplex> h_Hf(Nfft);
     if (Kr == 0.0 || fs <= 0.0) return false;
-    const double df = fs / double(Lraw);
-    for (int n=0;n<Lraw;++n) {
-        double fn = (n <= (Lraw/2 - 1)) ? n*df : (n - Lraw)*df;
+    const double df = fs / double(Nfft);
+    for (int n=0;n<Nfft;++n) {
+        double fn = (n <= (Nfft/2 - 1)) ? n*df : (n - Nfft)*df;
         double phase = M_PI * (fn*fn) / Kr;
         float re = (float)gmti::trig_lut::cos(phase);
         float im = (float)gmti::trig_lut::sin(phase);
@@ -53,7 +57,7 @@ bool GMTIProcessor::rangeCompressCUFFT(const std::vector<std::complex<float>> &i
     for (int k=0;k<W;++k) {
         for (int n=0;n<Lraw;++n) {
             const auto &v = in[(size_t)k * Lraw + n];
-            h_buf[(size_t)k * Lraw + n] = make_cuFloatComplex(v.real(), v.imag());
+            h_buf[(size_t)k * Nfft + n] = make_cuFloatComplex(v.real(), v.imag());
         }
     }
 
@@ -62,18 +66,18 @@ bool GMTIProcessor::rangeCompressCUFFT(const std::vector<std::complex<float>> &i
     cudaError_t cerr;
     cerr = cudaMalloc((void**)&d_buf, total * sizeof(cuFloatComplex));
     if (cerr != cudaSuccess) { std::cerr<<"cudaMalloc d_buf failed"<<std::endl; return false; }
-    cerr = cudaMalloc((void**)&d_Hf, (size_t)Lraw * sizeof(cuFloatComplex));
+    cerr = cudaMalloc((void**)&d_Hf, (size_t)Nfft * sizeof(cuFloatComplex));
     if (cerr != cudaSuccess) { cudaFree(d_buf); std::cerr<<"cudaMalloc d_Hf failed"<<std::endl; return false; }
 
     cudaMemcpy(d_buf, h_buf.data(), total * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_Hf, h_Hf.data(), (size_t)Lraw * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Hf, h_Hf.data(), (size_t)Nfft * sizeof(cuFloatComplex), cudaMemcpyHostToDevice);
 
     // cufft plan: 1-D FFT length Lraw, howmany = W
     cufftHandle plan;
-    int n[1] = { Lraw };
+    int n[1] = { Nfft };
     int rank = 1;
-    int istride = 1, ostride = 1, idist = Lraw, odist = Lraw;
-    int inembed[1] = { Lraw }, onembed[1] = { Lraw };
+    int istride = 1, ostride = 1, idist = Nfft, odist = Nfft;
+    int inembed[1] = { Nfft }, onembed[1] = { Nfft };
     if (cufftPlanMany(&plan, rank, n, inembed, istride, idist, onembed, ostride, odist, CUFFT_C2C, W) != CUFFT_SUCCESS) {
         cudaFree(d_buf); cudaFree(d_Hf); std::cerr<<"cufftPlanMany failed"<<std::endl; return false;
     }
@@ -87,7 +91,7 @@ bool GMTIProcessor::rangeCompressCUFFT(const std::vector<std::complex<float>> &i
     // multiply by Hf (match CPU: X *= Hf[f])
     int threads = 256;
     int blocks = (total + threads - 1) / threads;
-    mul_Hf_kernel<<<blocks, threads, 0, stream_compute_>>>(d_buf, d_Hf, Lraw, W);
+    mul_Hf_kernel<<<blocks, threads, 0, stream_compute_>>>(d_buf, d_Hf, Nfft, W);
     cudaError_t err = cudaGetLastError(); if (err != cudaSuccess) { cufftDestroy(plan); cudaFree(d_buf); cudaFree(d_Hf); std::cerr<<"mul_Hf_kernel failed"<<std::endl; return false; }
 
     // inverse
@@ -102,11 +106,13 @@ bool GMTIProcessor::rangeCompressCUFFT(const std::vector<std::complex<float>> &i
 
     // scale and decimate to M
     rc_out.resize((size_t)W * M);
-    int Lraw2M = Lraw / M;
-    float scale = 1.0f / (float)Lraw;
+    float scale = 1.0f / (float)Nfft;
     for (int k=0;k<W;++k) {
         for (int m=0;m<M;++m) {
-            cuFloatComplex v = h_out[(size_t)k * Lraw + (size_t)m * Lraw2M];
+            const int src_index =
+                crop_window ? (crop + m) : (m * Nfft / M);
+            cuFloatComplex v =
+                h_out[(size_t)k * Nfft + (size_t)src_index];
             float re = v.x * scale;
             float im = v.y * scale;
             rc_out[(size_t)k * M + m] = std::complex<float>(re, im);

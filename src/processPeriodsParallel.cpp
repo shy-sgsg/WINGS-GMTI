@@ -199,6 +199,10 @@ bool GMTIProcessor::processPeriodsParallelFusion(const std::vector<int> &periodL
               << " read_pulse_num=" << cfg.read_pulse_num
               << " process_pulse_num=" << procPulseNum
               << " pulse_dec=" << cfg.pulse_dec
+              << " range_input_len=" << cfg.pulse_len
+              << " range_fft_len=" << effectiveRangeFftLen(cfg)
+              << " range_crop_start=" << cfg.range_crop_start
+              << " range_output_len=" << effectiveRangeCompressLen(cfg)
               << " rg_len=" << cfg.rg_len
               << " estimated_dbs_amp_cache~" << rdCacheGiB << "GiB" << std::endl;
 
