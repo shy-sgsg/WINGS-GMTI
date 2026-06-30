@@ -6,7 +6,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <iostream>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -114,7 +118,165 @@ static inline double location_beam_gate_deg(const Config &cfg)
     return std::max(0.0, cfg.beamwidth_deg * 0.5) + 0.5;
 }
 
+static std::vector<int> parse_debug_beam_env()
+{
+    std::vector<int> out;
+    const char *env = std::getenv("DBS_DEBUG_SINGLE_BEAMS");
+    if (!env || !*env) {
+        return out;
+    }
+    std::stringstream ss(env);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        try {
+            const int v = std::stoi(token);
+            if (v > 0) {
+                out.push_back(v);
+            }
+        } catch (const std::exception &) {
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+static bool debug_beam_matches(int requested,
+                               size_t slot,
+                               const FusionGroupContext &ctx)
+{
+    if (requested == static_cast<int>(slot) + 1) {
+        return true;
+    }
+    if (slot < ctx.periodList.size() && requested == ctx.periodList[slot]) {
+        return true;
+    }
+    if (slot < ctx.beam_meta.size() && requested == ctx.beam_meta[slot].beam_index) {
+        return true;
+    }
+    return false;
+}
+
+static void amplitude_stats(const Image2D<float> &img,
+                            size_t &valid,
+                            double &mean,
+                            double &p95,
+                            double &p99,
+                            double &maxv)
+{
+    valid = 0;
+    mean = 0.0;
+    p95 = 0.0;
+    p99 = 0.0;
+    maxv = 0.0;
+    std::vector<float> vals;
+    vals.reserve(img.buf.size());
+    for (float v : img.buf) {
+        const float a = std::fabs(v);
+        if (!(a > 0.0f) || !std::isfinite(a)) {
+            continue;
+        }
+        vals.push_back(a);
+        mean += a;
+        if (a > maxv) {
+            maxv = a;
+        }
+    }
+    valid = vals.size();
+    if (valid == 0) {
+        return;
+    }
+    mean /= static_cast<double>(valid);
+    auto percentile = [&](double q) -> double {
+        size_t idx = static_cast<size_t>(
+            std::min<double>(valid - 1, std::floor(q * static_cast<double>(valid - 1))));
+        std::nth_element(vals.begin(), vals.begin() + static_cast<std::ptrdiff_t>(idx),
+                         vals.end());
+        return vals[idx];
+    };
+    p95 = percentile(0.95);
+    p99 = percentile(0.99);
+}
+
+static void log_dbs_diagnostics(const FusionGroupContext &ctx,
+                                const Config &cfg,
+                                const Grid *grid,
+                                const Bounds *bounds)
+{
+    if (bounds && grid) {
+        const size_t nx = grid->x.size();
+        const size_t ny = grid->y.size();
+        std::cout << "[fusion][dbs][diag][grid]"
+                  << " boundsX=[" << bounds->minX << "," << bounds->maxX << "]"
+                  << " boundsY=[" << bounds->minY << "," << bounds->maxY << "]"
+                  << " nx=" << nx
+                  << " ny=" << ny
+                  << " dx=" << grid->dx
+                  << " dy=" << grid->dy
+                  << " pixels=" << (nx * ny)
+                  << " max_pixels=" << cfg.dbs_max_mosaic_pixels
+                  << std::endl;
+    }
+
+    const size_t n = ctx.meta.beams.size();
+    std::cout << "[fusion][dbs][diag] beams=" << n
+              << " loc_beam_gate_deg=" << location_beam_gate_deg(cfg)
+              << " dbs_interp_mode=" << cfg.dbs_interp_mode
+              << " dbs_beam_skip=" << cfg.dbs_beam_skip
+              << " dbs_range_skip=" << cfg.dbs_range_skip
+              << std::endl;
+    for (size_t i = 0; i < n; ++i) {
+        const MetaPerBeam &bm = ctx.meta.beams[i];
+        const FusionBeamMeta *fm =
+            (i < ctx.beam_meta.size()) ? &ctx.beam_meta[i] : nullptr;
+        const std::vector<float> *fdv =
+            (i < ctx.rd.fd_axis.size()) ? &ctx.rd.fd_axis[i] : nullptr;
+        const float fd_first = (fdv && !fdv->empty()) ? fdv->front() : 0.0f;
+        const float fd_mid = (fdv && !fdv->empty()) ? (*fdv)[fdv->size() / 2] : 0.0f;
+        const float fd_last = (fdv && !fdv->empty()) ? fdv->back() : 0.0f;
+        size_t valid = 0;
+        double mean = 0.0, p95 = 0.0, p99 = 0.0, maxv = 0.0;
+        if (i < ctx.rd.amp.size()) {
+            amplitude_stats(ctx.rd.amp[i], valid, mean, p95, p99, maxv);
+        }
+        std::cout << "[fusion][dbs][diag][beam]"
+                  << " slot=" << (i + 1)
+                  << " period=" << (i < ctx.periodList.size() ? ctx.periodList[i] : -1)
+                  << " beam_index=" << (fm ? fm->beam_index : -1)
+                  << " angle_deg=" << bm.angle_deg
+                  << " theta_sq=" << (fm ? fm->theta_sq : 0.0)
+                  << " theta_true=" << (fm ? fm->theta_true : bm.angle_deg)
+                  << " beam_pointing_bias=" << (fm ? fm->beam_pointing_bias_deg : 0.0)
+                  << " fd_ctr_wrapped=" << (fm ? fm->fd_ctr_wrapped : 0.0)
+                  << " fd_ctr_unwrapped=" << (fm ? fm->fd_ctr_unwrapped : bm.fd_ctr)
+                  << " unwrap_k=" << (fm ? fm->prf_ambiguity_k : 0)
+                  << " meta_fd_ctr=" << bm.fd_ctr
+                  << " fd_axis[first,mid,last]=" << fd_first << ","
+                  << fd_mid << "," << fd_last
+                  << " amp_valid=" << valid
+                  << " amp_mean=" << mean
+                  << " amp_p95=" << p95
+                  << " amp_p99=" << p99
+                  << " amp_max=" << maxv
+                  << std::endl;
+    }
+}
+
 } // namespace
+
+bool fusionSlotHasSignal(const FusionGroupContext &ctx, size_t slot)
+{
+    if (slot >= ctx.rd.amp.size() || ctx.rd.amp[slot].empty()) {
+        return false;
+    }
+    const Image2D<float> &amp = ctx.rd.amp[slot];
+    for (float v : amp.buf) {
+        if (std::isfinite(v) && std::fabs(v) > 0.0f) {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool estimateBeamPointingBiasByCenterBeams(const std::vector<int> &periodList,
                                            const std::vector<FusionBeamMeta> &beamMeta,
@@ -363,23 +525,92 @@ bool runDbsFusionImaging(const FusionGroupContext &ctx,
     DbsStitcher stitcher;
     stitcher.setLonRef(cfg.L0);
 
+    FusionGroupContext activeCtx;
+    for (size_t slot = 0; slot < ctx.meta.beams.size(); ++slot) {
+        if (!fusionSlotHasSignal(ctx, slot)) {
+            continue;
+        }
+        activeCtx.periodList.push_back(slot < ctx.periodList.size()
+                                           ? ctx.periodList[slot]
+                                           : static_cast<int>(slot + 1));
+        activeCtx.rd.amp.push_back(ctx.rd.amp[slot]);
+        activeCtx.rd.fd_axis.push_back(ctx.rd.fd_axis[slot]);
+        activeCtx.rd.rg_axis.push_back(ctx.rd.rg_axis[slot]);
+        activeCtx.meta.beams.push_back(ctx.meta.beams[slot]);
+        if (slot < ctx.beam_meta.size()) {
+            activeCtx.beam_meta.push_back(ctx.beam_meta[slot]);
+        }
+        if (slot < ctx.detections.size()) {
+            activeCtx.detections.push_back(ctx.detections[slot]);
+        }
+        if (slot < ctx.done.size()) {
+            activeCtx.done.push_back(ctx.done[slot]);
+        }
+    }
+    activeCtx.rd.nEff = ctx.rd.nEff;
+    if (activeCtx.meta.beams.empty()) {
+        std::cerr << "[fusion][dbs] no active nonzero beam after zero-fill filtering" << std::endl;
+        return false;
+    }
+    std::cout << "[fusion][dbs] active nonzero beams for mosaic:";
+    for (int p : activeCtx.periodList) {
+        std::cout << ' ' << p;
+    }
+    std::cout << " (" << activeCtx.meta.beams.size() << " / "
+              << ctx.meta.beams.size() << ")" << std::endl;
+
     Bounds bounds;
     Grid grid;
-    if (!stitcher.estimateMosaicExtent(cfg, ctx.rd, ctx.meta, bounds, grid)) {
+    if (!stitcher.estimateMosaicExtent(cfg, activeCtx.rd, activeCtx.meta, bounds, grid)) {
         std::cerr << "[fusion][dbs] estimateMosaicExtent failed" << std::endl;
         return false;
     }
+    log_dbs_diagnostics(ctx, cfg, nullptr, nullptr);
+    log_dbs_diagnostics(activeCtx, cfg, &grid, &bounds);
 
     Mosaic mosaic;
     const bool built = useGpu
-        ? stitcher.buildMosaicGPU(cfg, ctx.rd, ctx.meta, grid, mosaic, false)
-        : stitcher.buildMosaic(cfg, ctx.rd, ctx.meta, grid, mosaic);
+        ? stitcher.buildMosaicGPU(cfg, activeCtx.rd, activeCtx.meta, grid, mosaic, false)
+        : stitcher.buildMosaic(cfg, activeCtx.rd, activeCtx.meta, grid, mosaic);
     if (!built) {
         std::cerr << "[fusion][dbs] buildMosaic failed" << std::endl;
         return false;
     }
 
-    if (!stitcher.writeProducts(cfg, grid, mosaic, bounds)) {
+    const std::vector<int> debugSingleBeams = parse_debug_beam_env();
+    for (int requestedBeam : debugSingleBeams) {
+        for (size_t slot = 0; slot < activeCtx.meta.beams.size(); ++slot) {
+            if (!debug_beam_matches(requestedBeam, slot, activeCtx)) {
+                continue;
+            }
+            RDData oneRd;
+            oneRd.nEff = activeCtx.rd.nEff;
+            oneRd.amp.push_back(activeCtx.rd.amp[slot]);
+            oneRd.fd_axis.push_back(activeCtx.rd.fd_axis[slot]);
+            oneRd.rg_axis.push_back(activeCtx.rd.rg_axis[slot]);
+            MetaPack oneMeta;
+            oneMeta.beams.push_back(activeCtx.meta.beams[slot]);
+            Mosaic singleMosaic;
+            if (!stitcher.buildMosaic(cfg, oneRd, oneMeta, grid, singleMosaic)) {
+                std::cerr << "[fusion][dbs][debug] single-beam mosaic failed for requested beam "
+                          << requestedBeam << " slot=" << (slot + 1) << std::endl;
+                continue;
+            }
+            const int period = slot < activeCtx.periodList.size()
+                                   ? activeCtx.periodList[slot]
+                                   : requestedBeam;
+            char name[128];
+            std::snprintf(name, sizeof(name),
+                          "DBS_debug_beam%d_slot%zu_period%d_on_current_grid.png",
+                          requestedBeam, slot + 1, period);
+            if (!stitcher.writeDebugMosaicImage(cfg, singleMosaic, name)) {
+                std::cerr << "[fusion][dbs][debug] write single-beam debug image failed: "
+                          << name << std::endl;
+            }
+        }
+    }
+
+    if (!stitcher.writeProducts(cfg, grid, mosaic, bounds, &activeCtx.meta)) {
         std::cerr << "[fusion][dbs] writeProducts failed" << std::endl;
         return false;
     }

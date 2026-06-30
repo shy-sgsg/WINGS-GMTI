@@ -64,7 +64,10 @@ public:
   bool buildMosaicGPU(const Config &cfg, const RDData &RD, const MetaPack &meta,
                       const Grid &grid, Mosaic &mosaic, bool useTexInterp = false);
 
-  bool writeProducts(const Config &cfg, const Grid &grid, const Mosaic &mosaic, const Bounds &b);
+  bool writeProducts(const Config &cfg, const Grid &grid, const Mosaic &mosaic,
+                     const Bounds &b, const MetaPack *meta = nullptr);
+  bool writeDebugMosaicImage(const Config &cfg, const Mosaic &mosaic,
+                             const std::string &filename);
 
   int estimateEffectiveAzBins(const Params &P, const PosData &POS);
 

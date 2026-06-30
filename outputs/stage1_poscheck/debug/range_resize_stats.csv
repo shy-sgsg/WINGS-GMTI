@@ -1,0 +1,10 @@
+case,input_mean_abs,input_rms,input_max_abs,output_mean_abs,output_rms,output_max_abs,has_nan,has_inf
+constant,1,1,1,1,1,1,false,false
+single_tone,1,1,1,1,1,1,false,false
+random,0.766335,0.818364,1.40365,0.751143,0.818364,1.97621,false,false
+real_p0_b30_q0_ch1,2723.14,3189.52,10743.8,2720.65,3189.52,11272.4,false,false
+real_p0_b30_q0_ch2,4065.95,4768.37,14791.9,4063.73,4768.37,15930.8,false,false
+real_p0_b30_q1_ch1,2074.85,2446.89,9969.1,2073.81,2446.89,9723.31,false,false
+real_p0_b30_q1_ch2,3306.22,3885.16,13319,3309.44,3885.16,13198.1,false,false
+real_p0_b30_q2_ch1,2550.97,2995.3,10127.5,2554.24,2995.3,10105.4,false,false
+real_p0_b30_q2_ch2,3877.5,4559.41,18514.5,3880.48,4559.41,19807.3,false,false

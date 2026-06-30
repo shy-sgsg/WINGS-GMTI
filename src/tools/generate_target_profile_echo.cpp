@@ -11,6 +11,8 @@
 #include <fftw3.h>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -461,9 +463,133 @@ struct BeamReplicaMapping {
     double target_angle_deg = 0.0;
 };
 
+struct DebugSelection {
+    std::vector<int> source_beams;
+    std::vector<double> target_angles_deg;
+};
+
+struct PulsePowerStats {
+    double sum_power_ch1 = 0.0;
+    double sum_power_ch2 = 0.0;
+    uint64_t sample_count = 0;
+};
+
+int mapTargetPulseToSourcePulse(int target_pulse,
+                                int source_pulse_count,
+                                int target_pulse_count);
+
 int positiveModulo(int value, int modulus) {
     const int remainder = value % modulus;
     return remainder < 0 ? remainder + modulus : remainder;
+}
+
+std::string trimCopy(const std::string &text) {
+    const std::string whitespace = " \t\r\n";
+    const size_t first = text.find_first_not_of(whitespace);
+    if (first == std::string::npos) {
+        return "";
+    }
+    const size_t last = text.find_last_not_of(whitespace);
+    return text.substr(first, last - first + 1);
+}
+
+bool parseIntCsv(const std::string &text,
+                 std::vector<int> &values,
+                 const char *name) {
+    values.clear();
+    const std::string trimmed = trimCopy(text);
+    if (trimmed.empty() || trimmed == "all" || trimmed == "*") {
+        return true;
+    }
+    std::stringstream ss(trimmed);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        token = trimCopy(token);
+        if (token.empty()) {
+            continue;
+        }
+        try {
+            values.push_back(std::stoi(token));
+        } catch (const std::exception &e) {
+            std::cerr << "Invalid " << name << " list item '" << token
+                      << "': " << e.what() << std::endl;
+            return false;
+        }
+    }
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+    return true;
+}
+
+bool parseDoubleCsv(const std::string &text,
+                    std::vector<double> &values,
+                    const char *name) {
+    values.clear();
+    const std::string trimmed = trimCopy(text);
+    if (trimmed.empty() || trimmed == "all" || trimmed == "*") {
+        return true;
+    }
+    std::stringstream ss(trimmed);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        token = trimCopy(token);
+        if (token.empty()) {
+            continue;
+        }
+        try {
+            values.push_back(std::stod(token));
+        } catch (const std::exception &e) {
+            std::cerr << "Invalid " << name << " list item '" << token
+                      << "': " << e.what() << std::endl;
+            return false;
+        }
+    }
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+    return true;
+}
+
+bool containsInt(const std::vector<int> &values, int value) {
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+bool containsAngle(const std::vector<double> &angles,
+                   double angle_deg,
+                   double tolerance_deg) {
+    for (double selected : angles) {
+        if (std::fabs(selected - angle_deg) <= tolerance_deg) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string joinInts(const std::vector<int> &values) {
+    if (values.empty()) {
+        return "all";
+    }
+    std::ostringstream os;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            os << ',';
+        }
+        os << values[i];
+    }
+    return os.str();
+}
+
+std::string joinDoubles(const std::vector<double> &values) {
+    if (values.empty()) {
+        return "all";
+    }
+    std::ostringstream os;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            os << ',';
+        }
+        os << values[i];
+    }
+    return os.str();
 }
 
 BeamReplicaMapping mapTargetBeamToReplicatedSource(
@@ -513,6 +639,73 @@ double dopplerShiftForReplicaHz(const BeamReplicaMapping &mapping,
                target.carrier_hz);
 }
 
+double wrapFrequencyHz(double frequency_hz, double prf_hz) {
+    if (!(prf_hz > 0.0)) {
+        return frequency_hz;
+    }
+    double wrapped = std::fmod(frequency_hz + 0.5 * prf_hz, prf_hz);
+    if (wrapped < 0.0) {
+        wrapped += prf_hz;
+    }
+    return wrapped - 0.5 * prf_hz;
+}
+
+double estimateMappedPulseDopplerHz(
+    const std::vector<std::complex<float>> &data,
+    int source_pulse_count,
+    int source_range_len,
+    int target_pulse_count,
+    double target_prf_hz) {
+    if (source_pulse_count <= 1 || source_range_len <= 0 ||
+        target_pulse_count <= 1 || !(target_prf_hz > 0.0)) {
+        return 0.0;
+    }
+
+    std::complex<double> corr(0.0, 0.0);
+    const int range_step = std::max(1, source_range_len / 512);
+    for (int target_pulse = 1;
+         target_pulse < target_pulse_count;
+         ++target_pulse) {
+        const int src_pulse = mapTargetPulseToSourcePulse(
+            target_pulse, source_pulse_count, target_pulse_count);
+        const int prev_src_pulse = mapTargetPulseToSourcePulse(
+            target_pulse - 1, source_pulse_count, target_pulse_count);
+        const size_t src_offset =
+            static_cast<size_t>(src_pulse) *
+            static_cast<size_t>(source_range_len);
+        const size_t prev_offset =
+            static_cast<size_t>(prev_src_pulse) *
+            static_cast<size_t>(source_range_len);
+        for (int n = 0; n < source_range_len; n += range_step) {
+            corr += static_cast<std::complex<double>>(
+                        data[src_offset + static_cast<size_t>(n)]) *
+                    std::conj(static_cast<std::complex<double>>(
+                        data[prev_offset + static_cast<size_t>(n)]));
+        }
+    }
+    if (std::abs(corr) <= 0.0) {
+        return 0.0;
+    }
+    return target_prf_hz / (2.0 * M_PI) * std::arg(corr);
+}
+
+double dopplerShiftForReplicaFromMeasuredSource(
+    const BeamReplicaMapping &mapping,
+    const TargetProfile &target,
+    double measured_source_wrapped_hz) {
+    if (std::fabs(mapping.target_angle_deg - mapping.source_angle_deg) < 1e-9) {
+        return 0.0;
+    }
+    const double desired_wrapped_hz = wrapFrequencyHz(
+        theoreticalDopplerHz(mapping.target_angle_deg,
+                             target.force_speed_mps,
+                             target.carrier_hz),
+        target.prf_hz);
+    return wrapFrequencyHz(
+        desired_wrapped_hz - measured_source_wrapped_hz,
+        target.prf_hz);
+}
+
 void applySlowTimeFrequencyShift(
     std::vector<std::complex<float>> &samples,
     int pulse_index,
@@ -530,6 +723,26 @@ void applySlowTimeFrequencyShift(
     for (std::complex<float> &sample : samples) {
         sample *= rotator;
     }
+}
+
+void accumulatePowerStats(const std::vector<std::complex<float>> &ch1,
+                          const std::vector<std::complex<float>> &ch2,
+                          PulsePowerStats &stats) {
+    const size_t n = std::min(ch1.size(), ch2.size());
+    for (size_t i = 0; i < n; ++i) {
+        stats.sum_power_ch1 += std::norm(ch1[i]);
+        stats.sum_power_ch2 += std::norm(ch2[i]);
+    }
+    stats.sample_count += static_cast<uint64_t>(n);
+}
+
+double meanPower(const PulsePowerStats &stats, int channel) {
+    if (stats.sample_count == 0) {
+        return 0.0;
+    }
+    const double sum =
+        channel == 1 ? stats.sum_power_ch1 : stats.sum_power_ch2;
+    return sum / static_cast<double>(stats.sample_count);
 }
 
 int mapTargetPulseToSourcePulse(int target_pulse,
@@ -730,6 +943,19 @@ bool runSelfTest() {
                   << std::endl;
         return false;
     }
+    if (wrapFrequencyHz(5832.77, target.prf_hz) < 632.0 ||
+        wrapFrequencyHz(5832.77, target.prf_hz) > 633.5 ||
+        dopplerShiftForReplicaFromMeasuredSource(
+            left, target,
+            wrapFrequencyHz(theoreticalDopplerHz(
+                left.source_angle_deg,
+                target.force_speed_mps,
+                target.carrier_hz),
+                target.prf_hz)) == 0.0) {
+        std::cerr << "[SELFTEST] measured-source Doppler shift failed"
+                  << std::endl;
+        return false;
+    }
     int previous_source_pulse = -1;
     for (int target_pulse = 0;
          target_pulse < target.target_pulse_num;
@@ -876,7 +1102,10 @@ bool convertToTargetProfile(const ConvertConfig &cfg,
                             int beam_start,
                             int beam_count,
                             double iq_scale,
-                            uint8_t mode) {
+                            uint8_t mode,
+                            int debug_source_beam,
+                            double debug_target_angle_deg,
+                            const DebugSelection &debug_selection) {
     const TargetProfile target;
     if (iq_scale != 1.0) {
         std::cerr << "[WARN] iq_scale is ignored because payload IQ is float32"
@@ -1005,6 +1234,84 @@ bool convertToTargetProfile(const ConvertConfig &cfg,
     }
     std::cout << std::endl;
 
+    for (int selected_source : debug_selection.source_beams) {
+        if (selected_source < 1 || selected_source > source_beam_count) {
+            std::cerr << "selected_source_beams item " << selected_source
+                      << " is outside current source window 1.."
+                      << source_beam_count << std::endl;
+            return false;
+        }
+    }
+
+    std::vector<int> selected_target_beams;
+    selected_target_beams.reserve(static_cast<size_t>(target.target_beam_count));
+    const double angle_tolerance =
+        std::max(1e-6, 0.25 * std::fabs(target.scan_step_deg));
+    for (int target_beam = 0;
+         target_beam < target.target_beam_count;
+         ++target_beam) {
+        BeamReplicaMapping mapping =
+            mapTargetBeamToReplicatedSource(
+                target_beam, source_start_beam, source_beam_count, target);
+        const int relative_source_beam =
+            mapping.source_beam - source_start_beam + 1;
+        const bool source_selected =
+            debug_selection.source_beams.empty() ||
+            containsInt(debug_selection.source_beams, relative_source_beam);
+        const bool target_angle_selected =
+            debug_selection.target_angles_deg.empty() ||
+            containsAngle(debug_selection.target_angles_deg,
+                          mapping.target_angle_deg,
+                          angle_tolerance);
+        if (source_selected && target_angle_selected) {
+            selected_target_beams.push_back(target_beam);
+        }
+    }
+    if (selected_target_beams.empty()) {
+        std::cerr << "No target beams selected. selected_source_beams="
+                  << joinInts(debug_selection.source_beams)
+                  << ", selected_target_angles_deg="
+                  << joinDoubles(debug_selection.target_angles_deg)
+                  << std::endl;
+        return false;
+    }
+
+    const uint64_t data_packets =
+        static_cast<uint64_t>(selected_target_beams.size()) *
+        static_cast<uint64_t>(target.target_pulse_num);
+    const uint64_t expected_packets =
+        static_cast<uint64_t>(target.target_beam_count) *
+        static_cast<uint64_t>(target.target_pulse_num);
+    std::cout << "[DEBUG_SELECT] selected_source_beams="
+              << joinInts(debug_selection.source_beams)
+              << ", selected_target_angles_deg="
+              << joinDoubles(debug_selection.target_angles_deg)
+              << ", data target beams="
+              << selected_target_beams.size() << " / "
+              << target.target_beam_count
+              << ", zero-filled target beams="
+              << target.target_beam_count -
+                     static_cast<int>(selected_target_beams.size())
+              << ", data packets=" << data_packets
+              << ", full output packets=" << expected_packets
+              << ", full output bytes="
+              << expected_packets * static_cast<uint64_t>(prt_len)
+              << std::endl;
+    std::cout << "[DEBUG_SELECT] mapping preview:" << std::endl;
+    for (int target_beam : selected_target_beams) {
+        const BeamReplicaMapping mapping =
+            mapTargetBeamToReplicatedSource(
+                target_beam, source_start_beam, source_beam_count, target);
+        const int relative_source_beam =
+            mapping.source_beam - source_start_beam + 1;
+        std::cout << "  out_target_beam=" << (target_beam + 1)
+                  << ", target_angle=" << mapping.target_angle_deg
+                  << " deg <- rel_source_beam=" << relative_source_beam
+                  << ", file_source_beam=" << mapping.source_beam
+                  << ", source_angle=" << mapping.source_angle_deg
+                  << " deg" << std::endl;
+    }
+
     std::ofstream fout(out_file, std::ios::binary);
     if (!fout) {
         std::cerr << "Unable to open output file: " << out_file << std::endl;
@@ -1024,19 +1331,98 @@ bool convertToTargetProfile(const ConvertConfig &cfg,
     std::vector<double> fw_angle_unused_ch1;
 
     uint32_t prt_counter = 0;
-    double utc0 = 0.0;
-    bool utc0_inited = false;
-    TargetMotion target_motion;
+    if (!readBeamRawFloat(rcfg, cfg.data_ch2.c_str(), source_start_beam,
+                          data2, fw_angle_unused, utc)) {
+        std::cerr << "readBeamRawFloat failed while probing UTC, beam="
+                  << source_start_beam << std::endl;
+        return false;
+    }
+    if (utc.empty()) {
+        std::cerr << "Source UTC vector is empty while probing beam="
+                  << source_start_beam << std::endl;
+        return false;
+    }
+    const double utc0 = utc.front();
+    const TargetMotion target_motion = buildTargetMotion(
+        pos_rows, utc0, target.force_alt_m, target.force_speed_mps);
+    std::cout << "target motion: vn=" << target_motion.vn_mps
+              << " m/s, ve=" << target_motion.ve_mps
+              << " m/s, vd=0 m/s, horizontal speed="
+              << std::sqrt(target_motion.vn_mps * target_motion.vn_mps +
+                           target_motion.ve_mps * target_motion.ve_mps)
+              << " m/s" << std::endl;
 
+    size_t selected_index = 0;
     for (int target_beam = 0;
          target_beam < target.target_beam_count;
          ++target_beam) {
-        const BeamReplicaMapping beam_mapping =
+        const bool write_real_data =
+            containsInt(selected_target_beams, target_beam);
+        BeamReplicaMapping beam_mapping =
             mapTargetBeamToReplicatedSource(
                 target_beam, source_start_beam, source_beam_count, target);
+        const double target_angle_deg = beam_mapping.target_angle_deg;
+        if (!write_real_data) {
+            int16_t first_header_angle_raw = 0;
+            uint32_t first_header_prt_len = 0;
+            for (int target_pulse = 0;
+                 target_pulse < target.target_pulse_num;
+                 ++target_pulse) {
+                const double utc_out =
+                    utc0 + static_cast<double>(prt_counter) / target.prf_hz;
+                const PosSample pos =
+                    evaluateTargetMotion(target_motion, utc_out);
+                fillHeaderAndIns(packet, mode, prt_counter, utc_out, cfg.week,
+                                 pos, target_angle_deg, prt_len);
+                if (target_pulse == 0) {
+                    first_header_prt_len = read_u32_le(packet, 9);
+                    first_header_angle_raw =
+                        static_cast<int16_t>(read_u16_le(packet, 218));
+                }
+                fout.write(reinterpret_cast<const char *>(packet.data()),
+                           static_cast<std::streamsize>(packet.size()));
+                if (!fout) {
+                    std::cerr << "Write zero-fill failed at target_beam="
+                              << target_beam
+                              << " target_pulse=" << target_pulse
+                              << std::endl;
+                    return false;
+                }
+                ++prt_counter;
+            }
+            std::cout << "Zero-filled target beam " << target_beam + 1
+                      << " / " << target.target_beam_count
+                      << ", target_angle=" << target_angle_deg
+                      << " deg, header_angle_raw="
+                      << first_header_angle_raw
+                      << ", header_prt_len=" << first_header_prt_len
+                      << std::endl;
+            continue;
+        }
+
+        const bool debug_override =
+            debug_source_beam > 0 &&
+            debug_source_beam <= source_beam_count &&
+            std::isfinite(debug_target_angle_deg) &&
+            std::fabs(beam_mapping.target_angle_deg -
+                      debug_target_angle_deg) <=
+                0.5 * std::fabs(target.scan_step_deg);
+        if (debug_override) {
+            const int source_offset = debug_source_beam - 1;
+            beam_mapping.source_beam = source_start_beam + source_offset;
+            beam_mapping.source_angle_deg =
+                target.src_scan_start_deg +
+                target.src_scan_step_deg * source_offset;
+            std::cout << "[DEBUG] target beam " << target_beam + 1
+                      << " at " << beam_mapping.target_angle_deg
+                      << " deg is forced to source beam "
+                      << debug_source_beam << " (source angle "
+                      << beam_mapping.source_angle_deg << " deg)"
+                      << std::endl;
+        }
         const int src_beam = beam_mapping.source_beam;
-        const double doppler_shift_hz =
-            dopplerShiftForReplicaHz(beam_mapping, target);
+        const int relative_source_beam =
+            src_beam - source_start_beam + 1;
 
         if (!readBeamRawFloat(rcfg, cfg.data_ch2.c_str(), src_beam,
                               data2, fw_angle_unused, utc)) {
@@ -1062,21 +1448,33 @@ bool convertToTargetProfile(const ConvertConfig &cfg,
                       << src_beam << std::endl;
             return false;
         }
-        if (!utc0_inited) {
-            utc0 = utc.empty() ? 0.0 : utc.front();
-            target_motion = buildTargetMotion(
-                pos_rows, utc0, target.force_alt_m,
-                target.force_speed_mps);
-            std::cout << "target motion: vn=" << target_motion.vn_mps
-                      << " m/s, ve=" << target_motion.ve_mps
-                      << " m/s, vd=0 m/s, horizontal speed="
-                      << std::sqrt(target_motion.vn_mps * target_motion.vn_mps +
-                                   target_motion.ve_mps * target_motion.ve_mps)
-                      << " m/s" << std::endl;
-            utc0_inited = true;
-        }
+        const double measured_source_wrapped_hz =
+            estimateMappedPulseDopplerHz(
+                data1, cfg.pulse_num, cfg.pulse_len,
+                target.target_pulse_num, target.prf_hz);
+        const double doppler_shift_hz =
+            dopplerShiftForReplicaFromMeasuredSource(
+                beam_mapping, target, measured_source_wrapped_hz);
+        const double desired_wrapped_hz = wrapFrequencyHz(
+            theoreticalDopplerHz(target_angle_deg,
+                                 target.force_speed_mps,
+                                 target.carrier_hz),
+            target.prf_hz);
+        const double theoretical_source_wrapped_hz = wrapFrequencyHz(
+            theoreticalDopplerHz(beam_mapping.source_angle_deg,
+                                 target.force_speed_mps,
+                                 target.carrier_hz),
+            target.prf_hz);
+        PulsePowerStats stats_before;
+        PulsePowerStats stats_after;
+        const int first_src_pulse = mapTargetPulseToSourcePulse(
+            0, cfg.pulse_num, target.target_pulse_num);
+        const int last_src_pulse = mapTargetPulseToSourcePulse(
+            target.target_pulse_num - 1, cfg.pulse_num,
+            target.target_pulse_num);
+        int16_t first_header_angle_raw = 0;
+        uint32_t first_header_prt_len = 0;
 
-        const double target_angle_deg = beam_mapping.target_angle_deg;
         for (int target_pulse = 0;
              target_pulse < target.target_pulse_num;
              ++target_pulse) {
@@ -1097,10 +1495,12 @@ bool convertToTargetProfile(const ConvertConfig &cfg,
                           << std::endl;
                 return false;
             }
+            accumulatePowerStats(ch1_out, ch2_out, stats_before);
             applySlowTimeFrequencyShift(
                 ch1_out, target_pulse, doppler_shift_hz, target.prf_hz);
             applySlowTimeFrequencyShift(
                 ch2_out, target_pulse, doppler_shift_hz, target.prf_hz);
+            accumulatePowerStats(ch1_out, ch2_out, stats_after);
 
             const double utc_out =
                 utc0 + static_cast<double>(prt_counter) / target.prf_hz;
@@ -1108,6 +1508,11 @@ bool convertToTargetProfile(const ConvertConfig &cfg,
                 evaluateTargetMotion(target_motion, utc_out);
             fillHeaderAndIns(packet, mode, prt_counter, utc_out, cfg.week,
                              pos, target_angle_deg, prt_len);
+            if (target_pulse == 0) {
+                first_header_prt_len = read_u32_le(packet, 9);
+                first_header_angle_raw =
+                    static_cast<int16_t>(read_u16_le(packet, 218));
+            }
             fillGmtiIqPayloadOnePulse(packet, ch1_out, ch2_out);
             fout.write(reinterpret_cast<const char *>(packet.data()),
                        static_cast<std::streamsize>(packet.size()));
@@ -1119,18 +1524,33 @@ bool convertToTargetProfile(const ConvertConfig &cfg,
             ++prt_counter;
         }
 
-        std::cout << "Converted target beam " << target_beam + 1
+        std::cout << "Converted selected beam " << (selected_index + 1)
+                  << " / " << selected_target_beams.size()
+                  << ", out_target_beam=" << target_beam + 1
                   << " / " << target.target_beam_count
-                  << ", src_beam=" << src_beam
+                  << ", rel_source_beam=" << relative_source_beam
+                  << ", file_source_beam=" << src_beam
                   << ", src_angle=" << beam_mapping.source_angle_deg
                   << " deg, target_angle=" << target_angle_deg
-                  << " deg, Doppler shift=" << doppler_shift_hz
-                  << " Hz" << std::endl;
+                  << " deg, theoretical_source_wrapped_fd="
+                  << theoretical_source_wrapped_hz
+                  << " Hz, measured_source_fd=" << measured_source_wrapped_hz
+                  << " Hz, desired_wrapped_fd=" << desired_wrapped_hz
+                  << " Hz, Doppler shift=" << doppler_shift_hz
+                  << " Hz, pulse_map=" << first_src_pulse << ".."
+                  << last_src_pulse
+                  << ", mean_power_before(ch1,ch2)="
+                  << meanPower(stats_before, 1) << ","
+                  << meanPower(stats_before, 2)
+                  << ", mean_power_after(ch1,ch2)="
+                  << meanPower(stats_after, 1) << ","
+                  << meanPower(stats_after, 2)
+                  << ", header_angle_raw=" << first_header_angle_raw
+                  << ", header_prt_len=" << first_header_prt_len
+                  << std::endl;
+        ++selected_index;
     }
 
-    const uint64_t expected_packets =
-        static_cast<uint64_t>(target.target_beam_count) *
-        static_cast<uint64_t>(target.target_pulse_num);
     if (prt_counter != expected_packets) {
         std::cerr << "Internal packet-count mismatch: wrote " << prt_counter
                   << ", expected " << expected_packets << std::endl;
@@ -1165,9 +1585,15 @@ int main(int argc, char **argv) {
         std::cerr
             << "Usage: " << argv[0]
             << " <xml_path> [output_target_echo.bin] [source_beam_start=auto]"
-               " [source_beam_count=25] [iq_scale=1.0(ignored)] [mode=5]\n"
+               " [source_beam_count=25] [iq_scale=1.0(ignored)] [mode=5]"
+               " [debug_source_beam=0] [debug_target_angle_deg=nan]"
+               " [selected_source_beams=all] [selected_target_angles_deg=all]\n"
             << "       " << argv[0] << " --self-test\n"
-            << "If output is omitted, <GMTI_data_new> from XML is used."
+            << "If output is omitted, <GMTI_data_new> from XML is used.\n"
+            << "selected_source_beams uses relative source indices in the "
+               "current 25-beam window, e.g. 1,2,19.\n"
+            << "selected_target_angles_deg filters output target angles, "
+               "e.g. -23,27. Use all or * to disable a filter."
             << std::endl;
         return 1;
     }
@@ -1179,6 +1605,21 @@ int main(int argc, char **argv) {
     const int beam_count = argc > 4 ? std::atoi(argv[4]) : 0;
     const double iq_scale = argc > 5 ? std::atof(argv[5]) : 1.0;
     const uint8_t mode = sat_u8(argc > 6 ? std::atoi(argv[6]) : 5);
+    const int debug_source_beam = argc > 7 ? std::atoi(argv[7]) : 0;
+    const double debug_target_angle_deg =
+        argc > 8 ? std::atof(argv[8]) :
+                   std::numeric_limits<double>::quiet_NaN();
+    DebugSelection debug_selection;
+    if (argc > 9 &&
+        !parseIntCsv(argv[9], debug_selection.source_beams,
+                     "selected_source_beams")) {
+        return 1;
+    }
+    if (argc > 10 &&
+        !parseDoubleCsv(argv[10], debug_selection.target_angles_deg,
+                        "selected_target_angles_deg")) {
+        return 1;
+    }
     if (beam_count < 0) {
         std::cerr << "source_beam_count must be >= 0" << std::endl;
         return 1;
@@ -1209,7 +1650,10 @@ int main(int argc, char **argv) {
 
     try {
         if (!convertToTargetProfile(cfg, pos_rows, out_file, beam_start,
-                                    beam_count, iq_scale, mode)) {
+                                    beam_count, iq_scale, mode,
+                                    debug_source_beam,
+                                    debug_target_angle_deg,
+                                    debug_selection)) {
             return 4;
         }
     } catch (const std::exception &e) {

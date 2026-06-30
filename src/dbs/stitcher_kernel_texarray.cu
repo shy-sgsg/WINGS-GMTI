@@ -40,6 +40,28 @@ __device__ inline float sample2D_linear_texarray(
          + wy * wx * v11;
 }
 
+__device__ inline float clamp_unit_device_texarray(float x)
+{
+    return x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
+}
+
+__device__ inline float wrap180_device_texarray(float angle_deg)
+{
+    angle_deg = fmodf(angle_deg + 180.0f, 360.0f);
+    if (angle_deg < 0.0f) angle_deg += 360.0f;
+    return angle_deg - 180.0f;
+}
+
+__device__ inline bool in_beam_angle_gate_device_texarray(
+    float fd, float lambda, float velocity,
+    float beam_angle_deg, float gate_deg)
+{
+    if (!(velocity > 0.0f) || !(lambda > 0.0f) || !(gate_deg > 0.0f)) return true;
+    const float ratio = clamp_unit_device_texarray(-fd * lambda / (2.0f * velocity));
+    const float pixel_angle_deg = asinf(ratio) * 180.0f / 3.14159265358979323846f;
+    return fabsf(wrap180_device_texarray(pixel_angle_deg - beam_angle_deg)) <= gate_deg;
+}
+
 __global__ void buildMosaicFullKernelTexArray(
     float* d_amp_mosaic,
     uint16_t* d_which_beam,
@@ -83,6 +105,8 @@ __global__ void buildMosaicFullKernelTexArray(
         }
         float R = sqrtf(x_tmp * x_tmp + y_tmp * y_tmp + Height * Height);
         float fd = (R > 1e-6f) ? (2.0f * bp.V_feiji * x_tmp / (R * lambda)) : 0.0f;
+        if (!in_beam_angle_gate_device_texarray(fd, lambda, bp.V_feiji,
+                                                bp.angle_deg, bp.angle_gate_deg)) continue;
         float R_max = R_min + (M - 1) * R_bin;
         float fd_max = bp.min_fd + (nEff - 1) * bp.delta_fd;
         if (R < R_min || R > R_max || fd < bp.min_fd || fd > fd_max) continue;

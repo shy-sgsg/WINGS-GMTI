@@ -23,6 +23,30 @@
 
 static inline float c0() { return 299792458.0f; }
 
+static inline float clamp_unit_float(float x)
+{
+  return x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
+}
+
+static inline float wrap180_float(float angle_deg)
+{
+  angle_deg = std::fmod(angle_deg + 180.0f, 360.0f);
+  if (angle_deg < 0.0f)
+    angle_deg += 360.0f;
+  return angle_deg - 180.0f;
+}
+
+static inline bool in_beam_angle_gate(float fd, float lambda, float velocity,
+                                      float beam_angle_deg, float gate_deg)
+{
+  if (!(velocity > 0.0f) || !(lambda > 0.0f) || !(gate_deg > 0.0f))
+    return true;
+  const float ratio = clamp_unit_float(-fd * lambda / (2.0f * velocity));
+  const float pixel_angle_deg =
+      gmti::trig_lut::asin(ratio) * 180.0f / static_cast<float>(M_PI);
+  return std::fabs(wrap180_float(pixel_angle_deg - beam_angle_deg)) <= gate_deg;
+}
+
 DbsStitcher::DbsStitcher()
 {
 }
@@ -336,6 +360,9 @@ bool DbsStitcher::estimateMosaicExtent(const Config &cfg, const RDData &RD, cons
   float maxY = -std::numeric_limits<float>::infinity();
 
   int step = std::max(1, cfg.dbs_range_skip);
+  const float beam_angle_gate_deg = static_cast<float>(
+      cfg.loc_beam_gate_deg > 0.0 ? cfg.loc_beam_gate_deg
+                                  : std::max(0.0, cfg.beamwidth_deg * 0.5) + 0.5);
 
   std::vector<float> vN(B), vE(B), V_feiji(B), sin_jiaodu(B), cos_jiaodu(B);
   for (int b = 0; b < B; ++b)
@@ -385,6 +412,9 @@ bool DbsStitcher::estimateMosaicExtent(const Config &cfg, const RDData &RD, cons
       for (int jj = 0; jj < nEff; jj++)
       {
         float fd = fdv[jj];
+        if (!in_beam_angle_gate(fd, lam, V_f, meta.beams[n].angle_deg,
+                                beam_angle_gate_deg))
+          continue;
         float x0 = R * lam * fd / (2 * V_f);
         float t2 = R * R - x0 * x0 - Height * Height;
         if (t2 <= 0)
@@ -421,6 +451,17 @@ bool DbsStitcher::estimateMosaicExtent(const Config &cfg, const RDData &RD, cons
               << "] Y=[" << minY << ", " << maxY << "]" << std::endl;
     return false;
   }
+
+  const double rawSpanX = static_cast<double>(maxX) - static_cast<double>(minX);
+  const double rawSpanY = static_cast<double>(maxY) - static_cast<double>(minY);
+  const double marginRatio = std::max(0.0, cfg.dbs_mosaic_margin_ratio);
+  const double minMarginM = std::max(0.0, cfg.dbs_mosaic_margin_m);
+  const double marginX = std::max(minMarginM, rawSpanX * marginRatio);
+  const double marginY = std::max(minMarginM, rawSpanY * marginRatio);
+  minX = static_cast<float>(static_cast<double>(minX) - marginX);
+  maxX = static_cast<float>(static_cast<double>(maxX) + marginX);
+  minY = static_cast<float>(static_cast<double>(minY) - marginY);
+  maxY = static_cast<float>(static_cast<double>(maxY) + marginY);
 
   // 生成规则网格
   double dx = std::max(1.0, cfg.dbs_out_res_m);
@@ -481,7 +522,8 @@ bool DbsStitcher::estimateMosaicExtent(const Config &cfg, const RDData &RD, cons
                                (1024.0 * 1024.0 * 1024.0);
   std::cout << "[fusion][dbs][extent] B=" << B << " M=" << M << " nEff=" << nEff
             << " boundsX=[" << minX << ", " << maxX << "] boundsY=[" << minY << ", " << maxY
-            << "] grid=" << nx << "x" << ny << " dx=" << grid.dx
+            << "] marginX=" << marginX << "m marginY=" << marginY
+            << "m grid=" << nx << "x" << ny << " dx=" << grid.dx
             << " host_mosaic_min~" << hostMosaicGiB << " GiB" << std::endl;
   return true;
 }
@@ -525,10 +567,19 @@ static bool write_png_gray8(const std::string &path,
   return err == 0;
 }
 
+static bool write_png_rgb8(const std::string &path,
+                           const unsigned char *data,
+                           unsigned width, unsigned height)
+{
+  unsigned err = lodepng_encode_file(path.c_str(), data, width, height, LCT_RGB, 8);
+  return err == 0;
+}
+
 bool DbsStitcher::writeProducts(const Config &cfg,
                                 const Grid &grid,
                                 const Mosaic &mosaic,
-                                const Bounds &b)
+                                const Bounds &b,
+                                const MetaPack *meta)
 {
   (void)grid;
   // 1) 阈值截断 + 归一化到 16bit
@@ -602,6 +653,16 @@ bool DbsStitcher::writeProducts(const Config &cfg,
     std::snprintf(fname, sizeof(fname), "GMTI%02d.%s", index, ext);
     return d + fname;
   };
+  auto make_product_path_suffix = [&](int index, const char *suffix,
+                                      const char *ext) -> std::string {
+    std::string d = cfg.result_add;
+    if (!d.empty() && d.back() != '/' && d.back() != '\\')
+      d.push_back('/');
+    char fname[64];
+    std::snprintf(fname, sizeof(fname), "GMTI%02d_%s.%s",
+                  index, suffix, ext);
+    return d + fname;
+  };
 
   int idx = 0;
   if (cfg.result_file_id > 0 && cfg.result_file_id <= 99)
@@ -637,6 +698,267 @@ bool DbsStitcher::writeProducts(const Config &cfg,
   if (!write_png_gray8(outpath, &u8[0], (unsigned)out16.cols, (unsigned)out16.rows))
     return false;
 
+  Image2D<uint16_t> which_out;
+  if (!mosaic.which_beam.empty())
+  {
+    which_out = transpose_copy(mosaic.which_beam);
+    fliplr_inplace(which_out);
+  }
+
+  struct Box
+  {
+    int min_r = 0, max_r = -1;
+    int min_c = 0, max_c = -1;
+  };
+  auto find_beam_box = [&](uint16_t beam_idx) -> Box {
+    Box box;
+    if (which_out.empty())
+      return box;
+    box.min_r = which_out.rows;
+    box.min_c = which_out.cols;
+    for (int r = 0; r < which_out.rows; ++r)
+    {
+      for (int c = 0; c < which_out.cols; ++c)
+      {
+        if (which_out.at(r, c) != beam_idx)
+          continue;
+        box.min_r = std::min(box.min_r, r);
+        box.max_r = std::max(box.max_r, r);
+        box.min_c = std::min(box.min_c, c);
+        box.max_c = std::max(box.max_c, c);
+      }
+    }
+    return box;
+  };
+  auto draw_red_box = [](std::vector<unsigned char> &rgb,
+                         int rows,
+                         int cols,
+                         Box box,
+                         int pad,
+                         int thickness) {
+    if (box.max_r < box.min_r || box.max_c < box.min_c)
+      return;
+    box.min_r = std::max(0, box.min_r - pad);
+    box.max_r = std::min(rows - 1, box.max_r + pad);
+    box.min_c = std::max(0, box.min_c - pad);
+    box.max_c = std::min(cols - 1, box.max_c + pad);
+    for (int t = 0; t < thickness; ++t)
+    {
+      const int top = std::min(rows - 1, box.min_r + t);
+      const int bottom = std::max(0, box.max_r - t);
+      const int left = std::min(cols - 1, box.min_c + t);
+      const int right = std::max(0, box.max_c - t);
+      for (int c = left; c <= right; ++c)
+      {
+        const size_t top_i =
+            (static_cast<size_t>(top) * cols + c) * 3U;
+        const size_t bottom_i =
+            (static_cast<size_t>(bottom) * cols + c) * 3U;
+        rgb[top_i + 0] = 255; rgb[top_i + 1] = 0; rgb[top_i + 2] = 0;
+        rgb[bottom_i + 0] = 255; rgb[bottom_i + 1] = 0; rgb[bottom_i + 2] = 0;
+      }
+      for (int r = top; r <= bottom; ++r)
+      {
+        const size_t left_i =
+            (static_cast<size_t>(r) * cols + left) * 3U;
+        const size_t right_i =
+            (static_cast<size_t>(r) * cols + right) * 3U;
+        rgb[left_i + 0] = 255; rgb[left_i + 1] = 0; rgb[left_i + 2] = 0;
+        rgb[right_i + 0] = 255; rgb[right_i + 1] = 0; rgb[right_i + 2] = 0;
+      }
+    }
+  };
+  auto put_pixel = [](std::vector<unsigned char> &rgb,
+                      int rows,
+                      int cols,
+                      int r,
+                      int c,
+                      unsigned char red,
+                      unsigned char green,
+                      unsigned char blue) {
+    if (r < 0 || r >= rows || c < 0 || c >= cols)
+      return;
+    const size_t idx = (static_cast<size_t>(r) * cols + c) * 3U;
+    rgb[idx + 0] = red;
+    rgb[idx + 1] = green;
+    rgb[idx + 2] = blue;
+  };
+  auto glyph5x7 = [](char ch) -> std::array<unsigned char, 7> {
+    switch (ch)
+    {
+    case '0': return {{0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}};
+    case '1': return {{0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}};
+    case '2': return {{0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}};
+    case '3': return {{0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E}};
+    case '4': return {{0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}};
+    case '5': return {{0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E}};
+    case '6': return {{0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}};
+    case '7': return {{0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}};
+    case '8': return {{0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}};
+    case '9': return {{0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}};
+    case '-': return {{0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}};
+    case '+': return {{0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00}};
+    case '.': return {{0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C}};
+    default: return {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+    }
+  };
+  auto draw_text = [&](std::vector<unsigned char> &rgb,
+                       int rows,
+                       int cols,
+                       int r,
+                       int c,
+                       const std::string &text,
+                       int scale,
+                       unsigned char red,
+                       unsigned char green,
+                       unsigned char blue) {
+    const int char_w = 6 * scale;
+    const int text_w = static_cast<int>(text.size()) * char_w;
+    const int text_h = 7 * scale;
+    int rr = std::max(0, std::min(rows - text_h - 1, r));
+    int cc = std::max(0, std::min(cols - text_w - 1, c));
+    for (int y = -1; y <= text_h; ++y)
+      for (int x = -1; x <= text_w; ++x)
+        put_pixel(rgb, rows, cols, rr + y, cc + x, 0, 0, 0);
+    for (size_t k = 0; k < text.size(); ++k)
+    {
+      const std::array<unsigned char, 7> glyph = glyph5x7(text[k]);
+      for (int gy = 0; gy < 7; ++gy)
+      {
+        for (int gx = 0; gx < 5; ++gx)
+        {
+          if ((glyph[gy] & (1U << (4 - gx))) == 0)
+            continue;
+          for (int sy = 0; sy < scale; ++sy)
+            for (int sx = 0; sx < scale; ++sx)
+              put_pixel(rgb, rows, cols,
+                        rr + gy * scale + sy,
+                        cc + static_cast<int>(k) * char_w + gx * scale + sx,
+                        red, green, blue);
+        }
+      }
+    }
+  };
+  auto palette = [](uint16_t beam_idx,
+                    unsigned char &red,
+                    unsigned char &green,
+                    unsigned char &blue) {
+    static const unsigned char colors[][3] = {
+        {255, 64, 64}, {64, 220, 255}, {255, 210, 64},
+        {80, 255, 120}, {220, 120, 255}, {255, 140, 40},
+        {120, 160, 255}, {255, 80, 180}};
+    const size_t idx = static_cast<size_t>((beam_idx - 1) % 8);
+    red = colors[idx][0];
+    green = colors[idx][1];
+    blue = colors[idx][2];
+  };
+
+  if (!which_out.empty())
+  {
+    std::vector<unsigned char> rgb(u8.size() * 3U);
+    for (size_t i = 0; i < u8.size(); ++i)
+    {
+      rgb[i * 3U + 0] = u8[i];
+      rgb[i * 3U + 1] = u8[i];
+      rgb[i * 3U + 2] = u8[i];
+    }
+    draw_red_box(rgb, out16.rows, out16.cols, find_beam_box(19), 10, 4);
+    draw_red_box(rgb, out16.rows, out16.cols, find_beam_box(44), 10, 4);
+    const std::string overlay_path =
+        make_product_path_suffix(idx, "source1_before_after", "png");
+    if (!write_png_rgb8(overlay_path, rgb.data(),
+                        static_cast<unsigned>(out16.cols),
+                        static_cast<unsigned>(out16.rows)))
+      return false;
+  }
+
+  if (!which_out.empty() && meta != nullptr && !meta->beams.empty())
+  {
+    std::vector<unsigned char> rgb(u8.size() * 3U);
+    for (size_t i = 0; i < u8.size(); ++i)
+    {
+      rgb[i * 3U + 0] = u8[i];
+      rgb[i * 3U + 1] = u8[i];
+      rgb[i * 3U + 2] = u8[i];
+    }
+
+    const int rows = which_out.rows;
+    const int cols = which_out.cols;
+    std::vector<double> sum_r(meta->beams.size(), 0.0);
+    std::vector<double> sum_c(meta->beams.size(), 0.0);
+    std::vector<size_t> count(meta->beams.size(), 0U);
+
+    for (int r = 0; r < rows; ++r)
+    {
+      for (int c = 0; c < cols; ++c)
+      {
+        const uint16_t b0 = which_out.at(r, c);
+        if (b0 == 0 || b0 > meta->beams.size())
+          continue;
+        const size_t bi = static_cast<size_t>(b0 - 1);
+        sum_r[bi] += r;
+        sum_c[bi] += c;
+        ++count[bi];
+        const bool boundary =
+            (r == 0 || c == 0 || r == rows - 1 || c == cols - 1 ||
+             which_out.at(std::max(0, r - 1), c) != b0 ||
+             which_out.at(std::min(rows - 1, r + 1), c) != b0 ||
+             which_out.at(r, std::max(0, c - 1)) != b0 ||
+             which_out.at(r, std::min(cols - 1, c + 1)) != b0);
+        if (boundary)
+        {
+          unsigned char rr = 255, gg = 0, bb = 0;
+          palette(b0, rr, gg, bb);
+          put_pixel(rgb, rows, cols, r, c, rr, gg, bb);
+          put_pixel(rgb, rows, cols, r + 1, c, rr, gg, bb);
+          put_pixel(rgb, rows, cols, r, c + 1, rr, gg, bb);
+        }
+      }
+    }
+
+    for (size_t i = 0; i < meta->beams.size(); ++i)
+    {
+      if (count[i] < 100U)
+        continue;
+      const int cr = static_cast<int>(std::lround(sum_r[i] / count[i]));
+      const int cc = static_cast<int>(std::lround(sum_c[i] / count[i]));
+      char label[32];
+      std::snprintf(label, sizeof(label), "%.1f", meta->beams[i].angle_deg);
+      unsigned char rr = 255, gg = 0, bb = 0;
+      palette(static_cast<uint16_t>(i + 1), rr, gg, bb);
+      draw_text(rgb, rows, cols, cr - 8, cc - 18, label, 2, rr, gg, bb);
+    }
+
+    const std::string angle_path =
+        make_product_path_suffix(idx, "angle_labels", "png");
+    if (!write_png_rgb8(angle_path, rgb.data(),
+                        static_cast<unsigned>(out16.cols),
+                        static_cast<unsigned>(out16.rows)))
+      return false;
+  }
+
+  auto write_beam_mask = [&](uint16_t beam_idx, const char *suffix) -> bool {
+    if (mosaic.which_beam.empty())
+      return true;
+    Image2D<uint16_t> mask(mosaic.which_beam.rows, mosaic.which_beam.cols);
+    for (size_t i = 0; i < mask.buf.size(); ++i)
+      mask.buf[i] = (mosaic.which_beam.buf[i] == beam_idx) ? 65535U : 0U;
+    Image2D<uint16_t> mask_out = transpose_copy(mask);
+    fliplr_inplace(mask_out);
+    std::vector<unsigned char> mask_u8(
+        static_cast<size_t>(mask_out.rows) * static_cast<size_t>(mask_out.cols));
+    for (size_t i = 0; i < mask_u8.size(); ++i)
+      mask_u8[i] = static_cast<unsigned char>(mask_out.buf[i] >> 8);
+    const std::string mask_path = make_product_path_suffix(idx, suffix, "png");
+    return write_png_gray8(mask_path, mask_u8.data(),
+                           static_cast<unsigned>(mask_out.cols),
+                           static_cast<unsigned>(mask_out.rows));
+  };
+  if (!write_beam_mask(19, "beam19_source1_before"))
+    return false;
+  if (!write_beam_mask(44, "beam44_source1_after"))
+    return false;
+
   // 4) 四角经纬度 .txt
   double B0, L0, B1, L1, B2, L2, B3, L3;
   proj_xy_to_ll(b.minX, b.minY, B0, L0);
@@ -661,5 +983,58 @@ bool DbsStitcher::writeProducts(const Config &cfg,
   cfs << "L3 = " << L3 << "\n";
   cfs.close();
 
+  return true;
+}
+
+bool DbsStitcher::writeDebugMosaicImage(const Config &cfg,
+                                        const Mosaic &mosaic,
+                                        const std::string &filename)
+{
+  if (mosaic.amp.empty() || filename.empty())
+    return false;
+
+  Image2D<float> amp = mosaic.amp;
+  const double th_src = mean_of_image(amp) * 13.0;
+  const double th = (th_src > 1e-12) ? th_src : 1.0;
+  for (size_t i = 0; i < amp.buf.size(); ++i)
+  {
+    double v = amp.buf[i];
+    if (v > th)
+      v = th;
+    amp.buf[i] = static_cast<float>(v * (65500.0 / th));
+  }
+
+  Image2D<uint16_t> u16(amp.rows, amp.cols);
+  for (size_t i = 0; i < amp.buf.size(); ++i)
+  {
+    double v = amp.buf[i];
+    if (v < 0.0)
+      v = 0.0;
+    if (v > 65535.0)
+      v = 65535.0;
+    u16.buf[i] = static_cast<uint16_t>(v + 0.5);
+  }
+
+  Image2D<uint16_t> out16 = transpose_copy(u16);
+  fliplr_inplace(out16);
+  std::vector<unsigned char> u8(static_cast<size_t>(out16.rows) *
+                                static_cast<size_t>(out16.cols));
+  for (size_t i = 0; i < u8.size(); ++i)
+    u8[i] = static_cast<unsigned char>(out16.buf[i] >> 8);
+
+  std::string d = cfg.result_add;
+  if (!d.empty() && d.back() != '/' && d.back() != '\\')
+    d.push_back('/');
+  if (!mkdir_p(d))
+  {
+    std::cerr << "writeDebugMosaicImage: 创建目录失败: " << d << "\n";
+    return false;
+  }
+  const std::string path = d + filename;
+  if (!write_png_gray8(path, u8.data(),
+                       static_cast<unsigned>(out16.cols),
+                       static_cast<unsigned>(out16.rows)))
+    return false;
+  std::cout << "[fusion][dbs][debug] wrote " << path << std::endl;
   return true;
 }

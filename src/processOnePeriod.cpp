@@ -1237,7 +1237,7 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     beamMeta.plane = plane;
     beamMeta.PRF = cfg.PRF;
     beamMeta.fc_hz = cfg.fc;
-    beamMeta.lambda = (cfg.lambda > 0.0) ? cfg.lambda : (C / cfg.fc);
+    beamMeta.lambda = (cfg.lambda > 0.0) ? cfg.lambda : (C / cfg.fc); 
 
     if (!exportDbsCacheAfterRecenter(cfg, beamMeta, slot, Na, Nr, ctx.rd, ctx.meta)) {
         return false;

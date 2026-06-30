@@ -34,13 +34,13 @@
         <ref_H>20</ref_H>
         <pf>1e-6</pf>
         <secBias>18</secBias>
-        <skip_pulses>256</skip_pulses>
+        <skip_pulses>0</skip_pulses>
         <wavepos_use_roi>false</wavepos_use_roi>
         <roi_lat1>40.45121057</roi_lat1>
         <roi_lng1>116.98377429</roi_lng1>
         <roi_Ry1>400</roi_Ry1>
         <roi_Rx1>400</roi_Rx1>
-        <wavepos_st>1</wavepos_st>
+        <wavepos_st>0</wavepos_st>
         <wavepos_ed>25</wavepos_ed>
         <wavepos_skip>1</wavepos_skip>
         <scan_min_deg>-25</scan_min_deg>
@@ -51,7 +51,7 @@
         <rg_ed>4095</rg_ed>
         <calib_coef>1.0</calib_coef>
         <squint_side>1</squint_side>
-        <az_count>25</az_count>
+        <az_count>26</az_count>
         <boshu>6</boshu>
         <loc_beam_gate_deg>6</loc_beam_gate_deg>
         <max_theta>30</max_theta>
@@ -61,6 +61,8 @@
         <raw_fenbianlv>8</raw_fenbianlv>
         <len_tiaoguo>200</len_tiaoguo>
         <dbs_max_mosaic_pixels>300000000</dbs_max_mosaic_pixels>
+        <dbs_mosaic_margin_ratio>0.08</dbs_mosaic_margin_ratio>
+        <dbs_mosaic_margin_m>500</dbs_mosaic_margin_m>
         <week_offset>0</week_offset>
         <squint_angle>-2.9363293647766113</squint_angle>
         <lat_st>2</lat_st>

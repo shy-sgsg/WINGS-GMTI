@@ -64,8 +64,8 @@ struct Config {
     int Loc = 1;                // 是否使用飞机位置，1表示使用，0表示不使用
 
     // 新增参数
-    int wavepos_st = 23;        // 波形位置起始索引
-    int wavepos_ed = 27;        // 波形位置结束索引
+    int wavepos_st = 0;        // 波形位置起始索引
+    int wavepos_ed = 25;        // 波形位置结束索引
     int wavepos_skip = 1;       // 波形位置跳过数
     int min_points = 11;        // 最小点数
     int min_len = 1;            // 最小轨迹长度
@@ -141,6 +141,8 @@ struct Config {
     int dbs_range_skip = 1;     // DBS 距离抽样步长，对应 XML len_tiaoguo
     int dbs_interp_mode = 1;    // DBS 拼图插值模式，1=最近邻，2=双线性
     size_t dbs_max_mosaic_pixels = 200000000ULL; // DBS 拼图像素数上限，对应 XML dbs_max_mosaic_pixels
+    double dbs_mosaic_margin_ratio = 0.05; // DBS 拼图范围比例裕量，对应 XML dbs_mosaic_margin_ratio
+    double dbs_mosaic_margin_m = 200.0;    // DBS 拼图范围最小裕量（米），对应 XML dbs_mosaic_margin_m
 
     // ★ 新增：是否估计误差角（false 时直接使用 XML 中的 squint_angle）
     bool estimate_error_angle = true;

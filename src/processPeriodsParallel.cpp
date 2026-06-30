@@ -245,10 +245,37 @@ bool GMTIProcessor::processPeriodsParallelFusion(const std::vector<int> &periodL
         return false;
     }
 
-    double biasDeg = 0.0;
-    if (!estimateBeamPointingBiasByCenterBeams(periodList, ctx.beam_meta, biasDeg)) {
-        std::cerr << "[fusion] estimateBeamPointingBiasByCenterBeams failed" << std::endl;
+    std::vector<int> activePeriods;
+    std::vector<FusionBeamMeta> activeBeamMeta;
+    activePeriods.reserve(periodList.size());
+    activeBeamMeta.reserve(ctx.beam_meta.size());
+    for (size_t slot = 0; slot < periodList.size(); ++slot) {
+        if (!fusionSlotHasSignal(ctx, slot)) {
+            continue;
+        }
+        activePeriods.push_back(periodList[slot]);
+        activeBeamMeta.push_back(ctx.beam_meta[slot]);
+    }
+    if (activePeriods.empty()) {
+        std::cerr << "[fusion] no active DBS beam after zero-fill filtering" << std::endl;
         return false;
+    }
+    std::cout << "[fusion] active DBS beams for bias:";
+    for (int p : activePeriods) {
+        std::cout << ' ' << p;
+    }
+    std::cout << std::endl;
+
+    double biasDeg = 0.0;
+    if (!cfg.estimate_error_angle) {
+        biasDeg = std::isfinite(cfg.squint_angle) ? cfg.squint_angle : 0.0;
+        std::cout << "[fusion] estimate_error_angle disabled, using XML beam_pointing_bias="
+                  << biasDeg << " deg" << std::endl;
+    } else {
+        if (!estimateBeamPointingBiasByCenterBeams(activePeriods, activeBeamMeta, biasDeg)) {
+            std::cerr << "[fusion] estimateBeamPointingBiasByCenterBeams failed" << std::endl;
+            return false;
+        }
     }
     if (!applyBeamPointingBiasToFusionContext(biasDeg, ctx)) {
         std::cerr << "[fusion] applyBeamPointingBiasToFusionContext failed" << std::endl;

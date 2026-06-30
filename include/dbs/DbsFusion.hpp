@@ -3,6 +3,8 @@
 
 #include "DbsFusionTypes.hpp"
 
+bool fusionSlotHasSignal(const FusionGroupContext &ctx, size_t slot);
+
 bool estimateBeamPointingBiasByCenterBeams(const std::vector<int> &periodList,
                                            const std::vector<FusionBeamMeta> &beamMeta,
                                            double &biasDeg);

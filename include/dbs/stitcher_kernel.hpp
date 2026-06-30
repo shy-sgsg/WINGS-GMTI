@@ -12,6 +12,8 @@ struct BeamDevParams {
   float cos_j;
   float min_fd;
   float delta_fd;
+  float angle_deg;
+  float angle_gate_deg;
   uint64_t offset; // offset in floats into d_all_amps
   int flag;        // flight dir flag (matches CPU infer_flight_dir_flag + squint_side*4)
 };

@@ -1,0 +1,49 @@
+{
+  "old": {
+    "data_ch1": "/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID13_8H13M_GMTI0",
+    "data_ch2": "/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID13_8H13M_GMTI1",
+    "pulse_len": 4096,
+    "rg_len": 4096,
+    "pulse_num": 256,
+    "read_pulse_num": 256,
+    "fc_ghz": 17.000000,
+    "br_mhz": 50.000000,
+    "fs_mhz": 75.000000,
+    "tr_us": 38.000000,
+    "prf_hz": 2000.000000,
+    "scan_min_deg": -25.000000,
+    "scan_max_deg": 25.000000,
+    "az_count": 26,
+    "d_chan": 0.170000
+  },
+  "new": {
+    "scan_min_deg": -59.000000,
+    "scan_max_deg": 61.000000,
+    "scan_step_deg": 2.000000,
+    "beam_count": 61,
+    "pulse_num_new": 130,
+    "ddc_len_new": 11820,
+    "fft_len_new": 12288,
+    "pc_crop_start": 3864,
+    "pc_crop_len": 4096,
+    "fc_new_ghz": 16.000000,
+    "br_new_mhz": 50.000000,
+    "fs_new_mhz": 60.000000,
+    "tr_new_us": 130.000000,
+    "prf_new_hz": 1300.000000,
+    "sample_delay_us": 488.000000,
+    "sample_window_us": 197.000000,
+    "period_time_sec": 6.100000,
+    "realtime_80_sec": 4.880000,
+    "strict_gate_sec": 4.8
+  },
+  "file_audit": {
+    "complex_format": "float32 IQ with 256-byte PRT header per channel",
+    "ch1_bytes": 219807744,
+    "ch2_bytes": 219807744,
+    "bytes_per_old_period_per_channel": 219807744,
+    "period_count": 1,
+    "ok": true,
+    "message": "ok"
+  }
+}

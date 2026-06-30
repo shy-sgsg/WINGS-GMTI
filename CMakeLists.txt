@@ -275,6 +275,85 @@ add_executable(generate_target_profile_echo
   src/xml/tinyxmlparser.cpp
 )
 
+add_executable(generate_reflectivity_forward_echo
+  src/tools/generate_reflectivity_forward_echo.cpp
+  src/trig_lut.cpp
+  src/trig_lut_host_only.cpp
+  src/xml/tinystr.cpp
+  src/xml/tinyxml.cpp
+  src/xml/tinyxmlerror.cpp
+  src/xml/tinyxmlparser.cpp
+  src/dbs/lodepng.cpp
+)
+
+add_executable(simulate_stage1_background
+  simulator/stage1_background_sim/simulate_stage1_main.cpp
+  simulator/stage1_background_sim/stage1_config.cpp
+  simulator/stage1_background_sim/stage1_data_reader.cpp
+  simulator/stage1_background_sim/stage1_beam_mapper.cpp
+  simulator/stage1_background_sim/stage1_pulse_resampler.cpp
+  simulator/stage1_background_sim/stage1_range_resizer.cpp
+  simulator/stage1_background_sim/stage1_writer.cpp
+  simulator/stage1_background_sim/stage1_validator.cpp
+  src/xml/tinystr.cpp
+  src/xml/tinyxml.cpp
+  src/xml/tinyxmlerror.cpp
+  src/xml/tinyxmlparser.cpp
+)
+
+add_executable(inject_cooperative_target
+  simulator/target_injection/inject_target_main.cpp
+  simulator/target_injection/target_common.cpp
+  simulator/target_injection/target_config.cpp
+  simulator/target_injection/target_motion_model.cpp
+  simulator/target_injection/radar_geometry.cpp
+  simulator/target_injection/beam_visibility.cpp
+  simulator/target_injection/channel_phase_model.cpp
+  simulator/target_injection/lfm_echo_generator.cpp
+  simulator/target_injection/truth_writer.cpp
+  src/xml/tinystr.cpp
+  src/xml/tinyxml.cpp
+  src/xml/tinyxmlerror.cpp
+  src/xml/tinyxmlparser.cpp
+)
+
+add_executable(simulate_stage2_statistical
+  simulator/stage2_statistical_sim/simulate_stage2_main.cpp
+  simulator/stage2_statistical_sim/stage2_config.cpp
+  simulator/stage2_statistical_sim/stage2_scene_generator.cpp
+  simulator/stage2_statistical_sim/stage2_lfm_forward.cpp
+  simulator/stage2_statistical_sim/stage2_validator.cpp
+  simulator/target_injection/target_common.cpp
+  simulator/target_injection/target_config.cpp
+  simulator/target_injection/target_motion_model.cpp
+  simulator/target_injection/radar_geometry.cpp
+  simulator/target_injection/beam_visibility.cpp
+  simulator/target_injection/channel_phase_model.cpp
+  simulator/target_injection/lfm_echo_generator.cpp
+  simulator/target_injection/truth_writer.cpp
+  src/xml/tinystr.cpp
+  src/xml/tinyxml.cpp
+  src/xml/tinyxmlerror.cpp
+  src/xml/tinyxmlparser.cpp
+)
+
+add_executable(simulate_stage3_sar_scene
+  simulator/stage3_sar_scene_sim/simulate_stage3_main.cpp
+  simulator/stage3_sar_scene_sim/stage3_config.cpp
+  simulator/stage3_sar_scene_sim/sar_image_reader.cpp
+  simulator/stage3_sar_scene_sim/sar_georef.cpp
+  simulator/stage3_sar_scene_sim/sar_radiometric_normalizer.cpp
+  simulator/stage3_sar_scene_sim/sar_scatterer_extractor.cpp
+  simulator/stage3_sar_scene_sim/sar_scatterer_sampler.cpp
+  simulator/stage3_sar_scene_sim/sar_scene_forward.cpp
+  simulator/stage3_sar_scene_sim/stage3_validator.cpp
+  simulator/common/radar_geometry.cpp
+  simulator/common/lfm_echo_generator.cpp
+  simulator/common/beam_pattern.cpp
+  simulator/common/channel_phase_model.cpp
+  simulator/common/truth_writer.cpp
+)
+
 add_executable(GMTI_pipe_core
   ${GMTI_PIPE_ONLY_SRC}
   ${COMMON_CORE_SRC}
@@ -470,5 +549,25 @@ target_include_directories(GMTI_pipe_core PRIVATE
 configure_non_cuda_tool(convert_old_echo_to_new_format)
 configure_non_cuda_tool(generate_target_profile_echo)
 target_link_libraries(generate_target_profile_echo PRIVATE ${FFTW3F_TARGET})
+configure_non_cuda_tool(generate_reflectivity_forward_echo)
+configure_non_cuda_tool(simulate_stage1_background)
+target_include_directories(simulate_stage1_background PRIVATE
+  ${CMAKE_SOURCE_DIR}/simulator/stage1_background_sim
+)
+target_link_libraries(simulate_stage1_background PRIVATE ${FFTW3F_TARGET})
+configure_non_cuda_tool(inject_cooperative_target)
+target_include_directories(inject_cooperative_target PRIVATE
+  ${CMAKE_SOURCE_DIR}/simulator/target_injection
+)
+configure_non_cuda_tool(simulate_stage2_statistical)
+target_include_directories(simulate_stage2_statistical PRIVATE
+  ${CMAKE_SOURCE_DIR}/simulator/stage2_statistical_sim
+  ${CMAKE_SOURCE_DIR}/simulator/target_injection
+)
+configure_non_cuda_tool(simulate_stage3_sar_scene)
+target_include_directories(simulate_stage3_sar_scene PRIVATE
+  ${CMAKE_SOURCE_DIR}/simulator/stage3_sar_scene_sim
+  ${CMAKE_SOURCE_DIR}/simulator/common
+)
 configure_non_cuda_tool(track_assignment_selftest)
 configure_non_cuda_tool(range_compression_window_selftest)

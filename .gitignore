@@ -8,6 +8,9 @@ build_dir/
 docs/
 doc/
 
+# 结果目录
+result/
+
 # Mac相关文件
 __MACOSX/
 **/._*
@@ -59,6 +62,8 @@ Thumbs.db
 # IDE相关文件
 .idea/
 .vscode/
+.agents/
+.codex/
 *.sublime-*
 *.project
 *.cproject

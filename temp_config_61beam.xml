@@ -13,7 +13,7 @@
         <reffunc_add>/home/shy/AIR/小长/GMTI_Data/Mission068/RefFun_Br50MHz_Tr38us_Len4096.dat</reffunc_add>
         <isSeparated>separate</isSeparated>
         <INFO_Type>1</INFO_Type>
-        <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/gmti_data_13.dat</GMTI_data_new>
+        <GMTI_data_new>/home/shy/AIR/小长/GMTI程序/GMTI/GMTI_algorithm/GMTI_APX15_CUDA_latest/result/debug.dat</GMTI_data_new>
         <pipe_root_path>/home/raco</pipe_root_path>
         <estimate_error_angle>0</estimate_error_angle>
         <wavepos_parallel>1</wavepos_parallel>
@@ -70,8 +70,8 @@
         <calib_coef>1.0</calib_coef>
         <squint_side>1</squint_side>
         <az_count>61</az_count>
-        <boshu>2</boshu>
-        <loc_beam_gate_deg>2</loc_beam_gate_deg>
+        <boshu>5</boshu>
+        <loc_beam_gate_deg>5</loc_beam_gate_deg>
         <max_theta>60</max_theta>
         <period_first>1</period_first>
         <period_num>61</period_num>
@@ -79,8 +79,10 @@
         <raw_fenbianlv>8</raw_fenbianlv>
         <len_tiaoguo>200</len_tiaoguo>
         <dbs_max_mosaic_pixels>100000000</dbs_max_mosaic_pixels>
+        <dbs_mosaic_margin_ratio>0.05</dbs_mosaic_margin_ratio>
+        <dbs_mosaic_margin_m>200</dbs_mosaic_margin_m>
         <week_offset>0</week_offset>
-        <squint_angle>0</squint_angle>
+        <squint_angle>-2.5</squint_angle>
         <lat_st>2</lat_st>
         <lat_ed>2</lat_ed>
         <lon_st>2</lon_st>

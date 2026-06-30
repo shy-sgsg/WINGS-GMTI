@@ -36,6 +36,30 @@ static inline float cfg_effective_fs(const Config &cfg)
            : static_cast<float>(cfg.fs);
 }
 
+static inline float clamp_unit_float(float x)
+{
+  return x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
+}
+
+static inline float wrap180_float(float angle_deg)
+{
+  angle_deg = std::fmod(angle_deg + 180.0f, 360.0f);
+  if (angle_deg < 0.0f)
+    angle_deg += 360.0f;
+  return angle_deg - 180.0f;
+}
+
+static inline bool in_beam_angle_gate(float fd, float lambda, float velocity,
+                                      float beam_angle_deg, float gate_deg)
+{
+  if (!(velocity > 0.0f) || !(lambda > 0.0f) || !(gate_deg > 0.0f))
+    return true;
+  const float ratio = clamp_unit_float(-fd * lambda / (2.0f * velocity));
+  const float pixel_angle_deg =
+      gmti::trig_lut::asin(ratio) * 180.0f / static_cast<float>(M_PI);
+  return std::fabs(wrap180_float(pixel_angle_deg - beam_angle_deg)) <= gate_deg;
+}
+
 bool DbsStitcher::buildMosaic(const Config &cfg,
                               const RDData &RD,
                               const MetaPack &meta,
@@ -87,6 +111,9 @@ bool DbsStitcher::buildMosaic(const Config &cfg,
   // —— 速度与航迹角（按波位并行）
   std::vector<float> vN(B), vE(B), V_feiji(B), sin_jiaodu(B), cos_jiaodu(B);
   int squint_side = cfg.squint_side; // 0 for left, 1 for right
+  const float beam_angle_gate_deg = static_cast<float>(
+      cfg.loc_beam_gate_deg > 0.0 ? cfg.loc_beam_gate_deg
+                                  : std::max(0.0, cfg.beamwidth_deg * 0.5) + 0.5);
   for (int b = 0; b < B; ++b)
   {
     vN[b] = meta.beams[b].vN;
@@ -140,35 +167,9 @@ bool DbsStitcher::buildMosaic(const Config &cfg,
     {
       const float y_label = (float)grid.y[j];
 
-      // ===== 粗投影：使用第1波位判距 =====
-      float tmp_x0 = x_label - meta.beams[0].x;
-      float tmp_y0 = y_label - meta.beams[0].y;
-
-      float xl0, yl0;
-      {
-        const float c = cos_jiaodu[0], s = sin_jiaodu[0];
-        rotation_xy_inv(tmp_x0, tmp_y0, flag, c, s, xl0, yl0);
-      }
-
-      const float R_geo = std::sqrt(xl0 * xl0 + yl0 * yl0 + Height * Height);
-      const float R_idx0 = ((R_geo - R_min) / R_bin) + 1.0f;
-
-      // 上一行 position（邻域约束）—— 同一列内顺序访问，线程安全
-      uint16_t prev_pos = 0;
-      if (j > 0)
-        prev_pos = mosaic.which_beam.at(j - 1, i);
-
       // ===== 遍历每个波位（顺序即可；对每个像素内部不存在共享写） =====
       for (int n = 0; n < B; ++n)
       {
-        // 邻域约束
-        bool neighbor_ok = (j == 0) ? true : (prev_pos == 0 || std::abs(int(prev_pos) - (n + 1)) <= 15);
-        if (!neighbor_ok)
-          continue;
-
-        if (!(R_idx0 > 1.0f && R_idx0 < (float)(M - 1)))
-          continue;
-
         // === 精确投影到第 n 波位 ===
         const float tmp_x = x_label - meta.beams[n].x;
         const float tmp_y = y_label - meta.beams[n].y;
@@ -181,6 +182,10 @@ bool DbsStitcher::buildMosaic(const Config &cfg,
 
         const float R = std::sqrt(x_tmp * x_tmp + y_tmp * y_tmp + Height * Height);
         const float fd = (R > 0.0f) ? (2.0f * V_feiji[n] * x_tmp / (R * lambda)) : 0.0f;
+        if (!in_beam_angle_gate(fd, lambda, V_feiji[n],
+                                meta.beams[n].angle_deg,
+                                beam_angle_gate_deg))
+          continue;
 
         // —— 浮点索引（MATLAB 1-based）
         float R_idx = ((R - R_min) / R_bin) + 1.0f;
@@ -304,6 +309,9 @@ bool DbsStitcher::buildMosaicGPU(const Config &cfg,
 
   const float R_bin = c0f_local() / (2.0f * cfg_effective_fs(cfg));
   const float lambda = c0f_local() / (float)cfg.fc;
+  const float beam_angle_gate_deg = static_cast<float>(
+      cfg.loc_beam_gate_deg > 0.0 ? cfg.loc_beam_gate_deg
+                                  : std::max(0.0, cfg.beamwidth_deg * 0.5) + 0.5);
 
   double zmean = 0.0;
   for (int i = 0; i < B; ++i) zmean += meta.beams[(size_t)i].z;
@@ -402,6 +410,8 @@ bool DbsStitcher::buildMosaicGPU(const Config &cfg,
     // Use the min/max-based fd definitions computed above (matches CPU logic)
     bp.min_fd = min_RD_y[b];
     bp.delta_fd = delta_RD_y[b];
+    bp.angle_deg = mb.angle_deg;
+    bp.angle_gate_deg = beam_angle_gate_deg;
     bp.offset = (uint64_t)h_all_amps.size();
     bp.flag = flag; // use the same inferred flag as CPU (including squint_side)
 

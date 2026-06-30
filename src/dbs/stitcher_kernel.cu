@@ -39,6 +39,28 @@ __device__ inline float sample2D_linear(
          + wy * wx * v11;
 }
 
+__device__ inline float clamp_unit_device(float x)
+{
+    return x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
+}
+
+__device__ inline float wrap180_device(float angle_deg)
+{
+    angle_deg = fmodf(angle_deg + 180.0f, 360.0f);
+    if (angle_deg < 0.0f) angle_deg += 360.0f;
+    return angle_deg - 180.0f;
+}
+
+__device__ inline bool in_beam_angle_gate_device(
+    float fd, float lambda, float velocity,
+    float beam_angle_deg, float gate_deg)
+{
+    if (!(velocity > 0.0f) || !(lambda > 0.0f) || !(gate_deg > 0.0f)) return true;
+    const float ratio = clamp_unit_device(-fd * lambda / (2.0f * velocity));
+    const float pixel_angle_deg = asinf(ratio) * 180.0f / 3.14159265358979323846f;
+    return fabsf(wrap180_device(pixel_angle_deg - beam_angle_deg)) <= gate_deg;
+}
+
 __global__ void buildMosaicFullKernel(
     float* d_amp_mosaic,
     uint16_t* d_which_beam,
@@ -71,35 +93,6 @@ __global__ void buildMosaicFullKernel(
     float best_amp = 0.0f;
     uint16_t best_beam_idx = 0;
 
-    if (B > 0) {
-        BeamDevParams bp0 = d_beams[0];
-        float dx0 = x_label - bp0.x;
-        float dy0 = y_label - bp0.y;
-        float c0 = bp0.cos_j;
-        float s0 = bp0.sin_j;
-        float x0 = 0.0f, y0 = 0.0f;
-        switch (bp0.flag)
-        {
-        case 1: x0 = -dx0 * c0 - dy0 * s0; y0 = -dx0 * s0 + dy0 * c0; break;
-        case 2: x0 = dx0 * c0 + dy0 * s0; y0 = dx0 * s0 - dy0 * c0; break;
-        case 3: x0 = -dx0 * c0 + dy0 * s0; y0 = dx0 * s0 + dy0 * c0; break;
-        case 4: x0 = dx0 * c0 - dy0 * s0; y0 = -dx0 * s0 - dy0 * c0; break;
-        case 6: x0 = dx0 * c0 + dy0 * s0; y0 = -dx0 * s0 + dy0 * c0; break;
-        case 5: x0 = -dx0 * c0 - dy0 * s0; y0 = dx0 * s0 - dy0 * c0; break;
-        case 8: x0 = dx0 * c0 - dy0 * s0; y0 = dx0 * s0 + dy0 * c0; break;
-        case 7: x0 = -dx0 * c0 + dy0 * s0; y0 = -dx0 * s0 - dy0 * c0; break;
-        default: x0 = dx0; y0 = dy0; break;
-        }
-        float R_geo0 = sqrtf(x0 * x0 + y0 * y0 + Height * Height);
-        float R_idx0 = (R_geo0 - R_min) / R_bin;
-        if (!(R_idx0 > 0.0f && R_idx0 < (float)(M - 1))) {
-            int out_idx = j * nx + i;
-            d_amp_mosaic[out_idx] = 0.0f;
-            d_which_beam[out_idx] = 0;
-            return;
-        }
-    }
-
     for (int b = 0; b < B; ++b) {
 #if DBS_USE_CUDA_TEXTURE_OBJECTS
         if (useTexInterp && b != tex_beam_idx) continue;
@@ -125,6 +118,10 @@ __global__ void buildMosaicFullKernel(
         }
         float R = sqrtf(x_tmp * x_tmp + y_tmp * y_tmp + Height * Height);
         float fd = (R > 1e-6f) ? (2.0f * bp.V_feiji * x_tmp / (R * lambda)) : 0.0f;
+        if (!in_beam_angle_gate_device(fd, lambda, bp.V_feiji,
+                                       bp.angle_deg, bp.angle_gate_deg)) {
+            continue;
+        }
         // 严格物理范围判断
         float R_max = R_min + (M - 1) * R_bin;
         float fd_max = bp.min_fd + (nEff - 1) * bp.delta_fd;

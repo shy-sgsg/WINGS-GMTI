@@ -357,6 +357,12 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
         cfg.dbs_interp_mode = parseOptionalInt("dbs_interp_mode", cfg.dbs_interp_mode);
         cfg.dbs_max_mosaic_pixels = parseOptionalSizeT("dbs_max_mosaic_pixels",
                                                        cfg.dbs_max_mosaic_pixels);
+        cfg.dbs_mosaic_margin_ratio = std::max(
+            0.0, parseOptionalDouble("dbs_mosaic_margin_ratio",
+                                     cfg.dbs_mosaic_margin_ratio));
+        cfg.dbs_mosaic_margin_m = std::max(
+            0.0, parseOptionalDouble("dbs_mosaic_margin_m",
+                                     cfg.dbs_mosaic_margin_m));
     }
 
     cfg.estimate_error_angle = parseOptionalBool("estimate_error_angle", cfg.estimate_error_angle);

@@ -1,0 +1,33 @@
+{
+  "global": {
+    "coordinate_mode": "project_local",
+    "visibility_mode": "hard_gate",
+    "amplitude_mode": "snr_db",
+    "target_snr_db": 30.0,
+    "direct_amplitude": 1.0,
+    "chirp_phase_sign": 1,
+    "carrier_phase_sign": -1,
+    "channel_phase_mode": "baseline_approx",
+    "platform_mode": "ideal_platform",
+    "platform_speed_mps": 60.0,
+    "platform_height_m": 6000.0,
+    "beam_gain_threshold": 0.05,
+    "rms_floor": 1e-6
+  },
+  "targets": [
+    {
+      "id": 1,
+      "name": "strong_cooperative_target",
+      "motion_model": "constant_velocity",
+      "init_mode": "range_azimuth",
+      "slant_range_m": 85000.0,
+      "azimuth_deg": 0.0,
+      "height_m": 0.0,
+      "radial_velocity_mps": 10.0,
+      "cross_velocity_mps": 0.0,
+      "start_period": 0,
+      "end_period": 10,
+      "enabled": true
+    }
+  ]
+}
