@@ -1,4 +1,4 @@
-波位数，脉冲数，点数啊啊<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <GMTI>
     <GMTI_parameter>
         <GMTI_data>/home/shy/AIR/小长/GMTI_Data/Mission068/RawData/ID13_8H13M_GMTI0</GMTI_data>
@@ -7,7 +7,7 @@
         <Plane_POS>/home/shy/AIR/小长/GMTI_Data/Mission068/RTIPOS/RTIPOS_ID13.out</Plane_POS>
         <reffunc_add>/home/shy/AIR/小长/GMTI_Data/Mission068/RefFun_Br50MHz_Tr38us_Len4096.dat</reffunc_add>
         <isSeparated>separate</isSeparated>
-        <INFO_Type>1</INFO_Type>
+        <INFO_Type>0</INFO_Type>
         <GMTI_data_new>/home/shy/AIR/小长/GMTI_Data/Mission068/newdata/M68ID13.bin</GMTI_data_new>
         <pipe_root_path>/home/raco</pipe_root_path>
         <estimate_error_angle>0</estimate_error_angle>

@@ -6,6 +6,8 @@
 #include <csignal>
 #include <atomic>
 #include <unistd.h>
+#include <algorithm>
+#include <cctype>
 #include "trig_lut.hpp"
 
 
@@ -42,8 +44,9 @@ void printUsage(const char* prog)
 {
     cerr << "Usage:\n"
          << "  " << prog << " [--trig-mode lut|math|compare]\n"
-         << "  " << prog << " [--trig-mode lut|math|compare] --local-test <xml> <echo_file1> [echo_file2 ...]\n"
-         << "  " << prog << " [--trig-mode lut|math|compare] --local-test <xml> <id=echo_file1> [id=echo_file2 ...]\n";
+         << "  " << prog << " [--trig-mode lut|math|compare] [--runtime-mode debug|release]\n"
+         << "  " << prog << " [--trig-mode lut|math|compare] [--runtime-mode debug|release] --local-test <xml> <echo_file1> [echo_file2 ...]\n"
+         << "  " << prog << " [--trig-mode lut|math|compare] [--runtime-mode debug|release] --local-test <xml> <id=echo_file1> [id=echo_file2 ...]\n";
 }
 
 } // namespace
@@ -53,6 +56,9 @@ int main(int argc, char** argv)
     gmti::trig_lut::configureFromEnv();
 
     vector<string> args;
+    string runtimeModeOverride;
+    bool diagnosticsOverrideSet = false;
+    bool diagnosticsOverride = true;
     args.reserve(static_cast<size_t>(argc > 0 ? argc - 1 : 0));
     for (int i = 1; i < argc; ++i) {
         const string arg = argv[i];
@@ -62,6 +68,22 @@ int main(int argc, char** argv)
                 return 1;
             }
             if (consumedNext) ++i;
+        } else if (arg.compare(0, string("--runtime-mode=").size(), "--runtime-mode=") == 0) {
+            runtimeModeOverride = arg.substr(string("--runtime-mode=").size());
+            transform(runtimeModeOverride.begin(), runtimeModeOverride.end(), runtimeModeOverride.begin(),
+                      [](unsigned char ch) { return static_cast<char>(tolower(ch)); });
+        } else if (arg == "--runtime-mode") {
+            if (i + 1 >= argc) {
+                cerr << "[ERR] --runtime-mode 需要参数: debug|release\n";
+                return 1;
+            }
+            runtimeModeOverride = argv[++i];
+            transform(runtimeModeOverride.begin(), runtimeModeOverride.end(), runtimeModeOverride.begin(),
+                      [](unsigned char ch) { return static_cast<char>(tolower(ch)); });
+        } else if (arg.compare(0, string("--runtime-diagnostics=").size(), "--runtime-diagnostics=") == 0) {
+            const string value = arg.substr(string("--runtime-diagnostics=").size());
+            diagnosticsOverrideSet = true;
+            diagnosticsOverride = (value == "1" || value == "true" || value == "on");
         } else {
             args.push_back(arg);
         }
@@ -87,6 +109,9 @@ int main(int argc, char** argv)
         }
 
         MainCtrl gmtiCtrl("", false);
+        gmtiCtrl.runtime_mode_override_ = runtimeModeOverride;
+        gmtiCtrl.runtime_diagnostics_override_set_ = diagnosticsOverrideSet;
+        gmtiCtrl.runtime_diagnostics_override_ = diagnosticsOverride;
         return gmtiCtrl.RunLocalTest(xmlPath, echoFiles) ? 0 : 1;
     }
 
@@ -99,6 +124,9 @@ int main(int argc, char** argv)
     std::signal(SIGTERM, handle_signal);
 
     MainCtrl gmtiCtrl;
+    gmtiCtrl.runtime_mode_override_ = runtimeModeOverride;
+    gmtiCtrl.runtime_diagnostics_override_set_ = diagnosticsOverrideSet;
+    gmtiCtrl.runtime_diagnostics_override_ = diagnosticsOverride;
 
     while (g_running.load()) {
         sleep(1);

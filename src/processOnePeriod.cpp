@@ -8,7 +8,14 @@
 #include <algorithm> // lower_bound
 #include <numeric>   // accumulate
 #include <cstring>
+#include <cstdlib>
 #include <limits>
+#include <sstream>
+#include <iomanip>
+#include <map>
+#include <cerrno>
+#include <mutex>
+#include <sys/stat.h>
 //#include <Eigen/Dense>
 #include "GMTIProcessor.hpp"
 #include "rangeCompress.hpp"
@@ -22,6 +29,391 @@ using cudacd = cuFloatComplex;
 using cd = std::complex<float>;
 
 inline int sgn(double x, double eps = 1e-6) { return (x > eps) - (x < -eps); }
+
+namespace {
+
+std::string joinPathLocal(const std::string &a, const std::string &b)
+{
+    if (a.empty()) return b;
+    if (a.back() == '/' || a.back() == '\\') return a + b;
+    return a + "/" + b;
+}
+
+bool ensureDirLocal(const std::string &dir)
+{
+    if (dir.empty()) return true;
+    std::string cur;
+    size_t i = 0;
+    if (dir[0] == '/') {
+        cur = "/";
+        i = 1;
+    }
+    for (; i < dir.size(); ++i) {
+        cur.push_back(dir[i]);
+        if (dir[i] == '/' || i == dir.size() - 1) {
+            if (cur == "/" || cur == "./" || cur == ".") continue;
+            if (::mkdir(cur.c_str(), 0755) != 0 && errno != EEXIST) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+std::string parentDirLocal(const std::string &path)
+{
+    const size_t pos = path.find_last_of("/\\");
+    return pos == std::string::npos ? std::string() : path.substr(0, pos);
+}
+
+std::string inferSceneTruthPath(const Config &cfg)
+{
+    if (!cfg.pc_peak_scene_truth.empty()) {
+        return cfg.pc_peak_scene_truth;
+    }
+    const std::string out_parent = parentDirLocal(cfg.result_add);
+    return joinPathLocal(joinPathLocal(out_parent, "truth"), "scene_truth.csv");
+}
+
+std::vector<std::string> splitCsvLine(const std::string &line)
+{
+    std::vector<std::string> out;
+    std::string cur;
+    bool quoted = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char ch = line[i];
+        if (ch == '"') {
+            if (quoted && i + 1 < line.size() && line[i + 1] == '"') {
+                cur.push_back('"');
+                ++i;
+            } else {
+                quoted = !quoted;
+            }
+        } else if (ch == ',' && !quoted) {
+            out.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    out.push_back(cur);
+    return out;
+}
+
+double toDoubleLocal(const std::string &s, double fallback = std::numeric_limits<double>::quiet_NaN())
+{
+    if (s.empty()) return fallback;
+    char *end = nullptr;
+    const double v = std::strtod(s.c_str(), &end);
+    return end && *end == '\0' ? v : fallback;
+}
+
+int toIntLocal(const std::string &s, int fallback = -1)
+{
+    const double v = toDoubleLocal(s);
+    return std::isfinite(v) ? static_cast<int>(std::lround(v)) : fallback;
+}
+
+struct PcPeakTruth {
+    bool ok = false;
+    double range_m = std::numeric_limits<double>::quiet_NaN();
+    double range_sample_float = std::numeric_limits<double>::quiet_NaN();
+    int range_sample_int = -1;
+    int beam_id = -1;
+    double theta_cmd_deg = std::numeric_limits<double>::quiet_NaN();
+};
+
+PcPeakTruth loadPcPeakTruth(const Config &cfg)
+{
+    PcPeakTruth truth;
+    const std::string path = inferSceneTruthPath(cfg);
+    std::ifstream in(path.c_str());
+    if (!in) {
+        return truth;
+    }
+    std::string line;
+    if (!std::getline(in, line)) {
+        return truth;
+    }
+    const std::vector<std::string> header = splitCsvLine(line);
+    std::map<std::string, size_t> col;
+    for (size_t i = 0; i < header.size(); ++i) col[header[i]] = i;
+    auto get = [&](const std::vector<std::string> &cells, const std::string &name) -> std::string {
+        const auto it = col.find(name);
+        return (it == col.end() || it->second >= cells.size()) ? std::string() : cells[it->second];
+    };
+
+    std::vector<std::string> best;
+    double best_score = -1.0e300;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        const std::vector<std::string> cells = splitCsvLine(line);
+        const std::string type = get(cells, "type");
+        double score = 0.0;
+        if (type == "single_point") score += 1.0e9;
+        const double amp = toDoubleLocal(get(cells, "amplitude"), 0.0);
+        const double rcs = toDoubleLocal(get(cells, "rcs_db"), -999.0);
+        score += amp * 1.0e6 + rcs;
+        if (score > best_score) {
+            best_score = score;
+            best = cells;
+        }
+    }
+    if (best.empty()) {
+        return truth;
+    }
+    truth.range_m = toDoubleLocal(get(best, "range_m"));
+    if (!std::isfinite(truth.range_m)) {
+        truth.range_m = toDoubleLocal(get(best, "initial_range_m"));
+    }
+    truth.range_sample_float = toDoubleLocal(get(best, "range_sample_float"));
+    if (!std::isfinite(truth.range_sample_float) &&
+        cfg.has_sample_delay_us && std::isfinite(truth.range_m) && cfg.fs > 0.0) {
+        const double tau_abs_sec = 2.0 * truth.range_m / C;
+        const double tau_rel_sec = tau_abs_sec - cfg.sample_delay_us * 1.0e-6;
+        truth.range_sample_float = tau_rel_sec * cfg.fs;
+    }
+    truth.range_sample_int = toIntLocal(get(best, "range_sample_int"), -1);
+    if (truth.range_sample_int < 0 && std::isfinite(truth.range_sample_float)) {
+        truth.range_sample_int = static_cast<int>(std::lround(truth.range_sample_float));
+    }
+    truth.beam_id = toIntLocal(get(best, "beam_id_0based"), -1);
+    if (truth.beam_id < 0) {
+        truth.beam_id = toIntLocal(get(best, "beam_id"), -1);
+    }
+    truth.theta_cmd_deg = toDoubleLocal(get(best, "theta_cmd_deg"));
+    if (!std::isfinite(truth.theta_cmd_deg)) {
+        truth.theta_cmd_deg = toDoubleLocal(get(best, "initial_azimuth_deg"));
+    }
+    truth.ok = std::isfinite(truth.range_m) && std::isfinite(truth.range_sample_float);
+    return truth;
+}
+
+void writePcPeakDebug(const Config &cfg,
+                      int beamIdx,
+                      const std::vector<std::complex<float>> &data1,
+                      const std::vector<std::complex<float>> &data2)
+{
+    static std::mutex pc_peak_mutex;
+    if (!cfg.debug_pc_peak || data1.empty() || data2.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(pc_peak_mutex);
+    const int Na = effectivePulseNum(cfg);
+    const int Nr = cfg.rg_len;
+    if (Na <= 0 || Nr <= 0 ||
+        data1.size() < static_cast<size_t>(Na) * static_cast<size_t>(Nr) ||
+        data2.size() < static_cast<size_t>(Na) * static_cast<size_t>(Nr)) {
+        return;
+    }
+    const PcPeakTruth truth = loadPcPeakTruth(cfg);
+    const int expected = truth.ok ? (truth.range_sample_int - cfg.range_crop_start) : -1;
+    const int left = expected >= 0 ? std::max(0, expected - 50) : -1;
+    const int right = expected >= 0 ? std::min(Nr - 1, expected + 50) : -1;
+
+    std::vector<double> power(static_cast<size_t>(Nr), 0.0);
+    for (int c = 0; c < Nr; ++c) {
+        double acc = 0.0;
+        for (int r = 0; r < Na; ++r) {
+            const size_t off = static_cast<size_t>(r) * static_cast<size_t>(Nr) + static_cast<size_t>(c);
+            acc += 0.5 * (std::norm(data1[off]) + std::norm(data2[off]));
+        }
+        power[static_cast<size_t>(c)] = acc / static_cast<double>(Na);
+    }
+
+    auto maxInRange = [&](int l, int r) {
+        int idx = -1;
+        double val = -1.0;
+        if (l <= r && l >= 0 && r < Nr) {
+            for (int c = l; c <= r; ++c) {
+                if (power[static_cast<size_t>(c)] > val) {
+                    val = power[static_cast<size_t>(c)];
+                    idx = c;
+                }
+            }
+        }
+        return std::pair<int, double>(idx, val);
+    };
+    const auto local_peak = maxInRange(left, right);
+    const auto global_peak = maxInRange(0, Nr - 1);
+    const bool valid = truth.ok && expected >= 0 && expected < Nr &&
+                       local_peak.first >= 0 && local_peak.second > 0.0;
+
+    const std::string debug_dir = joinPathLocal(cfg.result_add, "debug");
+    if (!ensureDirLocal(debug_dir)) {
+        return;
+    }
+
+    {
+        char name[128];
+        std::snprintf(name, sizeof(name), "pc_range_profile_beam%02d.csv", beamIdx);
+        std::ofstream prof(joinPathLocal(debug_dir, name).c_str());
+        prof << "range_bin,range_m,power,in_expected_window\n";
+        for (int c = 0; c < Nr; ++c) {
+            const double range_m = (c >= 0 && c < static_cast<int>(cfg.Rg.size()))
+                ? cfg.Rg[static_cast<size_t>(c)]
+                : cfg.R_min + static_cast<double>(c) * cfg.R_bin;
+            prof << c << "," << std::setprecision(15) << range_m << ","
+                 << power[static_cast<size_t>(c)] << ","
+                 << ((left >= 0 && c >= left && c <= right) ? 1 : 0) << "\n";
+        }
+    }
+
+    const std::string check_path = joinPathLocal(debug_dir, "pc_peak_check.csv");
+    const bool need_header = !static_cast<bool>(std::ifstream(check_path.c_str()));
+    std::ofstream os(check_path.c_str(), std::ios::app);
+    if (!os) return;
+    if (need_header) {
+        os << "case_id,run_id,period_id,beam_id,"
+              "truth_range_m,truth_range_sample_float,truth_range_sample_int,"
+              "pc_crop_start,expected_pc_bin_without_offset,"
+              "search_win_left,search_win_right,"
+              "pc_peak_bin,pc_peak_range_m,pc_peak_power,"
+              "pc_peak_offset_bin,pc_peak_range_error_m,"
+              "global_peak_bin,global_peak_range_m,global_peak_power,"
+              "valid\n";
+    }
+    auto rangeAt = [&](int bin) -> double {
+        if (bin >= 0 && bin < static_cast<int>(cfg.Rg.size())) return cfg.Rg[static_cast<size_t>(bin)];
+        return std::numeric_limits<double>::quiet_NaN();
+    };
+    const double pc_range = rangeAt(local_peak.first);
+    const double global_range = rangeAt(global_peak.first);
+    os << gmti::runtime::caseId() << ","
+       << gmti::runtime::runId() << ","
+       << 0 << ","
+       << beamIdx << ","
+       << std::setprecision(15)
+       << truth.range_m << ","
+       << truth.range_sample_float << ","
+       << truth.range_sample_int << ","
+       << cfg.range_crop_start << ","
+       << expected << ","
+       << left << ","
+       << right << ","
+       << local_peak.first << ","
+       << pc_range << ","
+       << local_peak.second << ","
+       << (local_peak.first >= 0 && expected >= 0 ? local_peak.first - expected : 0) << ","
+       << (std::isfinite(pc_range) && std::isfinite(truth.range_m) ? pc_range - truth.range_m : std::numeric_limits<double>::quiet_NaN()) << ","
+       << global_peak.first << ","
+       << global_range << ","
+       << global_peak.second << ","
+       << (valid ? 1 : 0) << "\n";
+}
+
+bool pcProfileEnvEnabled()
+{
+    const char *v = std::getenv("GMTI_DEBUG_PC_PROFILE");
+    return v && std::string(v) == "1";
+}
+
+bool pcProfile2dEnvEnabled()
+{
+    const char *v = std::getenv("GMTI_PC_DUMP_2D");
+    return v && std::string(v) == "1";
+}
+
+bool pcProfileBeamEnabled(int beamIdx)
+{
+    const char *v = std::getenv("GMTI_PC_DUMP_BEAMS");
+    if (!v || !*v) return true;
+    std::stringstream ss(v);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (toIntLocal(item, -1) == beamIdx) return true;
+    }
+    return false;
+}
+
+void writeManualPcProfile(const Config &cfg,
+                          int beamIdx,
+                          const std::vector<std::complex<float>> &data1,
+                          const std::vector<std::complex<float>> &data2)
+{
+    if (!pcProfileEnvEnabled() || !pcProfileBeamEnabled(beamIdx) || data1.empty()) return;
+    const int Na = effectivePulseNum(cfg);
+    const int Nr = cfg.rg_len;
+    const bool has_ch2 = data2.size() >= static_cast<size_t>(Na) * static_cast<size_t>(Nr);
+    if (Na <= 0 || Nr <= 0 ||
+        data1.size() < static_cast<size_t>(Na) * static_cast<size_t>(Nr)) {
+        return;
+    }
+    const std::string debug_dir = joinPathLocal(cfg.result_add, "debug");
+    if (!ensureDirLocal(debug_dir)) return;
+
+    auto rangeAt = [&](int bin) {
+        if (bin >= 0 && bin < static_cast<int>(cfg.Rg.size())) return cfg.Rg[static_cast<size_t>(bin)];
+        return cfg.R_min + static_cast<double>(bin) * cfg.R_bin;
+    };
+
+    std::vector<double> power(static_cast<size_t>(Nr), 0.0);
+    int peak_bin = 0;
+    double peak_power = -1.0;
+    for (int c = 0; c < Nr; ++c) {
+        double acc = 0.0;
+        for (int p = 0; p < Na; ++p) {
+            const size_t off = static_cast<size_t>(p) * static_cast<size_t>(Nr) + static_cast<size_t>(c);
+            const double p1 = std::norm(data1[off]);
+            if (has_ch2) {
+                acc += 0.5 * (p1 + std::norm(data2[off]));
+            } else {
+                acc += p1;
+            }
+        }
+        power[static_cast<size_t>(c)] = acc / static_cast<double>(Na);
+        if (power[static_cast<size_t>(c)] > peak_power) {
+            peak_power = power[static_cast<size_t>(c)];
+            peak_bin = c;
+        }
+    }
+
+    char name[128];
+    std::snprintf(name, sizeof(name), "pc_range_profile_beam%02d.csv", beamIdx);
+    const std::string profile_path = joinPathLocal(debug_dir, name);
+    std::ofstream prof(profile_path.c_str());
+    prof << "bin,range_m,power,power_db\n";
+    for (int c = 0; c < Nr; ++c) {
+        const double pwr = power[static_cast<size_t>(c)];
+        prof << c << "," << std::setprecision(15) << rangeAt(c) << ","
+             << pwr << "," << 10.0 * std::log10(pwr + 1.0e-30) << "\n";
+    }
+
+    if (pcProfile2dEnvEnabled()) {
+        std::snprintf(name, sizeof(name), "pc_amplitude_2d_beam%02d.csv", beamIdx);
+        std::ofstream out2d(joinPathLocal(debug_dir, name).c_str());
+        out2d << "pulse_idx,bin,range_m,amp_ch1,amp_ch2,amp_mean,power_mean,power_db\n";
+        for (int p = 0; p < Na; ++p) {
+            for (int c = 0; c < Nr; ++c) {
+                const size_t off = static_cast<size_t>(p) * static_cast<size_t>(Nr) + static_cast<size_t>(c);
+                const double a1 = std::abs(data1[off]);
+                if (has_ch2) {
+                    const double a2 = std::abs(data2[off]);
+                    const double pm = 0.5 * (a1 * a1 + a2 * a2);
+                    out2d << p << "," << c << "," << std::setprecision(15) << rangeAt(c) << ","
+                          << a1 << "," << a2 << "," << 0.5 * (a1 + a2) << ","
+                          << pm << "," << 10.0 * std::log10(pm + 1.0e-30) << "\n";
+                } else {
+                    const double pm = a1 * a1;
+                    out2d << p << "," << c << "," << std::setprecision(15) << rangeAt(c) << ","
+                          << a1 << ",," << a1 << "," << pm << ","
+                          << 10.0 * std::log10(pm + 1.0e-30) << "\n";
+                }
+            }
+        }
+    }
+
+    const double peak_db = 10.0 * std::log10(peak_power + 1.0e-30);
+    std::cout << "[PC_PROFILE] wrote " << profile_path
+              << ", beam=" << beamIdx
+              << ", Na=" << Na
+              << ", Nr=" << Nr
+              << ", peak_bin=" << peak_bin
+              << ", peak_range_m=" << rangeAt(peak_bin)
+              << ", peak_power_db=" << peak_db << std::endl;
+}
+
+} // namespace
 // 返回同样编号：1=SW,2=NE,3=NW,4=SE,0=未知
 int flight_flag_by_sign(double Vx, double Vy, double eps = 1e-6)
 {
@@ -355,6 +747,7 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
 {
     TIMING_SCOPE(processOnePeriod);
     Config cfg = cfg_; // 复制配置，局部修改
+    const std::string timing_beam_extra = "beam_id=" + std::to_string(periodIdx);
     // 0) 读取脉冲块（适配双文件/交织）
     std::vector<std::complex<float>> data1, data2;
     std::vector<double> utc;
@@ -364,10 +757,13 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     // 读取脉冲块
     double theta_sq = 0.0; // 方位角平方
     bool readSuccess = false;
-    if (cfg.INFO_Type) {
-        readSuccess = readPulseBlockNewProtocol(cfg, periodIdx, data1, data2, utc, theta_sq, echoPosRaw);
-    } else {
-        readSuccess = readPulseBlock(cfg, periodIdx, data1, data2, utc, theta_sq);
+    {
+        gmti::runtime::TimingScope timing_data_read("data_read", 0, timing_beam_extra);
+        if (cfg.INFO_Type) {
+            readSuccess = readPulseBlockNewProtocol(cfg, periodIdx, data1, data2, utc, theta_sq, echoPosRaw);
+        } else {
+            readSuccess = readPulseBlock(cfg, periodIdx, data1, data2, utc, theta_sq);
+        }
     }
     if (!readSuccess)
     {
@@ -381,49 +777,54 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     
     bool data_on_gpu = false;
 
-    // 如果没有脉压，则需要脉压
-    if (!cfg.isPC)
     {
-        data_on_gpu = pulseCompressionGpuResident(data1, data2, cfg);
-        bool pc_ok = data_on_gpu;
-        if (!pc_ok) {
-            pc_ok = pulseCompression(data1, data2, cfg);
-        }
-        if (!pc_ok) {
-            std::cerr << "脉压处理失败。" << std::endl;
-            return false;
-        }
-        DBG(data_on_gpu ? "脉压处理成功，结果驻留GPU" : "脉压处理成功，结果位于CPU内存");
-    }
-    else
-    {
-        // 只进行抽取
-        // 归一化 + 裁剪到 M，输出到 rc_out（W×M 行主）
-        std::vector<std::complex<float>> rc_out;
-        const int Lraw = cfg.pulse_len;
-        const int W = effectivePulseNum(cfg);
-        const int M1 = cfg.rg_len;
-        const int Lraw2M = Lraw / M1;
-        rc_out.resize((size_t)W * M1);
-        for (int k = 0; k < W; ++k)
+        gmti::runtime::TimingScope timing_pulse_compression("pulse_compression", 0, timing_beam_extra);
+        // 如果没有脉压，则需要脉压
+        if (!cfg.isPC)
         {
-            for (int m = 0; m < M1; ++m)
-            {
-                rc_out[(size_t)k * M1 + m] = data1[(size_t)k * Lraw + m * Lraw2M];
+            // P1.5 debug needs a stable host-side matrix immediately after pulse compression.
+            // Keep the normal GPU-resident path unchanged when debug_pc_peak is disabled.
+            data_on_gpu = pulseCompressionGpuResident(data1, data2, cfg);
+            bool pc_ok = data_on_gpu;
+            if (!pc_ok) {
+                pc_ok = pulseCompression(data1, data2, cfg);
             }
+            if (!pc_ok) {
+                std::cerr << "脉压处理失败。" << std::endl;
+                return false;
+            }
+            DBG(data_on_gpu ? "脉压处理成功，结果驻留GPU" : "脉压处理成功，结果位于CPU内存");
         }
-        data1.swap(rc_out);
+        else
+        {
+            // 只进行抽取
+            // 归一化 + 裁剪到 M，输出到 rc_out（W×M 行主）
+            std::vector<std::complex<float>> rc_out;
+            const int Lraw = cfg.pulse_len;
+            const int W = effectivePulseNum(cfg);
+            const int M1 = cfg.rg_len;
+            const int Lraw2M = Lraw / M1;
+            rc_out.resize((size_t)W * M1);
+            for (int k = 0; k < W; ++k)
+            {
+                for (int m = 0; m < M1; ++m)
+                {
+                    rc_out[(size_t)k * M1 + m] = data1[(size_t)k * Lraw + m * Lraw2M];
+                }
+            }
+            data1.swap(rc_out);
 
-        rc_out.resize((size_t)W * M1);
-        for (int k = 0; k < W; ++k)
-        {
-            for (int m = 0; m < M1; ++m)
+            rc_out.resize((size_t)W * M1);
+            for (int k = 0; k < W; ++k)
             {
-                rc_out[(size_t)k * M1 + m] = data2[(size_t)k * Lraw + m * Lraw2M];
+                for (int m = 0; m < M1; ++m)
+                {
+                    rc_out[(size_t)k * M1 + m] = data2[(size_t)k * Lraw + m * Lraw2M];
+                }
             }
+            data2.swap(rc_out);
+            DBG("跳过脉压，直接抽取数据成功");
         }
-        data2.swap(rc_out);
-        DBG("跳过脉压，直接抽取数据成功");
     }
 
     // 脉压完成后再更新采样率，避免影响 rangeCompressFFT / cuFFT 的匹配滤波器构造
@@ -572,10 +973,21 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
             ERR("GPU 通道2幅度校准失败。");
             return false;
         }
+        if (pcProfileEnvEnabled() && pcProfileBeamEnabled(periodIdx)) {
+            std::vector<std::complex<float>> pc1, pc2;
+            const size_t total = static_cast<size_t>(effectivePulseNum(cfg)) * static_cast<size_t>(cfg.rg_len);
+            pc1.resize(total);
+            pc2.resize(total);
+            cudaMemcpyAsync(pc1.data(), gpu_ptrs_.d1, total * sizeof(cd), cudaMemcpyDeviceToHost, stream_compute_);
+            cudaMemcpyAsync(pc2.data(), gpu_ptrs_.d2, total * sizeof(cd), cudaMemcpyDeviceToHost, stream_compute_);
+            cudaStreamSynchronize(stream_compute_);
+            writeManualPcProfile(cfg, periodIdx, pc1, pc2);
+        }
     } else {
         const size_t N = data2.size();
         for (size_t i = 0; i < N; ++i)
             data2[i] *= coef;
+        writeManualPcProfile(cfg, periodIdx, data1, data2);
     }
 
     // 1) 飞机位姿/速度
@@ -659,177 +1071,184 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
 
-    if (!data_on_gpu) {
-        cuda_upload_async(data1, data2, Na, Nr);
-    }
-
-    if (!cuda_stage_align_async(skipInt, Na, Nr)) {
-        return false;
-    }
-    if (!cuda_stage_fft_async(Na, Nr)) {
-        return false;
-    }
-    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr)) {
-        return false;
-    }
-
-    double fa2 = unwrap_prf_to_model(fa_ctr, cfg.PRF, theta_deg, plane.V, cfg.fc); // 解除模糊
-    double fa_shift = fa2 - fa_ctr;
-    for (size_t i = 0; i < faAxis.size(); ++i) faAxis[i] += fa_shift;
-    
-    // --- 4) 距离向初相校正 ---
-    double thre_rg = 0.1 * M_PI;
     std::vector<float> phi_fit;
     std::vector<double> cpu_phi_fit;
     std::vector<double> phi_diss_phase; // 存储相位值
     std::vector<int>    phi_diss_range; // 存储对应的距离向索引
 
-    if (rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
-        cuda_apply_rg_correction_async(phi_fit, Na, Nr);
-    }
-    else {
-        std::cout << "相位校正失败。" << std::endl;
-        return false;
-    }
-    DBG("最终对齐完成，使用移位脉冲数: " << skipInt);
-
     std::array<double, 2> p_38;
-    if (!clutter_cancel_38_paper_1_p38_cuda(
-        faAxis,
-        cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
-        cfg,
-        p_38
-    )) return false;
-
-    // 计算用于 CFAR 的 phase_map（GPU 生成，避免回传大矩阵）
     std::vector<float> phase_map;
-    if (!cuda_download_phase_map(phase_map, Na * Nr)) return false;
-
-    // 对消
-    cuda_stage_align_async(skipInt_theory, Na, Nr);
-    cuda_stage_fft_async(Na, Nr);
-    cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr);
-    if (rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
-        cuda_apply_rg_correction_async(phi_fit, Na, Nr);
-    }
-    else {
-        std::cout << "相位校正失败。" << std::endl;
-        return false;
-    }
-     DBG("最终对齐完成，使用移位脉冲数: " << skipInt_theory);
-
-    // --- 8) 最终 CSI 对消 ---
     std::array<double, 2> p_38_csi;
     std::vector<double> ph_trace;
     std::vector<double> fa_cut;
-    if (!clutter_cancel_38_paper_1_cuda(
-        faAxis,
-        cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
-        cfg,
-        F1_r, p_38_csi, ph_trace, fa_cut
-    )) return false;
+    {
+        gmti::runtime::TimingScope timing_channel_cancellation("channel_cancellation", 0, timing_beam_extra);
+        if (!data_on_gpu) {
+            cuda_upload_async(data1, data2, Na, Nr);
+        }
+
+        if (!cuda_stage_align_async(skipInt, Na, Nr)) {
+            return false;
+        }
+        if (!cuda_stage_fft_async(Na, Nr)) {
+            return false;
+        }
+        if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr)) {
+            return false;
+        }
+
+        double fa2 = unwrap_prf_to_model(fa_ctr, cfg.PRF, theta_deg, plane.V, cfg.fc); // 解除模糊
+        double fa_shift = fa2 - fa_ctr;
+        for (size_t i = 0; i < faAxis.size(); ++i) faAxis[i] += fa_shift;
+
+        // --- 4) 距离向初相校正 ---
+        double thre_rg = 0.1 * M_PI;
+
+        if (rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
+            cuda_apply_rg_correction_async(phi_fit, Na, Nr);
+        }
+        else {
+            std::cout << "相位校正失败。" << std::endl;
+            return false;
+        }
+        DBG("最终对齐完成，使用移位脉冲数: " << skipInt);
+
+        if (!clutter_cancel_38_paper_1_p38_cuda(
+            faAxis,
+            cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
+            cfg,
+            p_38
+        )) return false;
+
+        // 计算用于 CFAR 的 phase_map（GPU 生成，避免回传大矩阵）
+        if (!cuda_download_phase_map(phase_map, Na * Nr)) return false;
+
+        // 对消
+        cuda_stage_align_async(skipInt_theory, Na, Nr);
+        cuda_stage_fft_async(Na, Nr);
+        cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr);
+        if (rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
+            cuda_apply_rg_correction_async(phi_fit, Na, Nr);
+        }
+        else {
+            std::cout << "相位校正失败。" << std::endl;
+            return false;
+        }
+         DBG("最终对齐完成，使用移位脉冲数: " << skipInt_theory);
+
+        // --- 8) 最终 CSI 对消 ---
+        if (!clutter_cancel_38_paper_1_cuda(
+            faAxis,
+            cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
+            cfg,
+            F1_r, p_38_csi, ph_trace, fa_cut
+        )) return false;
+    }
 
     // --- 10) CFAR 处理 ---
+    GMTIOutput::Detect targetSel;
+    bool targetDetection = false;
     const int band_st = std::max(0, std::min(az_st, effectivePulseNum(cfg) - 1));
     const int band_ed = std::max(0, std::min(az_ed, effectivePulseNum(cfg) - 1));
-    std::vector<int> prow, pcol;
-    std::vector<float> mydata;
-    int cfar_bnum = 16; // 背景单元数
-    int c_num = 4;      // 保护单元数
-    const bool use_gpu_cfar = true;
-    bool cfarSuccess1 = false;
-    bool cfarSuccess2 = false;
- 
-    std::vector<std::complex<float>> CSI_out;
-    cfarSuccess1 = dpca_cfar2_fast_cuda(CSI_out, band_st, band_ed, cfg.pf, c_num, cfar_bnum, "GO", cfg, mydata);
-    if (!cfarSuccess1)
     {
-        std::cerr << "GPU CFAR 处理失败，尝试回退到 CPU 路径。" << std::endl;
-        // CPU 回退路径：需要回传 F1/F2
-        std::vector<std::complex<float>> F1_f, F2_f;
-        cuda_download_sync(F1_f, F2_f, Na * Nr);
-        F1.resize(F1_f.size());
-        F2.resize(F2_f.size());
-        for (size_t i = 0; i < F1_f.size(); ++i) {
-            F1[i] = std::complex<double>(F1_f[i].real(), F1_f[i].imag());
-            F2[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
-        }
-        if (!cuda_download_csi_sync(CSI_out, Na * Nr))
+        gmti::runtime::TimingScope timing_detection("detection", 0, timing_beam_extra);
+        std::vector<int> prow, pcol;
+        std::vector<float> mydata;
+        int cfar_bnum = 16; // 背景单元数
+        int c_num = 4;      // 保护单元数
+        bool cfarSuccess1 = false;
+        bool cfarSuccess2 = false;
+
+        std::vector<std::complex<float>> CSI_out;
+        cfarSuccess1 = dpca_cfar2_fast_cuda(CSI_out, band_st, band_ed, cfg.pf, c_num, cfar_bnum, "GO", cfg, mydata);
+        if (!cfarSuccess1)
         {
-            std::cerr << "CSI 回传失败。" << std::endl;
-            return false;
-        }
-        std::vector<std::complex<double>> detect_data = F2;
-        if (band_st <= band_ed)
-        {
-            for (int r = band_st; r <= band_ed; ++r)
+            std::cerr << "GPU CFAR 处理失败，尝试回退到 CPU 路径。" << std::endl;
+            // CPU 回退路径：需要回传 F1/F2
+            std::vector<std::complex<float>> F1_f, F2_f;
+            cuda_download_sync(F1_f, F2_f, Na * Nr);
+            F1.resize(F1_f.size());
+            F2.resize(F2_f.size());
+            for (size_t i = 0; i < F1_f.size(); ++i) {
+                F1[i] = std::complex<double>(F1_f[i].real(), F1_f[i].imag());
+                F2[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
+            }
+            if (!cuda_download_csi_sync(CSI_out, Na * Nr))
             {
-                const size_t off = static_cast<size_t>(r) * static_cast<size_t>(cfg.rg_len);
-                for (size_t c = 0; c < static_cast<size_t>(cfg.rg_len); ++c) {
-                    const auto v = CSI_out[off + c];
-                    detect_data[off + c] = std::complex<double>(v.real(), v.imag());
+                std::cerr << "CSI 回传失败。" << std::endl;
+                return false;
+            }
+            std::vector<std::complex<double>> detect_data = F2;
+            if (band_st <= band_ed)
+            {
+                for (int r = band_st; r <= band_ed; ++r)
+                {
+                    const size_t off = static_cast<size_t>(r) * static_cast<size_t>(cfg.rg_len);
+                    for (size_t c = 0; c < static_cast<size_t>(cfg.rg_len); ++c) {
+                        const auto v = CSI_out[off + c];
+                        detect_data[off + c] = std::complex<double>(v.real(), v.imag());
+                    }
                 }
             }
+            std::vector<double> mydata_d;
+            cfarSuccess2 = dpca_cfar2_fast(detect_data, cfg.pf, c_num, cfar_bnum, "GO", cfg, mydata_d, prow, pcol);
+            if (cfarSuccess2) {
+                mydata.assign(mydata_d.begin(), mydata_d.end());
+            }
+            if (cfarSuccess2) {
+                DBG("合成检测数据完成(CPU)：杂波带内[" << band_st << ":" << band_ed << "]用CSI_out，带外用F2");
+            }
+            else {
+                std::cerr << "CPU CFAR 处理也失败。" << std::endl;
+                return false;
+            }
         }
-        std::vector<double> mydata_d;
-        cfarSuccess2 = dpca_cfar2_fast(detect_data, cfg.pf, c_num, cfar_bnum, "GO", cfg, mydata_d, prow, pcol);
-        if (cfarSuccess2) {
-            mydata.assign(mydata_d.begin(), mydata_d.end());
-        }
-        if (cfarSuccess2) {
-            DBG("合成检测数据完成(CPU)：杂波带内[" << band_st << ":" << band_ed << "]用CSI_out，带外用F2");
-        }        
-        else {
-            std::cerr << "CPU CFAR 处理也失败。" << std::endl;
-            return false;
-        }
-    }
 
-    // --- 11) 聚类滤波 ---
-    std::vector<int> prow_new, pcol_new;
-    std::vector<float> refined_mydata;
-    std::vector<float> phase_std_list;
-    // cluster_filter(mydata, cfg.min_points, cfg, refined_mydata, prow_new, pcol_new);
-    const bool use_gpu_cluster = true;
-    bool cluster_ok = false;
-    if (use_gpu_cluster)
-    {
-        cluster_ok = cluster_filter_gap_phase_cuda(mydata, phase_map, cfg.min_points, 2, 0.2f,
-                               cfg, refined_mydata, prow_new, pcol_new, phase_std_list);
+        // --- 11) 聚类滤波 ---
+        std::vector<int> prow_new, pcol_new;
+        std::vector<float> refined_mydata;
+        std::vector<float> phase_std_list;
+        // cluster_filter(mydata, cfg.min_points, cfg, refined_mydata, prow_new, pcol_new);
+        const bool use_gpu_cluster = true;
+        bool cluster_ok = false;
+        if (use_gpu_cluster)
+        {
+            cluster_ok = cluster_filter_gap_phase_cuda(mydata, phase_map, cfg.min_points, 2, 0.2f,
+                                   cfg, refined_mydata, prow_new, pcol_new, phase_std_list);
+            if (!cluster_ok)
+            {
+                std::cerr << "GPU 聚类失败，回退到 CPU 路径。" << std::endl;
+            }
+        }
         if (!cluster_ok)
         {
-            std::cerr << "GPU 聚类失败，回退到 CPU 路径。" << std::endl;
+            std::vector<double> mydata_d(mydata.begin(), mydata.end());
+            std::vector<double> phase_map_d(phase_map.begin(), phase_map.end());
+            std::vector<double> refined_mydata_d;
+            std::vector<double> phase_std_list_d;
+            cluster_ok = cluster_filter_gap_phase(mydata_d, phase_map_d, cfg.min_points, 2, 0.2,
+                                                  cfg, refined_mydata_d, prow_new, pcol_new, phase_std_list_d);
+            if (cluster_ok) {
+                refined_mydata.assign(refined_mydata_d.begin(), refined_mydata_d.end());
+                phase_std_list.assign(phase_std_list_d.begin(), phase_std_list_d.end());
+            }
         }
-    }
-    if (!cluster_ok)
-    {
-        std::vector<double> mydata_d(mydata.begin(), mydata.end());
-        std::vector<double> phase_map_d(phase_map.begin(), phase_map.end());
-        std::vector<double> refined_mydata_d;
-        std::vector<double> phase_std_list_d;
-        cluster_ok = cluster_filter_gap_phase(mydata_d, phase_map_d, cfg.min_points, 2, 0.2,
-                                              cfg, refined_mydata_d, prow_new, pcol_new, phase_std_list_d);
-        if (cluster_ok) {
-            refined_mydata.assign(refined_mydata_d.begin(), refined_mydata_d.end());
-            phase_std_list.assign(phase_std_list_d.begin(), phase_std_list_d.end());
-        }
-    }
 
 #ifdef DEBUG
-    // 保存 CFAR 结果以便调试
-    {
-        std::ofstream fout("debug_CFI_mydata.bin", std::ios::binary);
-        fout.write(reinterpret_cast<const char *>(mydata.data()), mydata.size() * sizeof(float));
-        fout.close();
-    }
+        // 保存 CFAR 结果以便调试
+        {
+            std::ofstream fout("debug_CFI_mydata.bin", std::ios::binary);
+            fout.write(reinterpret_cast<const char *>(mydata.data()), mydata.size() * sizeof(float));
+            fout.close();
+        }
 #endif
 
-    if (!cfarSuccess1 && !cfarSuccess2)
-    {
-        std::cerr << "CFAR 处理失败。" << std::endl;
-        return false;
-    }
-    DBG("CFAR 处理成功，目标数: " << prow_new.size());
+        if (!cfarSuccess1 && !cfarSuccess2)
+        {
+            std::cerr << "CFAR 处理失败。" << std::endl;
+            return false;
+        }
+        DBG("CFAR 处理成功，目标数: " << prow_new.size());
 
 
 #ifdef DEBUG
@@ -843,28 +1262,27 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         fout2.close();
     }
 #endif
-    GMTIOutput::Detect targetSel;
-    const bool use_gpu_target = true;
-    bool targetDetection = false;
-    if (use_gpu_target)
-    {
-        targetDetection = target_select_cuda(prow_new, pcol_new, cfg, targetSel);
+        const bool use_gpu_target = true;
+        if (use_gpu_target)
+        {
+            targetDetection = target_select_cuda(prow_new, pcol_new, cfg, targetSel);
+            if (!targetDetection)
+            {
+                std::cerr << "GPU target_select 失败，回退到 CPU 路径。" << std::endl;
+            }
+        }
         if (!targetDetection)
         {
-            std::cerr << "GPU target_select 失败，回退到 CPU 路径。" << std::endl;
+            std::vector<std::complex<float>> F1_f, F2_f;
+            cuda_download_sync(F1_f, F2_f, Na * Nr);
+            F1.resize(F1_f.size());
+            F2.resize(F2_f.size());
+            for (size_t i = 0; i < F1_f.size(); ++i) {
+                F1[i] = std::complex<double>(F1_f[i].real(), F1_f[i].imag());
+                F2[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
+            }
+            targetDetection = target_select(F1, F2, prow_new, pcol_new, cfg, targetSel);
         }
-    }
-    if (!targetDetection)
-    {
-        std::vector<std::complex<float>> F1_f, F2_f;
-        cuda_download_sync(F1_f, F2_f, Na * Nr);
-        F1.resize(F1_f.size());
-        F2.resize(F2_f.size());
-        for (size_t i = 0; i < F1_f.size(); ++i) {
-            F1[i] = std::complex<double>(F1_f[i].real(), F1_f[i].imag());
-            F2[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
-        }
-        targetDetection = target_select(F1, F2, prow_new, pcol_new, cfg, targetSel);
     }
 
     double ref_phase = faAxis[az_center] * p_38[0] + p_38[1];
@@ -985,6 +1403,21 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         MT.push_back(out.utcMid);
         MT.push_back(direction);
         MT.push_back(range);
+        GMTIOutput::DetectionCsvRecord rec;
+        rec.period_id = 0;
+        rec.beam_id = periodIdx;
+        rec.range_bin = c;
+        rec.row = r;
+        rec.col = c;
+        rec.range_m = Rg;
+        rec.theta_cmd_deg = theta_sq;
+        rec.theta_true_deg = theta_deg;
+        rec.e = xP;
+        rec.n = yP;
+        rec.lat = lat;
+        rec.lon = lng;
+        rec.utc = out.utcMid;
+        out.detection_records.push_back(rec);
         DBG("目标 " << i << " 定位成功: Lat=" << lat << " Lng=" << lng);
     }
 
@@ -1008,16 +1441,20 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
                                                 FusionGroupContext &ctx)
 {
     Config cfg = cfg_;
+    const std::string timing_beam_extra = "beam_id=" + std::to_string(periodIdx);
     std::vector<std::complex<float>> data1, data2;
     std::vector<double> utc;
     std::vector<std::vector<double>> echoPosRaw;
     double theta_sq = 0.0;
 
     bool readSuccess = false;
-    if (cfg.INFO_Type) {
-        readSuccess = readPulseBlockNewProtocol(cfg, periodIdx, data1, data2, utc, theta_sq, echoPosRaw);
-    } else {
-        readSuccess = readPulseBlock(cfg, periodIdx, data1, data2, utc, theta_sq);
+    {
+        gmti::runtime::TimingScope timing_data_read("data_read", 0, timing_beam_extra);
+        if (cfg.INFO_Type) {
+            readSuccess = readPulseBlockNewProtocol(cfg, periodIdx, data1, data2, utc, theta_sq, echoPosRaw);
+        } else {
+            readSuccess = readPulseBlock(cfg, periodIdx, data1, data2, utc, theta_sq);
+        }
     }
     if (!readSuccess) {
         return false;
@@ -1027,35 +1464,40 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     }
 
     bool data_on_gpu = false;
-    if (!cfg.isPC) {
-        data_on_gpu = pulseCompressionGpuResident(data1, data2, cfg);
-        bool pc_ok = data_on_gpu;
-        if (!pc_ok) {
-            pc_ok = pulseCompression(data1, data2, cfg);
-        }
-        if (!pc_ok) {
-            return false;
-        }
-    } else {
-        const int Lraw = cfg.pulse_len;
-        const int W = effectivePulseNum(cfg);
-        const int M1 = cfg.rg_len;
-        const int Lraw2M = Lraw / M1;
-        std::vector<std::complex<float>> rc_out((size_t)W * M1);
-        for (int k = 0; k < W; ++k) {
-            for (int m = 0; m < M1; ++m) {
-                rc_out[(size_t)k * M1 + m] = data1[(size_t)k * Lraw + m * Lraw2M];
+    {
+        gmti::runtime::TimingScope timing_pulse_compression("pulse_compression", 0, timing_beam_extra);
+        if (!cfg.isPC) {
+            // P1.5 debug needs a stable host-side matrix immediately after pulse compression.
+            // Keep the normal GPU-resident path unchanged when debug_pc_peak is disabled.
+            data_on_gpu = pulseCompressionGpuResident(data1, data2, cfg);
+            bool pc_ok = data_on_gpu;
+            if (!pc_ok) {
+                pc_ok = pulseCompression(data1, data2, cfg);
             }
-        }
-        data1.swap(rc_out);
+            if (!pc_ok) {
+                return false;
+            }
+        } else {
+            const int Lraw = cfg.pulse_len;
+            const int W = effectivePulseNum(cfg);
+            const int M1 = cfg.rg_len;
+            const int Lraw2M = Lraw / M1;
+            std::vector<std::complex<float>> rc_out((size_t)W * M1);
+            for (int k = 0; k < W; ++k) {
+                for (int m = 0; m < M1; ++m) {
+                    rc_out[(size_t)k * M1 + m] = data1[(size_t)k * Lraw + m * Lraw2M];
+                }
+            }
+            data1.swap(rc_out);
 
-        rc_out.assign((size_t)W * M1, std::complex<float>(0.0f, 0.0f));
-        for (int k = 0; k < W; ++k) {
-            for (int m = 0; m < M1; ++m) {
-                rc_out[(size_t)k * M1 + m] = data2[(size_t)k * Lraw + m * Lraw2M];
+            rc_out.assign((size_t)W * M1, std::complex<float>(0.0f, 0.0f));
+            for (int k = 0; k < W; ++k) {
+                for (int m = 0; m < M1; ++m) {
+                    rc_out[(size_t)k * M1 + m] = data2[(size_t)k * Lraw + m * Lraw2M];
+                }
             }
+            data2.swap(rc_out);
         }
-        data2.swap(rc_out);
     }
 
     if (!usesRangeCropWindow(cfg)) {
@@ -1143,10 +1585,21 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
                                        static_cast<size_t>(effectivePulseNum(cfg)) * static_cast<size_t>(cfg.rg_len))) {
             return false;
         }
+        if (pcProfileEnvEnabled() && pcProfileBeamEnabled(periodIdx)) {
+            std::vector<std::complex<float>> pc1, pc2;
+            const size_t total = static_cast<size_t>(effectivePulseNum(cfg)) * static_cast<size_t>(cfg.rg_len);
+            pc1.resize(total);
+            pc2.resize(total);
+            cudaMemcpyAsync(pc1.data(), gpu_ptrs_.d1, total * sizeof(cd), cudaMemcpyDeviceToHost, stream_compute_);
+            cudaMemcpyAsync(pc2.data(), gpu_ptrs_.d2, total * sizeof(cd), cudaMemcpyDeviceToHost, stream_compute_);
+            cudaStreamSynchronize(stream_compute_);
+            writeManualPcProfile(cfg, periodIdx, pc1, pc2);
+        }
     } else {
         for (auto &v : data2) {
             v *= coef;
         }
+        writeManualPcProfile(cfg, periodIdx, data1, data2);
     }
 
     GMTIOutput::Plane plane;
@@ -1183,7 +1636,7 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     if (!data_on_gpu && !computeDoppler(data1, 1, cfg, faAxis, fa_ctr, plane.V, theta_deg)) {
         return false;
     }
-    // std::cout << "[fusion][fd] period=" << periodIdx
+    // std::cout << "[fusion][fd] beam=" << periodIdx
     //           << " theta_sq=" << theta_sq
     //           << " angle_from_fd=" << angle_deg
     //           << " theta_for_support=" << theta_deg
@@ -1211,169 +1664,176 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
 
     const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
-    if (!data_on_gpu) {
-        if (!cuda_upload_async(data1, data2, Na, Nr)) {
+    FusionBeamMeta beamMeta;
+    std::array<double, 2> p_38;
+    std::vector<float> phase_map;
+    {
+        gmti::runtime::TimingScope timing_channel_cancellation("channel_cancellation", 0, timing_beam_extra);
+        if (!data_on_gpu) {
+            if (!cuda_upload_async(data1, data2, Na, Nr)) {
+                return false;
+            }
+        }
+        if (!cuda_stage_align_async(skipInt, Na, Nr)) {
             return false;
         }
-    }
-    if (!cuda_stage_align_async(skipInt, Na, Nr)) {
-        return false;
-    }
-    if (!cuda_stage_fft_async(Na, Nr)) {
-        return false;
-    }
-    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr)) {
-        return false;
-    }
+        if (!cuda_stage_fft_async(Na, Nr)) {
+            return false;
+        }
+        if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr)) {
+            return false;
+        }
 
-    FusionBeamMeta beamMeta;
-    beamMeta.beam_index = periodIdx;
-    beamMeta.slot = static_cast<int>(slot);
-    beamMeta.theta_sq = theta_sq;
-    beamMeta.theta_true = theta_sq;
-    beamMeta.fd_ctr_wrapped = fa_ctr;
-    beamMeta.fd_ctr_unwrapped = fa_ctr;
-    beamMeta.utc_mid = utc.empty() ? 0.0 : utc[utc.size() / 2];
-    beamMeta.plane = plane;
-    beamMeta.PRF = cfg.PRF;
-    beamMeta.fc_hz = cfg.fc;
-    beamMeta.lambda = (cfg.lambda > 0.0) ? cfg.lambda : (C / cfg.fc); 
+        beamMeta.beam_index = periodIdx;
+        beamMeta.slot = static_cast<int>(slot);
+        beamMeta.theta_sq = theta_sq;
+        beamMeta.theta_true = theta_sq;
+        beamMeta.fd_ctr_wrapped = fa_ctr;
+        beamMeta.fd_ctr_unwrapped = fa_ctr;
+        beamMeta.utc_mid = utc.empty() ? 0.0 : utc[utc.size() / 2];
+        beamMeta.plane = plane;
+        beamMeta.PRF = cfg.PRF;
+        beamMeta.fc_hz = cfg.fc;
+        beamMeta.lambda = (cfg.lambda > 0.0) ? cfg.lambda : (C / cfg.fc); 
 
-    if (!exportDbsCacheAfterRecenter(cfg, beamMeta, slot, Na, Nr, ctx.rd, ctx.meta)) {
-        return false;
-    }
+        if (!exportDbsCacheAfterRecenter(cfg, beamMeta, slot, Na, Nr, ctx.rd, ctx.meta)) {
+            return false;
+        }
 
-    const double thre_rg = 0.1 * M_PI;
-    std::vector<float> phi_fit;
-    std::vector<double> phi_diss_phase;
-    std::vector<int> phi_diss_range;
-    if (!rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
-        return false;
-    }
-    cuda_apply_rg_correction_async(phi_fit, Na, Nr);
+        const double thre_rg = 0.1 * M_PI;
+        std::vector<float> phi_fit;
+        std::vector<double> phi_diss_phase;
+        std::vector<int> phi_diss_range;
+        if (!rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
+            return false;
+        }
+        cuda_apply_rg_correction_async(phi_fit, Na, Nr);
 
-    std::array<double, 2> p_38;
-    if (!clutter_cancel_38_paper_1_p38_cuda(
-            faAxis,
-            cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
-            cfg,
-            p_38)) {
-        return false;
-    }
+        if (!clutter_cancel_38_paper_1_p38_cuda(
+                faAxis,
+                cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
+                cfg,
+                p_38)) {
+            return false;
+        }
 
-    std::vector<float> phase_map;
-    if (!cuda_download_phase_map(phase_map, Na * Nr)) {
-        return false;
-    }
+        if (!cuda_download_phase_map(phase_map, Na * Nr)) {
+            return false;
+        }
 
-    if (!cuda_stage_align_async(skipInt_theory, Na, Nr)) {
-        return false;
-    }
-    if (!cuda_stage_fft_async(Na, Nr)) {
-        return false;
-    }
-    if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr)) {
-        return false;
-    }
-    if (!rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
-        return false;
-    }
-    cuda_apply_rg_correction_async(phi_fit, Na, Nr);
+        if (!cuda_stage_align_async(skipInt_theory, Na, Nr)) {
+            return false;
+        }
+        if (!cuda_stage_fft_async(Na, Nr)) {
+            return false;
+        }
+        if (!cuda_stage_dbs_async(static_cast<float>(fa_ctr), static_cast<float>(cfg.PRF), Na, Nr)) {
+            return false;
+        }
+        if (!rg_correct_CUDA(cfg, thre_rg, phi_fit, phi_diss_phase, phi_diss_range)) {
+            return false;
+        }
+        cuda_apply_rg_correction_async(phi_fit, Na, Nr);
 
-    std::array<double, 2> p_38_csi;
-    std::vector<double> ph_trace;
-    std::vector<double> fa_cut;
-    std::vector<std::complex<double>> csi_trace;
-    if (!clutter_cancel_38_paper_1_cuda(
-            faAxis,
-            cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
-            cfg,
-            csi_trace, p_38_csi, ph_trace, fa_cut)) {
-        return false;
+        std::array<double, 2> p_38_csi;
+        std::vector<double> ph_trace;
+        std::vector<double> fa_cut;
+        std::vector<std::complex<double>> csi_trace;
+        if (!clutter_cancel_38_paper_1_cuda(
+                faAxis,
+                cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
+                cfg,
+                csi_trace, p_38_csi, ph_trace, fa_cut)) {
+            return false;
+        }
     }
 
     const int band_st = std::max(0, std::min(az_st, effectivePulseNum(cfg) - 1));
     const int band_ed = std::max(0, std::min(az_ed, effectivePulseNum(cfg) - 1));
-    std::vector<float> mydata;
-    std::vector<std::complex<float>> CSI_out;
-    bool cfar_ok = dpca_cfar2_fast_cuda(CSI_out, band_st, band_ed,
-                                        cfg.pf, 4, 16, "GO", cfg, mydata);
-    if (!cfar_ok) {
-        std::vector<std::complex<float>> F1_f, F2_f;
-        if (!cuda_download_sync(F1_f, F2_f, Na * Nr)) {
-            return false;
-        }
-        if (!cuda_download_csi_sync(CSI_out, Na * Nr)) {
-            return false;
-        }
-
-        std::vector<std::complex<double>> detect_data(F2_f.size());
-        for (size_t i = 0; i < F2_f.size(); ++i) {
-            detect_data[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
-        }
-        if (band_st <= band_ed) {
-            for (int r = band_st; r <= band_ed; ++r) {
-                const size_t off = static_cast<size_t>(r) * Nr;
-                for (size_t c = 0; c < Nr; ++c) {
-                    const auto v = CSI_out[off + c];
-                    detect_data[off + c] = std::complex<double>(v.real(), v.imag());
-                }
-            }
-        }
-
-        std::vector<double> mydata_d;
-        std::vector<int> prow_cpu, pcol_cpu;
-        cfar_ok = dpca_cfar2_fast(detect_data, cfg.pf, 4, 16, "GO",
-                                  cfg, mydata_d, prow_cpu, pcol_cpu);
-        if (cfar_ok) {
-            mydata.assign(mydata_d.begin(), mydata_d.end());
-        }
-    }
-    if (!cfar_ok) {
-        return false;
-    }
-    const size_t cfar_hits = static_cast<size_t>(
-        std::count_if(mydata.begin(), mydata.end(), [](float v) { return v > 0.0f; }));
-
+    size_t cfar_hits = 0;
     std::vector<int> prow_new, pcol_new;
     std::vector<float> refined_mydata;
-    std::vector<float> phase_std_list;
-    bool cluster_ok = cluster_filter_gap_phase_cuda(mydata, phase_map, cfg.min_points, 2, 0.2f,
-                                                    cfg, refined_mydata, prow_new, pcol_new,
-                                                    phase_std_list);
-    if (!cluster_ok) {
-        std::vector<double> mydata_d(mydata.begin(), mydata.end());
-        std::vector<double> phase_map_d(phase_map.begin(), phase_map.end());
-        std::vector<double> refined_mydata_d;
-        std::vector<double> phase_std_list_d;
-        cluster_ok = cluster_filter_gap_phase(mydata_d, phase_map_d, cfg.min_points, 2, 0.2,
-                                              cfg, refined_mydata_d, prow_new, pcol_new,
-                                              phase_std_list_d);
-        if (cluster_ok) {
-            refined_mydata.assign(refined_mydata_d.begin(), refined_mydata_d.end());
-            phase_std_list.assign(phase_std_list_d.begin(), phase_std_list_d.end());
-        }
-    }
-    if (!cluster_ok) {
-        return false;
-    }
-
     GMTIOutput::Detect targetSel;
-    bool targetDetection = target_select_cuda(prow_new, pcol_new, cfg, targetSel);
-    if (!targetDetection) {
-        std::vector<std::complex<float>> F1_f, F2_f;
-        if (!cuda_download_sync(F1_f, F2_f, Na * Nr)) {
+    {
+        gmti::runtime::TimingScope timing_detection("detection", 0, timing_beam_extra);
+        std::vector<float> mydata;
+        std::vector<std::complex<float>> CSI_out;
+        bool cfar_ok = dpca_cfar2_fast_cuda(CSI_out, band_st, band_ed,
+                                            cfg.pf, 4, 16, "GO", cfg, mydata);
+        if (!cfar_ok) {
+            std::vector<std::complex<float>> F1_f, F2_f;
+            if (!cuda_download_sync(F1_f, F2_f, Na * Nr)) {
+                return false;
+            }
+            if (!cuda_download_csi_sync(CSI_out, Na * Nr)) {
+                return false;
+            }
+
+            std::vector<std::complex<double>> detect_data(F2_f.size());
+            for (size_t i = 0; i < F2_f.size(); ++i) {
+                detect_data[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
+            }
+            if (band_st <= band_ed) {
+                for (int r = band_st; r <= band_ed; ++r) {
+                    const size_t off = static_cast<size_t>(r) * Nr;
+                    for (size_t c = 0; c < Nr; ++c) {
+                        const auto v = CSI_out[off + c];
+                        detect_data[off + c] = std::complex<double>(v.real(), v.imag());
+                    }
+                }
+            }
+
+            std::vector<double> mydata_d;
+            std::vector<int> prow_cpu, pcol_cpu;
+            cfar_ok = dpca_cfar2_fast(detect_data, cfg.pf, 4, 16, "GO",
+                                      cfg, mydata_d, prow_cpu, pcol_cpu);
+            if (cfar_ok) {
+                mydata.assign(mydata_d.begin(), mydata_d.end());
+            }
+        }
+        if (!cfar_ok) {
             return false;
         }
-        std::vector<std::complex<double>> F1(F1_f.size()), F2(F2_f.size());
-        for (size_t i = 0; i < F1_f.size(); ++i) {
-            F1[i] = std::complex<double>(F1_f[i].real(), F1_f[i].imag());
-            F2[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
+        cfar_hits = static_cast<size_t>(
+            std::count_if(mydata.begin(), mydata.end(), [](float v) { return v > 0.0f; }));
+
+        std::vector<float> phase_std_list;
+        bool cluster_ok = cluster_filter_gap_phase_cuda(mydata, phase_map, cfg.min_points, 2, 0.2f,
+                                                        cfg, refined_mydata, prow_new, pcol_new,
+                                                        phase_std_list);
+        if (!cluster_ok) {
+            std::vector<double> mydata_d(mydata.begin(), mydata.end());
+            std::vector<double> phase_map_d(phase_map.begin(), phase_map.end());
+            std::vector<double> refined_mydata_d;
+            std::vector<double> phase_std_list_d;
+            cluster_ok = cluster_filter_gap_phase(mydata_d, phase_map_d, cfg.min_points, 2, 0.2,
+                                                  cfg, refined_mydata_d, prow_new, pcol_new,
+                                                  phase_std_list_d);
+            if (cluster_ok) {
+                refined_mydata.assign(refined_mydata_d.begin(), refined_mydata_d.end());
+                phase_std_list.assign(phase_std_list_d.begin(), phase_std_list_d.end());
+            }
         }
-        targetDetection = target_select(F1, F2, prow_new, pcol_new, cfg, targetSel);
-    }
-    if (!targetDetection) {
-        return false;
+        if (!cluster_ok) {
+            return false;
+        }
+
+        bool targetDetection = target_select_cuda(prow_new, pcol_new, cfg, targetSel);
+        if (!targetDetection) {
+            std::vector<std::complex<float>> F1_f, F2_f;
+            if (!cuda_download_sync(F1_f, F2_f, Na * Nr)) {
+                return false;
+            }
+            std::vector<std::complex<double>> F1(F1_f.size()), F2(F2_f.size());
+            for (size_t i = 0; i < F1_f.size(); ++i) {
+                F1[i] = std::complex<double>(F1_f[i].real(), F1_f[i].imag());
+                F2[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
+            }
+            targetDetection = target_select(F1, F2, prow_new, pcol_new, cfg, targetSel);
+        }
+        if (!targetDetection) {
+            return false;
+        }
     }
 
     // std::cout << "[fusion][detect] beam=" << periodIdx
@@ -1383,6 +1843,7 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     //           << " selected=" << targetSel.prow.size()
     //           << " min_points=" << cfg.min_points
     //           << " pf=" << cfg.pf << std::endl;
+    (void)cfar_hits;
 
     beamMeta.phase_slope = p_38[0];
     beamMeta.phase_intercept = p_38[1];
@@ -1757,7 +2218,7 @@ bool GMTIProcessor::computeDatasetSquintFromCenter(const std::vector<int> &perio
         // This is the actual error angle that should be applied globally.
         double bias_deg = wrap180_deg(angle_deg - theta_sq_local);
 
-        // std::cout << "[SQUINT] period=" << per
+        // std::cout << "[SQUINT] beam=" << per
         //           << ", theta_sq_local=" << theta_sq_local
         //           << ", estimated_angle=" << angle_deg
         //           << ", bias_angle=" << bias_deg

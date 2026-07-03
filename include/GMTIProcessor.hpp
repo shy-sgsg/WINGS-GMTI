@@ -56,7 +56,8 @@ do { \
 // ============= 计时宏 =============
 // 编译时开启计时：g++ -DENABLE_TIMING ...
 #ifdef ENABLE_TIMING
-    #include <chrono>
+#include <chrono>
+#include "runtime_diagnostics.hpp"
     #define TIMING_START(name) \
         auto _timer_start_##name = std::chrono::high_resolution_clock::now()
   
@@ -77,16 +78,7 @@ do { \
         } while (0)
   
     #define TIMING_SCOPE(name) \
-        struct _TimingScope { \
-                const char* _name; \
-                std::chrono::high_resolution_clock::time_point _start; \
-                _TimingScope(const char* n) : _name(n), _start(std::chrono::high_resolution_clock::now()) {} \
-                ~_TimingScope() { \
-                        auto _end = std::chrono::high_resolution_clock::now(); \
-                        auto _duration = std::chrono::duration_cast<std::chrono::milliseconds>(_end - _start); \
-                        std::cout << "[TIMING-SCOPE] " << _name << ": " << _duration.count() << " ms" << std::endl; \
-                } \
-        } _timing_obj_##name(#name)
+        gmti::runtime::TimingScope _timing_obj_##name(#name)
   
 #else
     #define TIMING_START(name) ((void)0)
@@ -136,6 +128,9 @@ public:
 
     // 写入结果到文件
     bool writeResult(const std::vector<double> &res, const Config &cfg);
+    bool writeDetectionCsv(const std::vector<GMTIOutput::DetectionCsvRecord> &records,
+                           const Config &cfg,
+                           const std::string &source_file = "") const;
 
     // ★ 便捷封装：直接做跟踪
     bool trackFromMT(

@@ -1208,7 +1208,7 @@ std::vector<GMTIDetection> TrackManager::update(
     const Config& cfg,
     const std::vector<GMTIDetection>& current_targets)
 {
-    if (!association_config_logged_) {
+    if (!association_config_logged_ && cfg.runtime_diagnostics_enabled && cfg.track_debug_level > 0) {
         printAssociationConfig(cfg);
         association_config_logged_ = true;
     }
@@ -1419,7 +1419,7 @@ std::vector<GMTIDetection> TrackManager::updateRawDetections(
     int result_id,
     double frame_utc)
 {
-    if (!association_config_logged_) {
+    if (!association_config_logged_ && cfg.runtime_diagnostics_enabled && cfg.track_debug_level > 0) {
         printAssociationConfig(cfg);
         association_config_logged_ = true;
     }
@@ -1852,7 +1852,7 @@ void TrackManager::dumpDebugSnapshot(const Config& cfg,
                                      int num_matched_tracks,
                                      int num_unmatched_detections) const
 {
-    if (!cfg.track_debug_dump) {
+    if (!cfg.runtime_diagnostics_enabled || !cfg.track_debug_dump) {
         return;
     }
 

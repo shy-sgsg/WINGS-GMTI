@@ -5,6 +5,7 @@
 #include <cassert>
 #include <sstream>
 #include <cctype>
+#include <cmath>
 #include <regex>
 #include <algorithm>
 #include <stdexcept>
@@ -205,6 +206,41 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
         return text.empty() ? current : text;
     };
 
+    auto parseOptionalDelayUs = [&](const std::vector<const char*>& names,
+                                    double& delay_us,
+                                    std::string& source_name) -> bool
+    {
+        for (const char* name : names) {
+            const std::string text = getOptionalText(name);
+            if (text.empty()) {
+                continue;
+            }
+            try {
+                size_t pos = 0;
+                const double value = std::stod(text, &pos);
+                if (pos != text.size()) {
+                    throw std::invalid_argument("trailing characters");
+                }
+                source_name = name;
+                const std::string field(name);
+                if (field.size() >= 3 &&
+                    field.compare(field.size() - 3, 3, "_us") == 0) {
+                    delay_us = value;
+                } else {
+                    delay_us = (std::abs(value) < 1.0) ? value * 1.0e6 : value;
+                }
+                return true;
+            } catch (const std::exception& e) {
+                std::cerr << "[XML][WARN] Invalid optional delay field <" << name
+                          << ">=\"" << text << "\" in " << xmlFile
+                          << "; sample_delay_us remains unavailable. reason="
+                          << e.what() << std::endl;
+                return false;
+            }
+        }
+        return false;
+    };
+
     auto parseIntList = [](const std::string& text) -> std::vector<int>
     {
         std::vector<int> values;
@@ -284,6 +320,7 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     cfg.pulse_num = parseRequiredInt("pulse_num");
     cfg.read_pulse_num = parseOptionalInt("read_pulse_num", cfg.read_pulse_num);
     cfg.read_pulse_offset = parseOptionalInt("read_pulse_offset", cfg.read_pulse_offset);
+    cfg.process_pulse_num = parseOptionalInt("process_pulse_num", cfg.process_pulse_num);
     cfg.range_fft_len = parseOptionalInt("range_fft_len", cfg.range_fft_len);
     cfg.range_crop_start = parseOptionalInt("range_crop_start", cfg.range_crop_start);
     cfg.range_compress_len =
@@ -310,6 +347,14 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     cfg.fs = parseRequiredDouble("fs") * 1e6;  // 转换为赫兹
     cfg.Tr = parseRequiredDouble("Tr") * 1e-6; // 转换为秒
     cfg.PRF = parseRequiredDouble("PRF");
+    {
+        std::string sampleDelaySource;
+        cfg.has_sample_delay_us = parseOptionalDelayUs(
+            {"sample_delay_us", "sample_delay", "sampling_delay", "recv_delay",
+             "receive_delay", "rx_delay"},
+            cfg.sample_delay_us,
+            sampleDelaySource);
+    }
     cfg.az_count = parseRequiredInt("az_count");
     cfg.beamwidth_deg = parseOptionalDouble("boshu", cfg.beamwidth_deg);
     cfg.loc_beam_gate_deg = parseOptionalDouble("loc_beam_gate_deg", cfg.loc_beam_gate_deg);
@@ -459,6 +504,26 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     cfg.track_debug_dir = parseOptionalString("track_debug_dir", cfg.track_debug_dir);
     cfg.track_debug_dump_level = parseOptionalInt("track_debug_dump_level",
                                                   cfg.track_debug_dump_level);
+    cfg.debug_pc_peak = parseOptionalBool("debug_pc_peak", cfg.debug_pc_peak);
+    cfg.pc_peak_scene_truth = parseOptionalString("pc_peak_scene_truth", cfg.pc_peak_scene_truth);
+    if (cfg.pc_peak_scene_truth.empty()) {
+        cfg.pc_peak_scene_truth = parseOptionalString("scene_truth", cfg.pc_peak_scene_truth);
+    }
+    cfg.runtime_mode = parseOptionalString("runtime_mode", cfg.runtime_mode);
+    std::transform(cfg.runtime_mode.begin(), cfg.runtime_mode.end(), cfg.runtime_mode.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (cfg.runtime_mode == "release" || cfg.runtime_mode == "formal" ||
+        cfg.runtime_mode == "production") {
+        cfg.runtime_diagnostics_enabled = false;
+    } else if (cfg.runtime_mode == "debug" || cfg.runtime_mode == "trace") {
+        cfg.runtime_diagnostics_enabled = true;
+    } else {
+        std::cerr << "[XML][WARN] Unknown <runtime_mode>=\"" << cfg.runtime_mode
+                  << "\"; keep runtime_diagnostics_enabled="
+                  << (cfg.runtime_diagnostics_enabled ? "true" : "false") << std::endl;
+    }
+    cfg.runtime_diagnostics_enabled =
+        parseOptionalBool("runtime_diagnostics_enabled", cfg.runtime_diagnostics_enabled);
 
     const std::string trackIdxRangeStr = getOptionalText("track_idx_range");
     if (!trackIdxRangeStr.empty()) {

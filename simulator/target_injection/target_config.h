@@ -1,7 +1,9 @@
 #pragma once
 
+#include "../common/SimulationGeometry.h"
 #include "target_common.h"
 
+#include <limits>
 #include <string>
 
 namespace gmti {
@@ -43,6 +45,11 @@ struct TargetGlobalConfig {
     int carrier_phase_sign = -1;
     double platform_speed_mps = 60.0;
     double platform_height_m = 6000.0;
+    double platform_origin_lat_deg = 40.45121057;
+    double platform_origin_lon_deg = 116.98377429;
+    double platform_origin_alt_m = 0.0;
+    double projection_ref_lon_deg = 117.0;
+    gmti::sim_geometry::Stage2GeometryConfig geometry;
 };
 
 struct TargetConfig {
@@ -60,6 +67,24 @@ struct TargetConfig {
     double height_m = 0.0;
     double radial_velocity_mps = 10.0;
     double cross_velocity_mps = 0.0;
+    bool has_ref_geometry = false;
+    int ref_beam_id = -1;
+    int ref_pulse_idx = -1;
+    double ref_time_s = 0.0;
+    Vec3 ref_platform;
+    Vec3 ref_target;
+    double ref_range_m = 0.0;
+    double ref_range_sample_float = 0.0;
+    int ref_range_sample_int = 0;
+    double echo_delay_sample_center_used = 0.0;
+    double override_speed_mps = std::numeric_limits<double>::quiet_NaN();
+    double override_rcs_db = std::numeric_limits<double>::quiet_NaN();
+    std::string velocity_mode;
+    double target_ve_mps = std::numeric_limits<double>::quiet_NaN();
+    double target_vn_mps = std::numeric_limits<double>::quiet_NaN();
+    double target_vr_self_mps = std::numeric_limits<double>::quiet_NaN();
+    double target_vt_self_mps = std::numeric_limits<double>::quiet_NaN();
+    double af_motion_truth_hz = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct RunOptions {

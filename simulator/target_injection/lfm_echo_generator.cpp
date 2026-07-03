@@ -1,4 +1,6 @@
 #include "lfm_echo_generator.h"
+#include "../common/SimulationGeometry.h"
+#include "dbs/NewProtocolLayout.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -7,9 +9,6 @@ namespace gmti {
 namespace target_injection {
 
 namespace {
-
-const size_t kHeaderBytes = 256;
-const size_t kBytesPerSample = 16;
 
 void storeU16LE(std::vector<uint8_t> &b, size_t off, uint16_t v)
 {
@@ -49,14 +48,18 @@ int16_t satI16(double x)
 std::complex<float> loadComplexCh(const std::vector<uint8_t> &packet, int pulse_len, int n, int ch)
 {
     (void)pulse_len;
-    const size_t off = kHeaderBytes + static_cast<size_t>(n) * kBytesPerSample + (ch == 1 ? 0U : 8U);
+    const size_t off = gmti::new_protocol::kHeaderBytes +
+                       static_cast<size_t>(n) * gmti::new_protocol::kBytesPerSample +
+                       (ch == 1 ? 0U : 8U);
     return std::complex<float>(loadF32LE(&packet[off]), loadF32LE(&packet[off + 4]));
 }
 
 void storeComplexCh(std::vector<uint8_t> &packet, int pulse_len, int n, int ch, const std::complex<float> &v)
 {
     (void)pulse_len;
-    const size_t off = kHeaderBytes + static_cast<size_t>(n) * kBytesPerSample + (ch == 1 ? 0U : 8U);
+    const size_t off = gmti::new_protocol::kHeaderBytes +
+                       static_cast<size_t>(n) * gmti::new_protocol::kBytesPerSample +
+                       (ch == 1 ? 0U : 8U);
     storeF32LE(&packet[off], v.real());
     storeF32LE(&packet[off + 4], v.imag());
 }
@@ -76,6 +79,23 @@ double estimateLocalRms(const std::vector<uint8_t> &packet, const RadarConfig &r
     }
     if (count <= 0) return floor_value;
     return std::max(floor_value, std::sqrt(power / static_cast<double>(count)));
+}
+
+gmti::sim_geometry::LocalPoint toLocalPoint(const Vec3 &v)
+{
+    return gmti::sim_geometry::LocalPoint(v.x, v.y, v.z);
+}
+
+gmti::sim_geometry::LocalVelocity toLocalVelocity(const Vec3 &v)
+{
+    return gmti::sim_geometry::LocalVelocity(v.x, v.y, v.z);
+}
+
+gmti::sim_geometry::GeoPoint localToGeoPose(const TargetGlobalConfig &global, const Vec3 &local)
+{
+    const gmti::sim_geometry::ENUPoint enu =
+        gmti::sim_geometry::localToEnu(toLocalPoint(local), global.geometry);
+    return gmti::sim_geometry::enuToLatLon(enu.e, enu.n, local.z, global.geometry);
 }
 
 } // namespace
@@ -111,27 +131,32 @@ void fillZeroPacketHeader(std::vector<uint8_t> &packet,
 {
     std::fill(packet.begin(), packet.end(), 0U);
     const uint32_t prt_len = static_cast<uint32_t>(packet.size());
-    storeU64LE(packet, 0, 0x5A5A5A5A5A5A5A5AULL);
-    packet[8] = 5;
-    storeU32LE(packet, 9, prt_len);
-    storeF32LE(&packet[16], static_cast<float>(utc));
-    storeU32LE(packet, 20, prt_counter);
+    storeU64LE(packet, gmti::new_protocol::kOffMagicHead, 0x5A5A5A5A5A5A5A5AULL);
+    packet[gmti::new_protocol::kOffVersion] = 5;
+    storeU32LE(packet, gmti::new_protocol::kOffPrtLen, prt_len);
+    storeF32LE(&packet[gmti::new_protocol::kOffUtc], static_cast<float>(utc));
+    storeU32LE(packet, gmti::new_protocol::kOffPrtCounter, prt_counter);
     packet[88] = 0x02;
     packet[90] = 0x40;
     packet[92] = 0x0B;
     packet[93] = 0x01;
     storeI16LE(packet, 94, 0);
     storeU32LE(packet, 96, static_cast<uint32_t>(std::floor(utc * 1000.0 + 0.5)));
-    storeF64LE(packet, 104, 0.0);
-    storeF64LE(packet, 112, 0.0);
-    storeF64LE(packet, 120, global.platform_height_m);
-    storeF32LE(&packet[128], 0.0f);
-    storeF32LE(&packet[132], static_cast<float>(global.platform_speed_mps));
-    storeF32LE(&packet[136], 0.0f);
-    storeF32LE(&packet[140], static_cast<float>(global.platform_speed_mps));
-    packet[208] = static_cast<uint8_t>(prt_counter & 0xffU);
-    storeI16LE(packet, 218, satI16(theta_deg * 100.0));
-    storeU64LE(packet, 248, 0x5B5B5B5B5B5B5B5BULL);
+    const PlatformState platform = evaluatePlatformState(global, utc);
+    const gmti::sim_geometry::PosSample pos =
+        gmti::sim_geometry::makeProtocolPosSample(toLocalPoint(platform.position),
+                                                  toLocalVelocity(platform.velocity),
+                                                  global.geometry);
+    storeF64LE(packet, gmti::new_protocol::kOffLatDeg, pos.lat_deg);
+    storeF64LE(packet, gmti::new_protocol::kOffLonDeg, pos.lon_deg);
+    storeF64LE(packet, gmti::new_protocol::kOffHeightM, pos.height_m);
+    storeF32LE(&packet[gmti::new_protocol::kOffVnMps], static_cast<float>(pos.vn_mps));
+    storeF32LE(&packet[gmti::new_protocol::kOffVeMps], static_cast<float>(pos.ve_mps));
+    storeF32LE(&packet[gmti::new_protocol::kOffVdMps], static_cast<float>(pos.vd_mps));
+    storeF32LE(&packet[gmti::new_protocol::kOffSpeedMps], static_cast<float>(global.platform_speed_mps));
+    packet[gmti::new_protocol::kOffPrtLowByte] = static_cast<uint8_t>(prt_counter & 0xffU);
+    storeI16LE(packet, gmti::new_protocol::kOffThetaDegX100, satI16(theta_deg * 100.0));
+    storeU64LE(packet, gmti::new_protocol::kOffMagicTail, 0x5B5B5B5B5B5B5B5BULL);
     (void)radar;
 }
 
@@ -149,7 +174,71 @@ PulseTruth injectOnePulse(std::vector<uint8_t> &packet,
     truth.pulse_id = pulse_id;
     truth.target_id = target.id;
     truth.target_name = target.name;
+    truth.has_ref_geometry = target.has_ref_geometry;
+    truth.ref_pulse_idx = target.ref_pulse_idx;
+    truth.ref_time_s = target.ref_time_s;
+    truth.ref_platform = target.ref_platform;
+    truth.ref_target = target.ref_target;
+    truth.ref_range_m = target.ref_range_m;
+    truth.ref_range_sample_float = target.ref_range_sample_float;
+    truth.ref_range_sample_int = target.ref_range_sample_int;
+    truth.echo_delay_sample_center_used = target.echo_delay_sample_center_used;
+    truth.moving_target_speed_mps = target.override_speed_mps;
+    truth.rcs_db = target.override_rcs_db;
+    truth.target_ve_mps = target.target_ve_mps;
+    truth.target_vn_mps = target.target_vn_mps;
+    truth.target_vr_self_mps = target.target_vr_self_mps;
+    truth.target_vt_self_mps = target.target_vt_self_mps;
+    truth.af_motion_truth_hz = target.af_motion_truth_hz;
     truth.geom = evaluateGeometry(radar, global, target, period_id, beam_id, pulse_id);
+    {
+        const gmti::sim_geometry::GeoPoint platform_geo = localToGeoPose(global, truth.geom.platform.position);
+        const gmti::sim_geometry::GeoPoint target_geo = localToGeoPose(global, truth.geom.target.position);
+        truth.platform_e = platform_geo.e;
+        truth.platform_n = platform_geo.n;
+        truth.platform_lat = platform_geo.lat;
+        truth.platform_lon = platform_geo.lon;
+        truth.target_e = target_geo.e;
+        truth.target_n = target_geo.n;
+        truth.target_lat = target_geo.lat;
+        truth.target_lon = target_geo.lon;
+        const Vec3 ref_platform = target.has_ref_geometry ? target.ref_platform : truth.geom.platform.position;
+        const Vec3 ref_target = target.has_ref_geometry ? target.ref_target : truth.geom.target.position;
+        const gmti::sim_geometry::GeoPoint ref_platform_geo = localToGeoPose(global, ref_platform);
+        const gmti::sim_geometry::GeoPoint ref_target_geo = localToGeoPose(global, ref_target);
+        truth.ref_platform_e = ref_platform_geo.e;
+        truth.ref_platform_n = ref_platform_geo.n;
+        truth.ref_platform_lat = ref_platform_geo.lat;
+        truth.ref_platform_lon = ref_platform_geo.lon;
+        truth.ref_target_e = ref_target_geo.e;
+        truth.ref_target_n = ref_target_geo.n;
+        truth.ref_target_lat = ref_target_geo.lat;
+        truth.ref_target_lon = ref_target_geo.lon;
+        const gmti::sim_geometry::ENUVelocity ref_vel_en =
+            gmti::sim_geometry::localVelocityToEnu(
+                gmti::sim_geometry::LocalVelocity(truth.geom.platform.velocity.x,
+                                                  truth.geom.platform.velocity.y,
+                                                  truth.geom.platform.velocity.z),
+                global.geometry);
+        const gmti::sim_geometry::LookVectorEN look =
+            gmti::sim_geometry::makeAlgorithmLookVectorEN(ref_vel_en.ve,
+                                                          ref_vel_en.vn,
+                                                          truth.geom.theta_true_deg,
+                                                          global.geometry);
+        truth.ref_platform_ve = ref_vel_en.ve;
+        truth.ref_platform_vn = ref_vel_en.vn;
+        truth.look_e = look.east;
+        truth.look_n = look.north;
+        truth.slant_range_m = truth.ref_range_m > 0.0 ? truth.ref_range_m : truth.geom.range_m;
+        truth.ground_range_m =
+            gmti::sim_geometry::slantRangeToGroundRange(truth.slant_range_m,
+                                                        ref_platform.z,
+                                                        ref_target.z,
+                                                        global.geometry);
+        truth.expected_range_bin =
+            static_cast<int>(std::floor((truth.ref_range_sample_float - radar.range_crop_start) + 0.5));
+        truth.geometry_config_name = global.geometry.geometry_config_name;
+    }
     const VisibilityResult vr = evaluateVisibility(radar, global, truth.geom.angle_error_deg);
     truth.beam_gain = vr.beam_gain;
     truth.visible_by_beam = vr.visible;

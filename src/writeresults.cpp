@@ -1,5 +1,6 @@
 #include "GMTIProcessor.hpp"
 #include "geo/geoProj.hpp" // 包含 Gaussp3RV
+#include "runtime_diagnostics.hpp"
 
 #include <vector>
 #include <array>
@@ -9,6 +10,8 @@
 #include <algorithm>
 #include <string>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 #include <cerrno>
 #include <cmath>
 #include <sys/stat.h>
@@ -37,6 +40,48 @@ static inline double wrap180_deg(double angle_deg)
     if (angle_deg < 0.0)
         angle_deg += 360.0;
     return angle_deg - 180.0;
+}
+
+static std::string csv_escape_local(const std::string &s)
+{
+    if (s.find_first_of(",\"\n\r") == std::string::npos) {
+        return s;
+    }
+    std::string out = "\"";
+    for (char ch : s) {
+        out += (ch == '"') ? "\"\"" : std::string(1, ch);
+    }
+    out += "\"";
+    return out;
+}
+
+static std::string csv_num(double v)
+{
+    if (!std::isfinite(v)) {
+        return "";
+    }
+    std::ostringstream os;
+    os << std::setprecision(15) << v;
+    return os.str();
+}
+
+static std::string csv_int_or_blank(int v)
+{
+    return v >= 0 ? std::to_string(v) : "";
+}
+
+static std::string result_file_from_cfg(const Config &cfg)
+{
+    if (cfg.result_file_id <= 0 || cfg.result_file_id > 99) {
+        return "";
+    }
+    std::string dir = cfg.result_add;
+    if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') {
+        dir.push_back('/');
+    }
+    char name[16];
+    std::snprintf(name, sizeof(name), "GMTI%02d.bin", cfg.result_file_id);
+    return dir + name;
 }
 
 bool GMTIProcessor::nextGMTIFileName(const std::string &dir,
@@ -236,6 +281,78 @@ bool GMTIProcessor::writeResult(const std::vector<double> &res, const Config &cf
     ofs.close();
     std::cout << "[GMTI] writeResult: 写入当前检测结果 "
               << outpath << "，目标数: " << n_targets << std::endl;
+    return true;
+}
+
+bool GMTIProcessor::writeDetectionCsv(
+    const std::vector<GMTIOutput::DetectionCsvRecord> &records,
+    const Config &cfg,
+    const std::string &source_file) const
+{
+    if (!mkdir_p(cfg.result_add)) {
+        std::cerr << "writeDetectionCsv: 创建目录失败: " << cfg.result_add << "\n";
+        return false;
+    }
+
+    std::string outpath = cfg.result_add;
+    if (!outpath.empty() && outpath.back() != '/' && outpath.back() != '\\') {
+        outpath.push_back('/');
+    }
+    outpath += "detection_results.csv";
+
+    std::ofstream os(outpath.c_str());
+    if (!os) {
+        std::cerr << "writeDetectionCsv: 无法打开输出文件: " << outpath << "\n";
+        return false;
+    }
+
+    const std::string case_id = gmti::runtime::caseId();
+    const std::string run_id = gmti::runtime::runId();
+    std::string result_id = gmti::runtime::resultId();
+    if (result_id.empty() && cfg.result_file_id > 0) {
+        char name[16];
+        std::snprintf(name, sizeof(name), "GMTI%02d", cfg.result_file_id);
+        result_id = name;
+    }
+    const std::string src = source_file.empty() ? result_file_from_cfg(cfg) : source_file;
+
+    os << "case_id,run_id,result_id,period_id,beam_id,det_id,range_bin,range_m,"
+          "theta_cmd_deg,theta_true_deg,row,col,e,n,lat,lon,utc,amplitude,power,"
+          "radial_velocity_mps,source_file\n";
+
+    for (size_t i = 0; i < records.size(); ++i) {
+        const auto &r = records[i];
+        const double power = std::isfinite(r.amplitude) ? r.amplitude * r.amplitude
+                                                        : std::numeric_limits<double>::quiet_NaN();
+        os << csv_escape_local(case_id) << ","
+           << csv_escape_local(run_id) << ","
+           << csv_escape_local(result_id) << ","
+           << csv_int_or_blank(r.period_id) << ","
+           << csv_int_or_blank(r.beam_id) << ","
+           << i << ","
+           << csv_int_or_blank(r.range_bin) << ","
+           << csv_num(r.range_m) << ","
+           << csv_num(r.theta_cmd_deg) << ","
+           << csv_num(r.theta_true_deg) << ","
+           << csv_int_or_blank(r.row) << ","
+           << csv_int_or_blank(r.col) << ","
+           << csv_num(r.e) << ","
+           << csv_num(r.n) << ","
+           << csv_num(r.lat) << ","
+           << csv_num(r.lon) << ","
+           << csv_num(r.utc) << ","
+           << csv_num(r.amplitude) << ","
+           << csv_num(power) << ","
+           << csv_num(r.radial_velocity_mps) << ","
+           << csv_escape_local(src) << "\n";
+    }
+
+    if (!os) {
+        std::cerr << "writeDetectionCsv: 写文件失败: " << outpath << "\n";
+        return false;
+    }
+    std::cout << "[GMTI] detection_results_csv = " << outpath
+              << "，目标数: " << records.size() << std::endl;
     return true;
 }
 

@@ -17,10 +17,17 @@ struct Scatterer {
     double rcs_db = 0.0;
     double initial_range_m = 0.0;
     double initial_azimuth_deg = 0.0;
+    bool has_ref_geometry = false;
+    int ref_beam_id = -1;
+    int ref_pulse_idx = -1;
+    double ref_time_s = 0.0;
+    gmti::target_injection::Vec3 ref_platform;
+    double range_m_ref = 0.0;
+    double range_sample_float_ref = 0.0;
+    int range_sample_int_ref = 0;
 };
 
 typedef std::vector<Scatterer> ScattererList;
 
 } // namespace stage2
 } // namespace gmti
-

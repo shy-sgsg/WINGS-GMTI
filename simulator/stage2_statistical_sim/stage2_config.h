@@ -1,7 +1,9 @@
 #pragma once
 
+#include "../common/SimulationGeometry.h"
 #include "../target_injection/target_config.h"
 
+#include <limits>
 #include <string>
 
 namespace gmti {
@@ -70,6 +72,11 @@ struct Stage2Config {
     gmti::target_injection::RadarConfig radar;
     double platform_height_m = 6000.0;
     double platform_speed_mps = 60.0;
+    double platform_origin_lat_deg = 40.45121057;
+    double platform_origin_lon_deg = 116.98377429;
+    double platform_origin_alt_m = 0.0;
+    double projection_ref_lon_deg = 117.0;
+    gmti::sim_geometry::Stage2GeometryConfig geometry;
     SimulationConfig sim;
     SceneConfig scene;
     TargetStage2Config target;
@@ -85,8 +92,19 @@ struct Stage2RunOptions {
     int period_start = -1;
     int period_count = -1;
     double single_scatterer_range_m = 85000.0;
+    int single_point_beam_id_1based = -1;
+    int single_point_expected_bin = -1;
     double single_scatterer_azimuth_deg = 0.0;
     double single_scatterer_amplitude = 1.0;
+    int moving_target_beam_id_1based = -1;
+    int moving_target_expected_bin = -1;
+    double moving_target_speed_mps = 0.0;
+    std::string moving_target_velocity_mode;
+    double moving_target_ve_mps = std::numeric_limits<double>::quiet_NaN();
+    double moving_target_vn_mps = std::numeric_limits<double>::quiet_NaN();
+    double moving_target_radial_speed_mps = std::numeric_limits<double>::quiet_NaN();
+    double moving_target_tangential_speed_mps = std::numeric_limits<double>::quiet_NaN();
+    double moving_target_rcs_db = -999.0;
 };
 
 bool parseStage2CommandLine(int argc, char **argv, Stage2RunOptions &opt);

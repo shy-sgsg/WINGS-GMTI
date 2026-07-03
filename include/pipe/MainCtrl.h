@@ -86,6 +86,9 @@ public:
     std::string latest_result_file_;       // 最新生成的 GMTI 航迹结果文件
     
     std::string gmti_config_xml_;          // GMTI 配置 XML 文件路径
+    std::string runtime_mode_override_;    // 命令行覆盖 runtime_mode，空表示使用 XML
+    bool runtime_diagnostics_override_set_ = false;
+    bool runtime_diagnostics_override_ = true;
     ModeSwitchCmd last_cmd_;               // 最后接收的模式切换命令
     std::mutex result_mutex_;              // 保护 latest_gmti_targets_
     std::mutex config_mutex_;              // 保护 gmti_config_xml_ / last_cmd_

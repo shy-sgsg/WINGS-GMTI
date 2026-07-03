@@ -148,6 +148,31 @@ void setOrReplaceInt(TiXmlElement *parent, const char *name, int value)
     setOrReplace(parent, name, ss.str());
 }
 
+void writeGeometryXml(TiXmlElement *parent, const gmti::sim_geometry::Stage2GeometryConfig &g)
+{
+    TiXmlElement *geom = parent->FirstChildElement("simulation_geometry");
+    if (!geom) {
+        geom = new TiXmlElement("simulation_geometry");
+        parent->LinkEndChild(geom);
+    }
+    setOrReplace(geom, "geometry_config_name", g.geometry_config_name);
+    setOrReplace(geom, "local_x_axis", g.local_x_axis);
+    setOrReplace(geom, "local_y_axis", g.local_y_axis);
+    setOrReplace(geom, "platform_heading_source", g.platform_heading_source);
+    setOrReplaceDouble(geom, "platform_heading_deg", g.platform_heading_deg);
+    setOrReplace(geom, "beam_angle_reference", g.beam_angle_reference);
+    setOrReplace(geom, "beam_zero_direction", g.beam_zero_direction);
+    setOrReplace(geom, "beam_positive_direction", g.beam_positive_direction);
+    setOrReplaceDouble(geom, "beam_theta_offset_deg", g.beam_theta_offset_deg);
+    setOrReplace(geom, "range_geometry", g.range_geometry);
+    setOrReplaceInt(geom, "use_ground_range_for_position", g.use_ground_range_for_position ? 1 : 0);
+    setOrReplaceDouble(geom, "platform_origin_lat_deg", g.platform_origin_lat_deg);
+    setOrReplaceDouble(geom, "platform_origin_lon_deg", g.platform_origin_lon_deg);
+    setOrReplaceDouble(geom, "platform_origin_alt_m", g.platform_origin_alt_m);
+    setOrReplaceDouble(geom, "projection_ref_lon_deg", g.projection_ref_lon_deg);
+    setOrReplaceInt(geom, "squint_side", g.squint_side);
+}
+
 bool saveFromTemplate(const Stage2Config &cfg,
                       const std::string &out_xml,
                       const std::string &data_file)
@@ -179,6 +204,7 @@ bool saveFromTemplate(const Stage2Config &cfg,
     setOrReplaceDouble(p, "Tr", cfg.radar.tr_sec * 1.0e6);
     setOrReplaceDouble(p, "PRF", cfg.radar.prf_hz);
     setOrReplaceDouble(p, "d_chan", cfg.radar.d_chan_m);
+    setOrReplaceDouble(p, "ref_lon", cfg.projection_ref_lon_deg);
     setOrReplaceDouble(p, "scan_min_deg", cfg.radar.scan_min_deg);
     setOrReplaceDouble(p, "scan_step_deg", cfg.radar.scan_step_deg);
     setOrReplaceDouble(p, "scan_max_deg", cfg.radar.scan_min_deg + cfg.radar.scan_step_deg * (cfg.radar.beam_count - 1));
@@ -190,6 +216,15 @@ bool saveFromTemplate(const Stage2Config &cfg,
     setOrReplaceDouble(p, "beam_width_deg", cfg.radar.beam_width_deg);
     setOrReplaceDouble(p, "sample_delay_us", cfg.radar.sample_delay_sec * 1.0e6);
     setOrReplaceDouble(p, "sample_window_us", static_cast<double>(cfg.radar.pulse_len) / cfg.radar.fs_hz * 1.0e6);
+    setOrReplaceInt(p, "estimate_error_angle", 0);
+    setOrReplaceDouble(p, "squint_angle", cfg.geometry.beam_theta_offset_deg);
+    writeGeometryXml(p, cfg.geometry);
+    const size_t data_pos = data_file.find(marker);
+    if (data_pos != std::string::npos) {
+        const std::string root_dir = data_file.substr(0, data_pos);
+        setOrReplaceInt(p, "debug_pc_peak", 1);
+        setOrReplace(p, "pc_peak_scene_truth", root_dir + "/truth/scene_truth.csv");
+    }
     return doc.SaveFile(out_xml.c_str());
 }
 
@@ -208,8 +243,19 @@ bool parseStage2CommandLine(int argc, char **argv, Stage2RunOptions &opt)
         else if (k == "--period-start") opt.period_start = parseIntArg(valueArg(i, argc, argv), opt.period_start);
         else if (k == "--period-count") opt.period_count = parseIntArg(valueArg(i, argc, argv), opt.period_count);
         else if (k == "--single-scatterer-range") opt.single_scatterer_range_m = parseDoubleArg(valueArg(i, argc, argv), opt.single_scatterer_range_m);
+        else if (k == "--single-point-beam-id") opt.single_point_beam_id_1based = parseIntArg(valueArg(i, argc, argv), opt.single_point_beam_id_1based);
+        else if (k == "--single-point-expected-bin") opt.single_point_expected_bin = parseIntArg(valueArg(i, argc, argv), opt.single_point_expected_bin);
         else if (k == "--single-scatterer-azimuth") opt.single_scatterer_azimuth_deg = parseDoubleArg(valueArg(i, argc, argv), opt.single_scatterer_azimuth_deg);
         else if (k == "--single-scatterer-amplitude") opt.single_scatterer_amplitude = parseDoubleArg(valueArg(i, argc, argv), opt.single_scatterer_amplitude);
+        else if (k == "--moving-target-beam-id") opt.moving_target_beam_id_1based = parseIntArg(valueArg(i, argc, argv), opt.moving_target_beam_id_1based);
+        else if (k == "--moving-target-expected-bin") opt.moving_target_expected_bin = parseIntArg(valueArg(i, argc, argv), opt.moving_target_expected_bin);
+        else if (k == "--moving-target-speed-mps") opt.moving_target_speed_mps = parseDoubleArg(valueArg(i, argc, argv), opt.moving_target_speed_mps);
+        else if (k == "--moving-target-velocity-mode") opt.moving_target_velocity_mode = valueArg(i, argc, argv);
+        else if (k == "--moving-target-ve-mps") opt.moving_target_ve_mps = parseDoubleArg(valueArg(i, argc, argv), opt.moving_target_ve_mps);
+        else if (k == "--moving-target-vn-mps") opt.moving_target_vn_mps = parseDoubleArg(valueArg(i, argc, argv), opt.moving_target_vn_mps);
+        else if (k == "--moving-target-radial-speed-mps") opt.moving_target_radial_speed_mps = parseDoubleArg(valueArg(i, argc, argv), opt.moving_target_radial_speed_mps);
+        else if (k == "--moving-target-tangential-speed-mps") opt.moving_target_tangential_speed_mps = parseDoubleArg(valueArg(i, argc, argv), opt.moving_target_tangential_speed_mps);
+        else if (k == "--moving-target-rcs-db") opt.moving_target_rcs_db = parseDoubleArg(valueArg(i, argc, argv), opt.moving_target_rcs_db);
         else if (k == "--validate") opt.validate = (v != "false" && v != "0");
     }
     return true;
@@ -248,6 +294,38 @@ bool loadStage2Config(const std::string &path, Stage2Config &cfg, std::string &e
     cfg.radar.d_chan_m = jsonDouble(sys, "d_chan_m", 0.17);
     cfg.platform_height_m = jsonDouble(sys, "platform_height_m", cfg.platform_height_m);
     cfg.platform_speed_mps = jsonDouble(sys, "platform_speed_mps", cfg.platform_speed_mps);
+    cfg.platform_origin_lat_deg = jsonDouble(sys, "platform_origin_lat_deg", cfg.platform_origin_lat_deg);
+    cfg.platform_origin_lon_deg = jsonDouble(sys, "platform_origin_lon_deg", cfg.platform_origin_lon_deg);
+    cfg.platform_origin_alt_m = jsonDouble(sys, "platform_origin_alt_m", cfg.platform_origin_alt_m);
+    cfg.projection_ref_lon_deg = jsonDouble(sys, "projection_ref_lon_deg", cfg.projection_ref_lon_deg);
+    cfg.geometry.platform_origin_lat_deg = cfg.platform_origin_lat_deg;
+    cfg.geometry.platform_origin_lon_deg = cfg.platform_origin_lon_deg;
+    cfg.geometry.platform_origin_alt_m = cfg.platform_origin_alt_m;
+    cfg.geometry.projection_ref_lon_deg = cfg.projection_ref_lon_deg;
+
+    const std::string geom = sectionObject(txt, "simulation_geometry");
+    if (!geom.empty()) {
+        cfg.geometry.geometry_config_name = jsonString(geom, "geometry_config_name", cfg.geometry.geometry_config_name);
+        cfg.geometry.local_x_axis = jsonString(geom, "local_x_axis", cfg.geometry.local_x_axis);
+        cfg.geometry.local_y_axis = jsonString(geom, "local_y_axis", cfg.geometry.local_y_axis);
+        cfg.geometry.platform_heading_source = jsonString(geom, "platform_heading_source", cfg.geometry.platform_heading_source);
+        cfg.geometry.platform_heading_deg = jsonDouble(geom, "platform_heading_deg", cfg.geometry.platform_heading_deg);
+        cfg.geometry.beam_angle_reference = jsonString(geom, "beam_angle_reference", cfg.geometry.beam_angle_reference);
+        cfg.geometry.beam_zero_direction = jsonString(geom, "beam_zero_direction", cfg.geometry.beam_zero_direction);
+        cfg.geometry.beam_positive_direction = jsonString(geom, "beam_positive_direction", cfg.geometry.beam_positive_direction);
+        cfg.geometry.beam_theta_offset_deg = jsonDouble(geom, "beam_theta_offset_deg", cfg.geometry.beam_theta_offset_deg);
+        cfg.geometry.range_geometry = jsonString(geom, "range_geometry", cfg.geometry.range_geometry);
+        cfg.geometry.use_ground_range_for_position = jsonBool(geom, "use_ground_range_for_position", cfg.geometry.use_ground_range_for_position);
+        cfg.geometry.platform_origin_lat_deg = jsonDouble(geom, "platform_origin_lat_deg", cfg.geometry.platform_origin_lat_deg);
+        cfg.geometry.platform_origin_lon_deg = jsonDouble(geom, "platform_origin_lon_deg", cfg.geometry.platform_origin_lon_deg);
+        cfg.geometry.platform_origin_alt_m = jsonDouble(geom, "platform_origin_alt_m", cfg.geometry.platform_origin_alt_m);
+        cfg.geometry.projection_ref_lon_deg = jsonDouble(geom, "projection_ref_lon_deg", cfg.geometry.projection_ref_lon_deg);
+        cfg.geometry.squint_side = jsonInt(geom, "squint_side", cfg.geometry.squint_side);
+        cfg.platform_origin_lat_deg = cfg.geometry.platform_origin_lat_deg;
+        cfg.platform_origin_lon_deg = cfg.geometry.platform_origin_lon_deg;
+        cfg.platform_origin_alt_m = cfg.geometry.platform_origin_alt_m;
+        cfg.projection_ref_lon_deg = cfg.geometry.projection_ref_lon_deg;
+    }
 
     cfg.sim.period_start = jsonInt(sim, "period_start", cfg.sim.period_start);
     cfg.sim.period_count = jsonInt(sim, "period_count", cfg.sim.period_count);
@@ -307,7 +385,25 @@ bool writeDefaultStage2Config(const std::string &path, std::string &err)
         "    \"ddc_len\": 11820, \"fft_len\": 12288, \"pc_crop_start\": 3864, \"pc_crop_len\": 4096,\n"
         "    \"scan_min_deg\": -60.0, \"scan_step_deg\": 2.0, \"beam_count\": 61,\n"
         "    \"beam_width_deg\": 2.28, \"pulse_num\": 130,\n"
-        "    \"platform_height_m\": 6000.0, \"platform_speed_mps\": 60.0, \"d_chan_m\": 0.17\n"
+        "    \"platform_height_m\": 6000.0, \"platform_speed_mps\": 60.0, \"d_chan_m\": 0.17,\n"
+        "    \"platform_origin_lat_deg\": 40.45121057, \"platform_origin_lon_deg\": 116.98377429,\n"
+        "    \"platform_origin_alt_m\": 6000.0, \"projection_ref_lon_deg\": 117.0\n"
+        "  },\n"
+        "  \"simulation_geometry\": {\n"
+        "    \"geometry_config_name\": \"algorithm_axis_x_north\",\n"
+        "    \"local_x_axis\": \"north\", \"local_y_axis\": \"east\",\n"
+        "    \"platform_heading_source\": \"velocity\", \"platform_heading_deg\": 0.0,\n"
+        "    \"beam_angle_reference\": \"algorithm\",\n"
+        "    \"beam_zero_direction\": \"algorithm\",\n"
+        "    \"beam_positive_direction\": \"algorithm\",\n"
+        "    \"beam_theta_offset_deg\": 0.0,\n"
+        "    \"range_geometry\": \"algorithm\",\n"
+        "    \"use_ground_range_for_position\": true,\n"
+        "    \"platform_origin_lat_deg\": 40.4512107203,\n"
+        "    \"platform_origin_lon_deg\": 116.985931582,\n"
+        "    \"platform_origin_alt_m\": 6000.0,\n"
+        "    \"projection_ref_lon_deg\": 117.0,\n"
+        "    \"squint_side\": 1\n"
         "  },\n"
         "  \"simulation\": {\n"
         "    \"period_start\": 0, \"period_count\": 1, \"random_seed\": 202606,\n"
@@ -354,6 +450,7 @@ bool writeStage2OutputConfig(const Stage2Config &cfg,
     setDouble(p, "Tr", cfg.radar.tr_sec * 1.0e6);
     setDouble(p, "PRF", cfg.radar.prf_hz);
     setDouble(p, "d_chan", cfg.radar.d_chan_m);
+    setDouble(p, "ref_lon", cfg.projection_ref_lon_deg);
     setDouble(p, "scan_min_deg", cfg.radar.scan_min_deg);
     setDouble(p, "scan_step_deg", cfg.radar.scan_step_deg);
     setDouble(p, "scan_max_deg", cfg.radar.scan_min_deg + cfg.radar.scan_step_deg * (cfg.radar.beam_count - 1));
@@ -364,6 +461,9 @@ bool writeStage2OutputConfig(const Stage2Config &cfg,
     setInt(p, "range_compress_len", cfg.radar.range_crop_len);
     setDouble(p, "sample_delay_us", cfg.radar.sample_delay_sec * 1.0e6);
     setDouble(p, "sample_window_us", static_cast<double>(cfg.radar.pulse_len) / cfg.radar.fs_hz * 1.0e6);
+    setInt(p, "estimate_error_angle", 0);
+    setDouble(p, "squint_angle", cfg.geometry.beam_theta_offset_deg);
+    writeGeometryXml(p, cfg.geometry);
     if (!doc.SaveFile(out_xml.c_str())) {
         err = "failed to save stage2 output xml";
         return false;
@@ -382,6 +482,11 @@ gmti::target_injection::TargetGlobalConfig makeTargetGlobal(const Stage2Config &
     g.carrier_phase_sign = cfg.sim.carrier_phase_sign;
     g.platform_speed_mps = cfg.platform_speed_mps;
     g.platform_height_m = cfg.platform_height_m;
+    g.platform_origin_lat_deg = cfg.platform_origin_lat_deg;
+    g.platform_origin_lon_deg = cfg.platform_origin_lon_deg;
+    g.platform_origin_alt_m = cfg.platform_origin_alt_m;
+    g.projection_ref_lon_deg = cfg.projection_ref_lon_deg;
+    g.geometry = cfg.geometry;
     return g;
 }
 

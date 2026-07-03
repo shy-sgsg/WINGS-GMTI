@@ -212,6 +212,7 @@ set(COMMON_CORE_SRC
   src/processPeriodsParallel.cpp
   src/pulseCompression.cpp
   src/rg_correct.cpp
+  src/runtime_diagnostics.cpp
   src/writeresults.cpp
   src/kalman_track.cpp
   src/TrackManager.cpp
@@ -311,6 +312,9 @@ add_executable(inject_cooperative_target
   simulator/target_injection/channel_phase_model.cpp
   simulator/target_injection/lfm_echo_generator.cpp
   simulator/target_injection/truth_writer.cpp
+  simulator/common/SimulationGeometry.cpp
+  src/trig_lut.cpp
+  src/trig_lut_host_only.cpp
   src/xml/tinystr.cpp
   src/xml/tinyxml.cpp
   src/xml/tinyxmlerror.cpp
@@ -323,6 +327,7 @@ add_executable(simulate_stage2_statistical
   simulator/stage2_statistical_sim/stage2_scene_generator.cpp
   simulator/stage2_statistical_sim/stage2_lfm_forward.cpp
   simulator/stage2_statistical_sim/stage2_validator.cpp
+  simulator/common/SimulationGeometry.cpp
   simulator/target_injection/target_common.cpp
   simulator/target_injection/target_config.cpp
   simulator/target_injection/target_motion_model.cpp
@@ -331,10 +336,16 @@ add_executable(simulate_stage2_statistical
   simulator/target_injection/channel_phase_model.cpp
   simulator/target_injection/lfm_echo_generator.cpp
   simulator/target_injection/truth_writer.cpp
+  src/trig_lut.cpp
+  src/trig_lut_host_only.cpp
   src/xml/tinystr.cpp
   src/xml/tinyxml.cpp
   src/xml/tinyxmlerror.cpp
   src/xml/tinyxmlparser.cpp
+)
+
+add_executable(dump_newprotocol_header
+  tools/dump_newprotocol_header.cpp
 )
 
 add_executable(simulate_stage3_sar_scene
@@ -558,12 +569,15 @@ target_link_libraries(simulate_stage1_background PRIVATE ${FFTW3F_TARGET})
 configure_non_cuda_tool(inject_cooperative_target)
 target_include_directories(inject_cooperative_target PRIVATE
   ${CMAKE_SOURCE_DIR}/simulator/target_injection
+  ${CMAKE_SOURCE_DIR}/simulator/common
 )
 configure_non_cuda_tool(simulate_stage2_statistical)
 target_include_directories(simulate_stage2_statistical PRIVATE
   ${CMAKE_SOURCE_DIR}/simulator/stage2_statistical_sim
   ${CMAKE_SOURCE_DIR}/simulator/target_injection
+  ${CMAKE_SOURCE_DIR}/simulator/common
 )
+configure_non_cuda_tool(dump_newprotocol_header)
 configure_non_cuda_tool(simulate_stage3_sar_scene)
 target_include_directories(simulate_stage3_sar_scene PRIVATE
   ${CMAKE_SOURCE_DIR}/simulator/stage3_sar_scene_sim

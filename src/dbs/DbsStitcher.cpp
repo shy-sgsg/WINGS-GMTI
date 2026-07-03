@@ -520,11 +520,13 @@ bool DbsStitcher::estimateMosaicExtent(const Config &cfg, const RDData &RD, cons
   const double hostMosaicGiB = static_cast<double>(nx) * static_cast<double>(ny) *
                                static_cast<double>(sizeof(float) + sizeof(uint16_t)) /
                                (1024.0 * 1024.0 * 1024.0);
-  std::cout << "[fusion][dbs][extent] B=" << B << " M=" << M << " nEff=" << nEff
-            << " boundsX=[" << minX << ", " << maxX << "] boundsY=[" << minY << ", " << maxY
-            << "] marginX=" << marginX << "m marginY=" << marginY
-            << "m grid=" << nx << "x" << ny << " dx=" << grid.dx
-            << " host_mosaic_min~" << hostMosaicGiB << " GiB" << std::endl;
+  if (cfg.runtime_diagnostics_enabled) {
+    std::cout << "[fusion][dbs][extent] B=" << B << " M=" << M << " nEff=" << nEff
+              << " boundsX=[" << minX << ", " << maxX << "] boundsY=[" << minY << ", " << maxY
+              << "] marginX=" << marginX << "m marginY=" << marginY
+              << "m grid=" << nx << "x" << ny << " dx=" << grid.dx
+              << " host_mosaic_min~" << hostMosaicGiB << " GiB" << std::endl;
+  }
   return true;
 }
 
@@ -1035,6 +1037,8 @@ bool DbsStitcher::writeDebugMosaicImage(const Config &cfg,
                        static_cast<unsigned>(out16.cols),
                        static_cast<unsigned>(out16.rows)))
     return false;
-  std::cout << "[fusion][dbs][debug] wrote " << path << std::endl;
+  if (cfg.runtime_diagnostics_enabled) {
+    std::cout << "[fusion][dbs][debug] wrote " << path << std::endl;
+  }
   return true;
 }

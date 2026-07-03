@@ -1,60 +1,10 @@
 #include "dbs/NewProtocolReader.hpp"
+#include "dbs/NewProtocolLayout.hpp"
 
 #include <cmath>
-#include <cstring>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
-
-namespace {
-
-static inline uint16_t load_u16_le(const uint8_t *p)
-{
-    return static_cast<uint16_t>(p[0] | (static_cast<uint16_t>(p[1]) << 8));
-}
-
-static inline int16_t load_i16_le(const uint8_t *p)
-{
-    return static_cast<int16_t>(load_u16_le(p));
-}
-
-static inline uint32_t load_u32_le(const uint8_t *p)
-{
-    return static_cast<uint32_t>(p[0]) |
-           (static_cast<uint32_t>(p[1]) << 8) |
-           (static_cast<uint32_t>(p[2]) << 16) |
-           (static_cast<uint32_t>(p[3]) << 24);
-}
-
-static inline uint64_t load_u64_le(const uint8_t *p)
-{
-    return static_cast<uint64_t>(p[0]) |
-           (static_cast<uint64_t>(p[1]) << 8) |
-           (static_cast<uint64_t>(p[2]) << 16) |
-           (static_cast<uint64_t>(p[3]) << 24) |
-           (static_cast<uint64_t>(p[4]) << 32) |
-           (static_cast<uint64_t>(p[5]) << 40) |
-           (static_cast<uint64_t>(p[6]) << 48) |
-           (static_cast<uint64_t>(p[7]) << 56);
-}
-
-static inline float load_f32_le(const uint8_t *p)
-{
-    uint32_t raw = load_u32_le(p);
-    float v = 0.0f;
-    std::memcpy(&v, &raw, sizeof(float));
-    return v;
-}
-
-static inline double load_f64_le(const uint8_t *p)
-{
-    uint64_t raw = load_u64_le(p);
-    double v = 0.0;
-    std::memcpy(&v, &raw, sizeof(double));
-    return v;
-}
-
-} // namespace
 
 bool readPulseBlockNewProtocol(const Config &cfg,
                                int beamskip,
@@ -64,15 +14,12 @@ bool readPulseBlockNewProtocol(const Config &cfg,
                                double &theta_sq,
                                std::vector<std::vector<double>> &posRaw)
 {
-    constexpr size_t kHeaderBytes = 256;
-    constexpr size_t kBytesPerSample = 16; // ch1(I,Q) float32 + ch2(I,Q) float32
     if (cfg.pulse_len <= 0) {
         std::cerr << "[ERR] 新协议 pulse_len 非法: " << cfg.pulse_len << std::endl;
         return false;
     }
     const size_t samples_per_prt = static_cast<size_t>(cfg.pulse_len);
-    const size_t prt_bytes =
-        kHeaderBytes + samples_per_prt * kBytesPerSample;
+    const size_t prt_bytes = gmti::new_protocol::packetBytes(samples_per_prt);
 
     if (cfg.pulse_num <= 0) {
         std::cerr << "[ERR] 新协议 pulse_num 非法: pulse_num=" << cfg.pulse_num << std::endl;
@@ -125,11 +72,11 @@ bool readPulseBlockNewProtocol(const Config &cfg,
     if (start_prt + read_pulses > total_prt) {
         const size_t alt_start_prt = period_start_without_skip + pulse_offset;
         if (alt_start_prt + read_pulses <= total_prt) {
-            std::cerr << "[WARN] 新协议读取带 skip_pulses 越界，自动按已裁剪文件读取（忽略 skip_pulses）: period="
+            std::cerr << "[WARN] 新协议读取带 skip_pulses 越界，自动按已裁剪文件读取（忽略 skip_pulses）: beam="
                       << beamskip << " skip_pulses=" << cfg.skip_az_num << std::endl;
             start_prt = alt_start_prt;
         } else {
-            std::cerr << "[ERR] 新协议回波文件大小不足，无法读取 period=" << beamskip
+            std::cerr << "[ERR] 新协议回波文件大小不足，无法读取 beam=" << beamskip
                       << " (total_prt=" << total_prt
                       << ", need_end_prt=" << (start_prt + read_pulses)
                       << ", alt_need_end_prt=" << (alt_start_prt + read_pulses) << ")" << std::endl;
@@ -140,7 +87,7 @@ bool readPulseBlockNewProtocol(const Config &cfg,
     const size_t start_byte = start_prt * prt_bytes;
     if (static_cast<uint64_t>(file_size) <
         start_byte + read_pulses * prt_bytes) {
-        std::cerr << "[ERR] 新协议回波文件大小不足，无法读取 period=" << beamskip << std::endl;
+        std::cerr << "[ERR] 新协议回波文件大小不足，无法读取 beam=" << beamskip << std::endl;
         return false;
     }
     fp.seekg(static_cast<std::streamoff>(start_byte), std::ios::beg);
@@ -157,28 +104,30 @@ bool readPulseBlockNewProtocol(const Config &cfg,
         fp.read(reinterpret_cast<char *>(packet.data()),
                 static_cast<std::streamsize>(prt_bytes));
         if (fp.gcount() != static_cast<std::streamsize>(prt_bytes)) {
-            std::cerr << "[ERR] 读取新协议 PRT 失败, period=" << beamskip << " pulse=" << k << std::endl;
+            std::cerr << "[ERR] 读取新协议 PRT 失败, beam=" << beamskip << " pulse=" << k << std::endl;
             return false;
         }
 
         const uint8_t *hdr = packet.data();
-        utc[k] = static_cast<double>(load_f32_le(hdr + 16));
+        const gmti::new_protocol::HeaderSample hs =
+            gmti::new_protocol::readHeaderSample(hdr);
+        utc[k] = hs.utc;
         posRaw[k][0] = utc[k];
-        posRaw[k][1] = load_f64_le(hdr + 104) * M_PI / 180.0;
-        posRaw[k][2] = load_f64_le(hdr + 112) * M_PI / 180.0;
-        posRaw[k][3] = load_f64_le(hdr + 120);
-        posRaw[k][4] = static_cast<double>(load_f32_le(hdr + 128));
-        posRaw[k][5] = static_cast<double>(load_f32_le(hdr + 132));
-        posRaw[k][6] = static_cast<double>(load_f32_le(hdr + 136));
-        fw_angle_deg[k] = static_cast<double>(load_i16_le(hdr + 218)) / 100.0;
+        posRaw[k][1] = hs.lat_deg * M_PI / 180.0;
+        posRaw[k][2] = hs.lon_deg * M_PI / 180.0;
+        posRaw[k][3] = hs.height_m;
+        posRaw[k][4] = hs.vn_mps;
+        posRaw[k][5] = hs.ve_mps;
+        posRaw[k][6] = hs.vd_mps;
+        fw_angle_deg[k] = hs.theta_cmd_deg;
 
-        const uint8_t *payload = hdr + kHeaderBytes;
+        const uint8_t *payload = hdr + gmti::new_protocol::kHeaderBytes;
         for (size_t n = 0; n < samples_per_prt; ++n) {
-            const size_t off = n * kBytesPerSample;
-            const float ch1_i = load_f32_le(payload + off + 0);
-            const float ch1_q = load_f32_le(payload + off + 4);
-            const float ch2_i = load_f32_le(payload + off + 8);
-            const float ch2_q = load_f32_le(payload + off + 12);
+            const size_t off = n * gmti::new_protocol::kBytesPerSample;
+            const float ch1_i = gmti::new_protocol::loadF32LE(payload + off + 0);
+            const float ch1_q = gmti::new_protocol::loadF32LE(payload + off + 4);
+            const float ch2_i = gmti::new_protocol::loadF32LE(payload + off + 8);
+            const float ch2_q = gmti::new_protocol::loadF32LE(payload + off + 12);
             data1[k * samples_per_prt + n] =
                 std::complex<float>(ch1_i, ch1_q);
             data2[k * samples_per_prt + n] =

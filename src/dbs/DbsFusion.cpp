@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <iostream>
 #include <sstream>
@@ -241,7 +242,7 @@ static void log_dbs_diagnostics(const FusionGroupContext &ctx,
         }
         std::cout << "[fusion][dbs][diag][beam]"
                   << " slot=" << (i + 1)
-                  << " period=" << (i < ctx.periodList.size() ? ctx.periodList[i] : -1)
+                  << " beam=" << (i < ctx.periodList.size() ? ctx.periodList[i] : -1)
                   << " beam_index=" << (fm ? fm->beam_index : -1)
                   << " angle_deg=" << bm.angle_deg
                   << " theta_sq=" << (fm ? fm->theta_sq : 0.0)
@@ -374,6 +375,20 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
     size_t totalDropSin = 0;
     size_t totalDropPx = 0;
     size_t totalDropGate = 0;
+    std::ofstream trace;
+    if (cfg.runtime_diagnostics_enabled && !cfg.result_add.empty()) {
+        trace.open((cfg.result_add + "/fusion_localization_trace.csv").c_str());
+        if (trace) {
+            trace << "period_id,beam_id,det_id,range_bin,range_m,row,col,"
+                     "theta_cmd_deg,theta_true_deg,theta_used_deg,"
+                     "ref_platform_e,ref_platform_n,ref_platform_lat,ref_platform_lon,"
+                     "ref_platform_v,ref_platform_v_angle_deg,ref_platform_ve,ref_platform_vn,"
+                     "af_wrapped,af_ransac,fa_shift,af_used,sinA,px,py,ground_range_m,"
+                     "look_e_used,look_n_used,direct_localized_e,direct_localized_n,"
+                     "fused_localized_e,fused_localized_n,final_output_e,final_output_n,"
+                     "lat,lon,beam_center_dir_deg,target_direction_deg,beam_dir_err_deg\n";
+        }
+    }
 
     for (size_t slot = 0; slot < n; ++slot) {
         const FusionBeamMeta &m = ctx.beam_meta[slot];
@@ -387,6 +402,8 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
         out.detect.row_af.reserve(rawList.size());
         out.MT.clear();
         out.MT.reserve(rawList.size() * 8);
+        out.detection_records.clear();
+        out.detection_records.reserve(rawList.size());
 
         const double thetaRot = m.plane.V_angle;
         const double cosT = std::abs(gmti::trig_lut::cos(deg2rad(thetaRot)));
@@ -400,6 +417,9 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
         if (!(lambda > 0.0) || !(m.plane.V > 0.0)) {
             continue;
         }
+        double refLat = 0.0;
+        double refLon = 0.0;
+        (void)Gaussp3RV(m.plane.E, m.plane.N, cfg.L0, refLat, refLon);
 
         const double faShift = m.fd_ctr_unwrapped - m.fd_ctr_wrapped;
         size_t kept = 0;
@@ -456,6 +476,8 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
                 continue;
             }
             const double range = std::sqrt(dE * dE + dN * dN);
+            const double lookE = (range > 1.0e-9) ? dE / range : 0.0;
+            const double lookN = (range > 1.0e-9) ? dN / range : 0.0;
 
             out.detect.prow.push_back(d.prow);
             out.detect.pcol.push_back(d.pcol);
@@ -469,6 +491,63 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
             out.MT.push_back(m.utc_mid);
             out.MT.push_back(direction);
             out.MT.push_back(range);
+            GMTIOutput::DetectionCsvRecord rec;
+            rec.period_id = 0;
+            rec.beam_id = m.beam_index;
+            rec.range_bin = d.pcol;
+            rec.row = d.prow;
+            rec.col = d.pcol;
+            rec.range_m = d.range_m;
+            rec.theta_cmd_deg = m.theta_sq;
+            rec.theta_true_deg = m.theta_true;
+            rec.e = xP;
+            rec.n = yP;
+            rec.lat = lat;
+            rec.lon = lng;
+            rec.utc = m.utc_mid;
+            rec.amplitude = d.amplitude;
+            out.detection_records.push_back(rec);
+            if (trace) {
+                trace << 0 << ','
+                      << m.beam_index << ','
+                      << kept << ','
+                      << d.pcol << ','
+                      << d.range_m << ','
+                      << d.prow << ','
+                      << d.pcol << ','
+                      << m.theta_sq << ','
+                      << m.theta_true << ','
+                      << m.theta_true << ','
+                      << m.plane.E << ','
+                      << m.plane.N << ','
+                      << refLat << ','
+                      << refLon << ','
+                      << m.plane.V << ','
+                      << m.plane.V_angle << ','
+                      << vE << ','
+                      << vN << ','
+                      << d.af_wrapped << ','
+                      << afRansac << ','
+                      << faShift << ','
+                      << af << ','
+                      << sinA << ','
+                      << px << ','
+                      << py << ','
+                      << range << ','
+                      << lookE << ','
+                      << lookN << ','
+                      << xP << ','
+                      << yP << ','
+                      << xP << ','
+                      << yP << ','
+                      << xP << ','
+                      << yP << ','
+                      << lat << ','
+                      << lng << ','
+                      << beamCenterDir << ','
+                      << direction << ','
+                      << beamDirErr << '\n';
+            }
             ++kept;
         }
 
@@ -487,11 +566,13 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
         //           << " fd_shift=" << faShift << std::endl;
     }
 
-    std::cout << "[fusion][loc][total] raw=" << totalRaw
-              << " kept=" << totalKept
-              << " drop_sin=" << totalDropSin
-              << " drop_px=" << totalDropPx
-              << " drop_gate=" << totalDropGate << std::endl;
+    if (cfg.runtime_diagnostics_enabled) {
+        std::cout << "[fusion][loc][total] raw=" << totalRaw
+                  << " kept=" << totalKept
+                  << " drop_sin=" << totalDropSin
+                  << " drop_px=" << totalDropPx
+                  << " drop_gate=" << totalDropGate << std::endl;
+    }
 
     return true;
 }
@@ -511,16 +592,18 @@ bool runDbsFusionImaging(const FusionGroupContext &ctx,
     const double rdCacheGiB = static_cast<double>(beamCount) * static_cast<double>(rdRows) *
                               static_cast<double>(rdCols) * static_cast<double>(sizeof(float)) /
                               (1024.0 * 1024.0 * 1024.0);
-    std::cout << "[fusion][dbs] imaging start: beams=" << beamCount
-              << " rd=" << rdRows << "x" << rdCols
-              << " rd_amp_cache~" << rdCacheGiB << " GiB"
-              << " PRF=" << (ctx.beam_meta.empty() ? cfg.PRF : ctx.beam_meta.front().PRF)
-              << " Rmin=" << cfg.R_min
-              << " fs=" << ((cfg.R_bin > 0.0) ? (C / (2.0 * cfg.R_bin)) : cfg.fs)
-              << " out_res=" << cfg.dbs_out_res_m
-              << " range_skip=" << cfg.dbs_range_skip
-              << " beam_skip=" << cfg.dbs_beam_skip
-              << " useGpu=" << (useGpu ? 1 : 0) << std::endl;
+    if (cfg.runtime_diagnostics_enabled) {
+        std::cout << "[fusion][dbs] imaging start: beams=" << beamCount
+                  << " rd=" << rdRows << "x" << rdCols
+                  << " rd_amp_cache~" << rdCacheGiB << " GiB"
+                  << " PRF=" << (ctx.beam_meta.empty() ? cfg.PRF : ctx.beam_meta.front().PRF)
+                  << " Rmin=" << cfg.R_min
+                  << " fs=" << ((cfg.R_bin > 0.0) ? (C / (2.0 * cfg.R_bin)) : cfg.fs)
+                  << " out_res=" << cfg.dbs_out_res_m
+                  << " range_skip=" << cfg.dbs_range_skip
+                  << " beam_skip=" << cfg.dbs_beam_skip
+                  << " useGpu=" << (useGpu ? 1 : 0) << std::endl;
+    }
 
     DbsStitcher stitcher;
     stitcher.setLonRef(cfg.L0);
@@ -552,12 +635,14 @@ bool runDbsFusionImaging(const FusionGroupContext &ctx,
         std::cerr << "[fusion][dbs] no active nonzero beam after zero-fill filtering" << std::endl;
         return false;
     }
-    std::cout << "[fusion][dbs] active nonzero beams for mosaic:";
-    for (int p : activeCtx.periodList) {
-        std::cout << ' ' << p;
+    if (cfg.runtime_diagnostics_enabled) {
+        std::cout << "[fusion][dbs] active nonzero beams for mosaic:";
+        for (int p : activeCtx.periodList) {
+            std::cout << ' ' << p;
+        }
+        std::cout << " (" << activeCtx.meta.beams.size() << " / "
+                  << ctx.meta.beams.size() << ")" << std::endl;
     }
-    std::cout << " (" << activeCtx.meta.beams.size() << " / "
-              << ctx.meta.beams.size() << ")" << std::endl;
 
     Bounds bounds;
     Grid grid;
@@ -565,8 +650,10 @@ bool runDbsFusionImaging(const FusionGroupContext &ctx,
         std::cerr << "[fusion][dbs] estimateMosaicExtent failed" << std::endl;
         return false;
     }
-    log_dbs_diagnostics(ctx, cfg, nullptr, nullptr);
-    log_dbs_diagnostics(activeCtx, cfg, &grid, &bounds);
+    if (cfg.runtime_diagnostics_enabled) {
+        log_dbs_diagnostics(ctx, cfg, nullptr, nullptr);
+        log_dbs_diagnostics(activeCtx, cfg, &grid, &bounds);
+    }
 
     Mosaic mosaic;
     const bool built = useGpu
@@ -577,7 +664,8 @@ bool runDbsFusionImaging(const FusionGroupContext &ctx,
         return false;
     }
 
-    const std::vector<int> debugSingleBeams = parse_debug_beam_env();
+    const std::vector<int> debugSingleBeams =
+        cfg.runtime_diagnostics_enabled ? parse_debug_beam_env() : std::vector<int>();
     for (int requestedBeam : debugSingleBeams) {
         for (size_t slot = 0; slot < activeCtx.meta.beams.size(); ++slot) {
             if (!debug_beam_matches(requestedBeam, slot, activeCtx)) {

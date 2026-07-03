@@ -556,8 +556,10 @@ std::vector<GMTIDetection> trackModule(const Config& cfg, TrackManager* manager)
     char out_name[256];
     sprintf(out_name, "GMTI%02d_track.bin", idx_range.back());
     const std::string save_path = result_dir + "/" + out_name;
-    printCurrentTargets(track_packets);
-    dumpTrackPointsCsv(cfg, idx_range.back(), current_targets);
+    if (cfg.runtime_diagnostics_enabled) {
+        printCurrentTargets(track_packets);
+        dumpTrackPointsCsv(cfg, idx_range.back(), current_targets);
+    }
     writeCurrentCyclePackets(track_packets, save_path);
 
     return current_targets;
@@ -610,11 +612,13 @@ std::vector<GMTIDetection> trackModuleOnline(const Config& cfg, TrackManager* ma
               });
 
     std::vector<CurrentTargetPacket> packets = makeCurrentPackets(outputs);
-    std::cout << "[TRACK_ONLINE] 当前周期确认输出目标数: " << packets.size()
-              << " (result_id=" << result_id
-              << ", raw_dets=" << dets.size() << ")" << std::endl;
-    printCurrentTargets(packets);
-    dumpTrackPointsCsv(cfg, result_id, outputs);
+    if (cfg.runtime_diagnostics_enabled) {
+        std::cout << "[TRACK_ONLINE] 当前周期确认输出目标数: " << packets.size()
+                  << " (result_id=" << result_id
+                  << ", raw_dets=" << dets.size() << ")" << std::endl;
+        printCurrentTargets(packets);
+        dumpTrackPointsCsv(cfg, result_id, outputs);
+    }
     writeCurrentCyclePackets(packets, makeGmtiTrackPath(cfg.result_add, result_id));
     return outputs;
 }

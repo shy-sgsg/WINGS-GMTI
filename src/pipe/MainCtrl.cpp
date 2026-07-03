@@ -3,8 +3,10 @@
 #include "trackModule.hpp"
 #include "pipe/PipeStruDef.h"
 #include "../auth/hardware_bind_flow/gate/security_gate.h"
+#include "runtime_diagnostics.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cctype>
 #include <cstdint>
@@ -340,6 +342,8 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, i
         xmlPath = host->gmti_config_xml_;
     }
 
+    const auto config_load_wall_start = std::chrono::system_clock::now();
+    const auto config_load_steady_start = std::chrono::high_resolution_clock::now();
     if (!host->gmti_proc_.readXmlParam(xmlPath, host->cfg_)) {
         std::cerr << "Failed to read GMTI XML config" << std::endl;
         return false;
@@ -399,11 +403,44 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, i
     host->cfg_.az_center = (host->cfg_.az_st + host->cfg_.az_ed) / 2;
     host->cfg_.Loc = true;
 
+    if (!host->runtime_mode_override_.empty()) {
+        host->cfg_.runtime_mode = host->runtime_mode_override_;
+        std::transform(host->cfg_.runtime_mode.begin(), host->cfg_.runtime_mode.end(),
+                       host->cfg_.runtime_mode.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (host->cfg_.runtime_mode == "release" || host->cfg_.runtime_mode == "formal" ||
+            host->cfg_.runtime_mode == "production") {
+            host->cfg_.runtime_diagnostics_enabled = false;
+        } else if (host->cfg_.runtime_mode == "debug" || host->cfg_.runtime_mode == "trace") {
+            host->cfg_.runtime_diagnostics_enabled = true;
+        }
+    }
+    if (host->runtime_diagnostics_override_set_) {
+        host->cfg_.runtime_diagnostics_enabled = host->runtime_diagnostics_override_;
+    }
+    if (!host->cfg_.runtime_diagnostics_enabled) {
+        host->cfg_.track_debug_level = 0;
+        host->cfg_.track_debug_dump = false;
+        host->cfg_.track_debug_dump_level = 0;
+    }
+    const auto config_load_wall_end = std::chrono::system_clock::now();
+    const auto config_load_steady_end = std::chrono::high_resolution_clock::now();
+    gmti::runtime::initializeRun(host->cfg_, xmlPath, "GMTI_pipe_core");
+    gmti::runtime::recordTiming(
+        "config_load",
+        config_load_wall_start,
+        config_load_wall_end,
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            config_load_steady_end - config_load_steady_start).count(),
+        -1,
+        "readXmlParam+echoOverride+deriveRuntimeConfig");
+
     std::vector<std::vector<double>> posMatrix;
     int POS_num = 0;
     if (!host->cfg_.INFO_Type) {
         if (!host->gmti_proc_.POS_dataread(host->cfg_.Plane_POS_add, posMatrix, POS_num)) {
             std::cerr << "[ERR] 读取 POS 失败: " << host->cfg_.Plane_POS_add << std::endl;
+            gmti::runtime::finishRun(host->cfg_, false, 1, "POS_dataread failed");
             return false;
         }
     }
@@ -411,12 +448,14 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, i
     GMTIOutput::Plane plane;
     if (!host->gmti_proc_.extractPlanePV(posMatrix, host->cfg_, plane)) {
         std::cerr << "[ERR] 飞机位置提取失败" << std::endl;
+        gmti::runtime::finishRun(host->cfg_, false, 1, "extractPlanePV failed");
         return false;
     }
 
     std::vector<int> periodList;
     if (!host->gmti_proc_.makePeriodList(plane, host->cfg_, periodList)) {
         std::cerr << "[ERR] 生成 periodList 失败" << std::endl;
+        gmti::runtime::finishRun(host->cfg_, false, 1, "makePeriodList failed");
         return false;
     }
 
@@ -428,22 +467,27 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, i
     const std::vector<std::vector<double>> emptyPos;
     FusionGroupContext fusionCtx;
     const std::vector<std::vector<double>> &posSource = host->cfg_.INFO_Type ? emptyPos : posMatrix;
-    const bool processOk = host->cfg_.enable_dbs_fusion
-        ? host->gmti_proc_.processPeriodsParallelFusion(periodList,
-                                                        host->cfg_,
-                                                        posSource,
-                                                        fusionCtx,
-                                                        periodResults)
-        : host->gmti_proc_.processPeriodsParallel(periodList,
-                                                  host->cfg_,
-                                                  posSource,
-                                                  periodResults);
+    bool processOk = false;
+    {
+        TIMING_SCOPE(gmti_processing);
+        processOk = host->cfg_.enable_dbs_fusion
+            ? host->gmti_proc_.processPeriodsParallelFusion(periodList,
+                                                            host->cfg_,
+                                                            posSource,
+                                                            fusionCtx,
+                                                            periodResults)
+            : host->gmti_proc_.processPeriodsParallel(periodList,
+                                                      host->cfg_,
+                                                      posSource,
+                                                      periodResults);
+    }
     if (!processOk) {
         std::cerr << "[ERR] GMTI period processing failed" << std::endl;
     }
     if (host->cfg_.enable_dbs_fusion && processOk) {
+        TIMING_SCOPE(dbs_processing);
         if (!runDbsFusionImaging(fusionCtx, host->cfg_, true)) {
-            std::cerr << "[ERR] DBS fusion imaging failed" << std::endl;
+            std::cerr << "[WARN] DBS fusion imaging failed; continue with GMTI detections" << std::endl;
         }
     }
 
@@ -459,6 +503,7 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, i
 
     bool wroteCurrentDetections = false;
     if (!MT_acc.empty()) {
+        TIMING_SCOPE(result_write);
         if (!host->gmti_proc_.writeResult(MT_acc, host->cfg_)) {
             std::cerr << "[ERR] 整周期检测结果写盘失败" << std::endl;
         } else {
@@ -471,7 +516,11 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, i
     if (!wroteCurrentDetections) {
         std::cout << "[TRACK][WARN] 本周期未写入新的检测结果文件，关联窗口中的当前编号文件可能是旧数据。" << std::endl;
     }
-    std::vector<GMTIDetection> currentTargets = trackModuleOnline(host->cfg_, &host->track_manager_);
+    std::vector<GMTIDetection> currentTargets;
+    {
+        TIMING_SCOPE(tracking);
+        currentTargets = trackModuleOnline(host->cfg_, &host->track_manager_);
+    }
     GMTIResultPacket packet = buildResultPacketSnapshot(host, currentTargets);
     {
         std::lock_guard<std::mutex> lock(host->result_mutex_);
@@ -479,6 +528,8 @@ static bool runGMTIProcessingFlow(MainCtrl* host, const std::string& echoFile, i
         host->pending_result_packets_.push_back(std::move(packet));
         host->IsResultReady.store(true);
     }
+    gmti::runtime::finishRun(host->cfg_, processOk, processOk ? 0 : 1,
+                             processOk ? "normal exit" : "period processing reported failure");
     return true;
 }
 

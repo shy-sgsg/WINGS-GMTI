@@ -6,6 +6,7 @@
 #include <complex>
 #include <array>
 #include <cstddef>
+#include <limits>
 
 // 常量定义
 const double EARTH_R = 6371.0;  // 地球半径，单位：km
@@ -49,6 +50,8 @@ struct Config {
     double fs;                  // 采样频率（MHz）
     double Tr;                  // 脉冲宽度（秒）
     double PRF;                 // 脉冲重复频率（Hz）
+    bool has_sample_delay_us = false; // XML 显式提供采样/接收延迟时为 true
+    double sample_delay_us = 0.0;      // 统一为 us；未提供时 dump 输出 null
     int az_count;               // 方位角计数
     double beamwidth_deg = 3.0; // 波束宽度，对应 XML boshu
     double loc_beam_gate_deg = -1.0; // 定位后波束方向门限半宽，<=0 时按 boshu 推导
@@ -121,6 +124,10 @@ struct Config {
     bool track_debug_dump = true; // 在线 TrackManager 调试快照开关
     std::string track_debug_dir = ""; // 为空时使用 result_add/track_debug
     int track_debug_dump_level = 1; // 1: 周期摘要/CSV, 2: 逐航迹日志
+    std::string runtime_mode = "debug"; // debug=输出可追溯诊断; release=实时运行优先
+    bool runtime_diagnostics_enabled = true; // release 模式下默认由 loadXML 关闭
+    bool debug_pc_peak = false; // P1.5: 输出脉压后、对消前单点峰值检查
+    std::string pc_peak_scene_truth; // 可选 scene_truth.csv 路径；为空时按 result_add 推断
 
     // 推导参数
     double lambda;              // 波长
@@ -227,6 +234,25 @@ struct GMTIOutput {
 
     //
     std::vector<double> MT;
+
+    struct DetectionCsvRecord {
+        int period_id = -1;
+        int beam_id = -1;
+        int range_bin = -1;
+        int row = -1;
+        int col = -1;
+        double range_m = std::numeric_limits<double>::quiet_NaN();
+        double theta_cmd_deg = std::numeric_limits<double>::quiet_NaN();
+        double theta_true_deg = std::numeric_limits<double>::quiet_NaN();
+        double e = std::numeric_limits<double>::quiet_NaN();
+        double n = std::numeric_limits<double>::quiet_NaN();
+        double lat = std::numeric_limits<double>::quiet_NaN();
+        double lon = std::numeric_limits<double>::quiet_NaN();
+        double utc = std::numeric_limits<double>::quiet_NaN();
+        double amplitude = std::numeric_limits<double>::quiet_NaN();
+        double radial_velocity_mps = std::numeric_limits<double>::quiet_NaN();
+    };
+    std::vector<DetectionCsvRecord> detection_records;
 };
 
 // 建议放到 config_structs.hpp 或 GMTIOutput 定义处

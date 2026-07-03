@@ -191,20 +191,22 @@ bool GMTIProcessor::processPeriodsParallelFusion(const std::vector<int> &periodL
     const double rdCacheGiB = static_cast<double>(periodList.size()) * static_cast<double>(rdRows) *
                               static_cast<double>(rdCols) * static_cast<double>(sizeof(float)) /
                               (1024.0 * 1024.0 * 1024.0);
-    std::cout << "[fusion] group start: periods=" << periodList.size()
-              << " workers=" << instances
-              << " cuda_free=" << (static_cast<double>(freeBytes) / (1024.0 * 1024.0 * 1024.0))
-              << "GiB/" << (static_cast<double>(totalBytes) / (1024.0 * 1024.0 * 1024.0))
-              << "GiB pulse_num=" << cfg.pulse_num
-              << " read_pulse_num=" << cfg.read_pulse_num
-              << " process_pulse_num=" << procPulseNum
-              << " pulse_dec=" << cfg.pulse_dec
-              << " range_input_len=" << cfg.pulse_len
-              << " range_fft_len=" << effectiveRangeFftLen(cfg)
-              << " range_crop_start=" << cfg.range_crop_start
-              << " range_output_len=" << effectiveRangeCompressLen(cfg)
-              << " rg_len=" << cfg.rg_len
-              << " estimated_dbs_amp_cache~" << rdCacheGiB << "GiB" << std::endl;
+    if (cfg.runtime_diagnostics_enabled) {
+        std::cout << "[fusion] group start: periods=" << periodList.size()
+                  << " workers=" << instances
+                  << " cuda_free=" << (static_cast<double>(freeBytes) / (1024.0 * 1024.0 * 1024.0))
+                  << "GiB/" << (static_cast<double>(totalBytes) / (1024.0 * 1024.0 * 1024.0))
+                  << "GiB pulse_num=" << cfg.pulse_num
+                  << " read_pulse_num=" << cfg.read_pulse_num
+                  << " process_pulse_num=" << procPulseNum
+                  << " pulse_dec=" << cfg.pulse_dec
+                  << " range_input_len=" << cfg.pulse_len
+                  << " range_fft_len=" << effectiveRangeFftLen(cfg)
+                  << " range_crop_start=" << cfg.range_crop_start
+                  << " range_output_len=" << effectiveRangeCompressLen(cfg)
+                  << " rg_len=" << cfg.rg_len
+                  << " estimated_dbs_amp_cache~" << rdCacheGiB << "GiB" << std::endl;
+    }
 
     std::vector<std::unique_ptr<GMTIProcessor>> workers;
     workers.reserve(instances);
@@ -260,17 +262,21 @@ bool GMTIProcessor::processPeriodsParallelFusion(const std::vector<int> &periodL
         std::cerr << "[fusion] no active DBS beam after zero-fill filtering" << std::endl;
         return false;
     }
-    std::cout << "[fusion] active DBS beams for bias:";
-    for (int p : activePeriods) {
-        std::cout << ' ' << p;
+    if (cfg.runtime_diagnostics_enabled) {
+        std::cout << "[fusion] active DBS beams for bias:";
+        for (int p : activePeriods) {
+            std::cout << ' ' << p;
+        }
+        std::cout << std::endl;
     }
-    std::cout << std::endl;
 
     double biasDeg = 0.0;
     if (!cfg.estimate_error_angle) {
         biasDeg = std::isfinite(cfg.squint_angle) ? cfg.squint_angle : 0.0;
-        std::cout << "[fusion] estimate_error_angle disabled, using XML beam_pointing_bias="
-                  << biasDeg << " deg" << std::endl;
+        if (cfg.runtime_diagnostics_enabled) {
+            std::cout << "[fusion] estimate_error_angle disabled, using XML beam_pointing_bias="
+                      << biasDeg << " deg" << std::endl;
+        }
     } else {
         if (!estimateBeamPointingBiasByCenterBeams(activePeriods, activeBeamMeta, biasDeg)) {
             std::cerr << "[fusion] estimateBeamPointingBiasByCenterBeams failed" << std::endl;
@@ -282,7 +288,9 @@ bool GMTIProcessor::processPeriodsParallelFusion(const std::vector<int> &periodL
         return false;
     }
 
-    std::cout << "[fusion] beam_pointing_bias=" << biasDeg << " deg" << std::endl;
+    if (cfg.runtime_diagnostics_enabled) {
+        std::cout << "[fusion] beam_pointing_bias=" << biasDeg << " deg" << std::endl;
+    }
     return true;
 }
 

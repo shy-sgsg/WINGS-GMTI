@@ -277,8 +277,10 @@ bool DbsStitcher::buildMosaicGPU(const Config &cfg,
   const int nEff = (RD.amp.empty() ? 0 : RD.amp[0].rows);
   const int nx = (int)grid.x.size();
   const int ny = (int)grid.y.size();
-  std::cout << "[fusion][dbs][buildGPU] B=" << B << " M=" << M
-            << " nEff=" << nEff << " nx=" << nx << " ny=" << ny << std::endl;
+  if (cfg.runtime_diagnostics_enabled) {
+    std::cout << "[fusion][dbs][buildGPU] B=" << B << " M=" << M
+              << " nEff=" << nEff << " nx=" << nx << " ny=" << ny << std::endl;
+  }
   if (B <= 0 || M <= 0 || nEff <= 0 || nx <= 0 || ny <= 0)
     return false;
 
@@ -302,10 +304,12 @@ bool DbsStitcher::buildMosaicGPU(const Config &cfg,
   const size_t devMosaicBytes = hostMosaicBytes + nxSize * sizeof(float) + nySize * sizeof(float);
   const size_t allAmpBytesEstimate = static_cast<size_t>(B) * static_cast<size_t>(M) *
                                      static_cast<size_t>(nEff) * sizeof(float);
-  std::cout << "[fusion][dbs][buildGPU] memory estimate: host_mosaic~"
-            << bytes_to_gib(hostMosaicBytes) << " GiB, device_mosaic~"
-            << bytes_to_gib(devMosaicBytes) << " GiB, rd_amp_pack~"
-            << bytes_to_gib(allAmpBytesEstimate) << " GiB" << std::endl;
+  if (cfg.runtime_diagnostics_enabled) {
+    std::cout << "[fusion][dbs][buildGPU] memory estimate: host_mosaic~"
+              << bytes_to_gib(hostMosaicBytes) << " GiB, device_mosaic~"
+              << bytes_to_gib(devMosaicBytes) << " GiB, rd_amp_pack~"
+              << bytes_to_gib(allAmpBytesEstimate) << " GiB" << std::endl;
+  }
 
   const float R_bin = c0f_local() / (2.0f * cfg_effective_fs(cfg));
   const float lambda = c0f_local() / (float)cfg.fc;

@@ -1,5 +1,6 @@
 #include "stage2_lfm_forward.h"
 
+#include "../common/SimulationGeometry.h"
 #include "../target_injection/beam_visibility.h"
 #include "../target_injection/channel_phase_model.h"
 #include "../target_injection/radar_geometry.h"
@@ -70,8 +71,33 @@ GeometrySample scattererGeometry(const gmti::target_injection::RadarConfig &rada
     g.range_sample_int = static_cast<int>(std::floor(g.range_sample_float + 0.5));
     g.in_range_window = (g.range_sample_float >= 0.0 &&
                          g.range_sample_float < static_cast<double>(radar.pulse_len));
-    g.target_azimuth_deg = rad2deg(std::atan2(g.los.y, g.los.x));
-    g.angle_error_deg = wrapTo180(g.target_azimuth_deg - g.theta_true_deg);
+    const gmti::sim_geometry::ENUPoint platform_enu =
+        gmti::sim_geometry::localToEnu(
+            gmti::sim_geometry::LocalPoint(g.platform.position.x, g.platform.position.y, g.platform.position.z),
+            global.geometry);
+    const gmti::sim_geometry::ENUPoint target_enu =
+        gmti::sim_geometry::localToEnu(
+            gmti::sim_geometry::LocalPoint(g.target.position.x, g.target.position.y, g.target.position.z),
+            global.geometry);
+    const gmti::sim_geometry::ENUVelocity platform_vel =
+        gmti::sim_geometry::localVelocityToEnu(
+            gmti::sim_geometry::LocalVelocity(g.platform.velocity.x, g.platform.velocity.y, g.platform.velocity.z),
+            global.geometry);
+    const double de = target_enu.e - platform_enu.e;
+    const double dn = target_enu.n - platform_enu.n;
+    const double horizontal = std::sqrt(de * de + dn * dn);
+    const gmti::sim_geometry::LookVectorEN look =
+        gmti::sim_geometry::makeAlgorithmLookVectorEN(platform_vel.ve, platform_vel.vn, g.theta_true_deg, global.geometry);
+    if (horizontal > 1.0e-9) {
+        const double ue = de / horizontal;
+        const double un = dn / horizontal;
+        const double dot_en = std::max(-1.0, std::min(1.0, look.east * ue + look.north * un));
+        const double cross_en = look.east * un - look.north * ue;
+        g.angle_error_deg = rad2deg(std::atan2(cross_en, dot_en));
+    } else {
+        g.angle_error_deg = 0.0;
+    }
+    g.target_azimuth_deg = wrapTo180(g.theta_true_deg + g.angle_error_deg);
     const Vec3 rel_v = g.target.velocity - g.platform.velocity;
     g.radial_velocity_mps = dot(rel_v, g.los_unit);
     return g;
@@ -172,4 +198,3 @@ void scanPacketStats(const std::vector<uint8_t> &packet,
 
 } // namespace stage2
 } // namespace gmti
-

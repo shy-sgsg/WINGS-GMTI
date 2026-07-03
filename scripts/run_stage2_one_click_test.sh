@@ -12,6 +12,17 @@ TARGET_ENABLED="true"
 PERIOD_COUNT="1"
 RUN_ALGORITHM="false"
 BUILD_TYPE=""
+SINGLE_POINT_BEAM_ID=""
+SINGLE_POINT_EXPECTED_BIN=""
+MOVING_TARGET_BEAM_ID=""
+MOVING_TARGET_EXPECTED_BIN=""
+MOVING_TARGET_SPEED_MPS=""
+MOVING_TARGET_VELOCITY_MODE=""
+MOVING_TARGET_VE_MPS=""
+MOVING_TARGET_VN_MPS=""
+MOVING_TARGET_RADIAL_SPEED_MPS=""
+MOVING_TARGET_TANGENTIAL_SPEED_MPS=""
+MOVING_TARGET_RCS_DB=""
 
 usage() {
   cat <<'EOF'
@@ -22,9 +33,21 @@ Options:
   --stage2-config PATH       Default: stage2_config.json
   --target-config PATH       Default: targets.json
   --output-dir DIR           Default: outputs/stage2_oneclick
-  --scene-mode MODE          full | clutter_only | noise_only | point_target_only | area_clutter_only
+  --scene-mode MODE          full | clutter_only | noise_only | point_target_only | area_clutter_only | target_only
+                             aliases: cooperative_target_only, empty_target
   --target-enabled true|false
   --period-count N           Default: 1
+  --single-point-beam-id B     1-based, same as algorithm detection beam_id
+  --single-point-expected-bin N
+  --moving-target-beam-id B    1-based, same as algorithm detection beam_id
+  --moving-target-expected-bin N
+  --moving-target-speed-mps V
+  --moving-target-velocity-mode enu|radial|tangential
+  --moving-target-ve-mps V
+  --moving-target-vn-mps V
+  --moving-target-radial-speed-mps V
+  --moving-target-tangential-speed-mps V
+  --moving-target-rcs-db RCS
   --run-algorithm true|false Default: false
   --build-type TYPE          Optional CMake build type
 
@@ -42,6 +65,17 @@ while [[ $# -gt 0 ]]; do
     --scene-mode) SCENE_MODE="$2"; shift 2 ;;
     --target-enabled) TARGET_ENABLED="$2"; shift 2 ;;
     --period-count) PERIOD_COUNT="$2"; shift 2 ;;
+    --single-point-beam-id) SINGLE_POINT_BEAM_ID="$2"; shift 2 ;;
+    --single-point-expected-bin) SINGLE_POINT_EXPECTED_BIN="$2"; shift 2 ;;
+    --moving-target-beam-id) MOVING_TARGET_BEAM_ID="$2"; shift 2 ;;
+    --moving-target-expected-bin) MOVING_TARGET_EXPECTED_BIN="$2"; shift 2 ;;
+    --moving-target-speed-mps) MOVING_TARGET_SPEED_MPS="$2"; shift 2 ;;
+    --moving-target-velocity-mode) MOVING_TARGET_VELOCITY_MODE="$2"; shift 2 ;;
+    --moving-target-ve-mps) MOVING_TARGET_VE_MPS="$2"; shift 2 ;;
+    --moving-target-vn-mps) MOVING_TARGET_VN_MPS="$2"; shift 2 ;;
+    --moving-target-radial-speed-mps) MOVING_TARGET_RADIAL_SPEED_MPS="$2"; shift 2 ;;
+    --moving-target-tangential-speed-mps) MOVING_TARGET_TANGENTIAL_SPEED_MPS="$2"; shift 2 ;;
+    --moving-target-rcs-db) MOVING_TARGET_RCS_DB="$2"; shift 2 ;;
     --run-algorithm) RUN_ALGORITHM="$2"; shift 2 ;;
     --build-type) BUILD_TYPE="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
@@ -64,15 +98,107 @@ if [[ "$RUN_ALGORITHM" == "true" ]]; then
 fi
 
 echo "[oneclick] generate stage2 data: scene=${SCENE_MODE}, target=${TARGET_ENABLED}, periods=${PERIOD_COUNT}"
-./build/simulate_stage2_statistical \
-  --stage2-config "$STAGE2_CONFIG" \
-  --target-config "$TARGET_CONFIG" \
-  --output-dir "$OUTPUT_DIR" \
-  --scene-mode "$SCENE_MODE" \
-  --target-enabled "$TARGET_ENABLED" \
-  --period-count "$PERIOD_COUNT" \
-  --validate true \
-  2>&1 | tee "$OUTPUT_DIR/logs/simulate_stage2_console.log"
+SIM_ARGS=(
+  ./build/simulate_stage2_statistical
+  --stage2-config "$STAGE2_CONFIG"
+  --target-config "$TARGET_CONFIG"
+  --output-dir "$OUTPUT_DIR"
+  --scene-mode "$SCENE_MODE"
+  --target-enabled "$TARGET_ENABLED"
+  --period-count "$PERIOD_COUNT"
+  --validate true
+)
+if [[ -n "$SINGLE_POINT_BEAM_ID" ]]; then
+  SIM_ARGS+=(--single-point-beam-id "$SINGLE_POINT_BEAM_ID")
+fi
+if [[ -n "$SINGLE_POINT_EXPECTED_BIN" ]]; then
+  SIM_ARGS+=(--single-point-expected-bin "$SINGLE_POINT_EXPECTED_BIN")
+fi
+if [[ -n "$MOVING_TARGET_BEAM_ID" ]]; then
+  SIM_ARGS+=(--moving-target-beam-id "$MOVING_TARGET_BEAM_ID")
+fi
+if [[ -n "$MOVING_TARGET_EXPECTED_BIN" ]]; then
+  SIM_ARGS+=(--moving-target-expected-bin "$MOVING_TARGET_EXPECTED_BIN")
+fi
+if [[ -n "$MOVING_TARGET_SPEED_MPS" ]]; then
+  SIM_ARGS+=(--moving-target-speed-mps "$MOVING_TARGET_SPEED_MPS")
+fi
+if [[ -n "$MOVING_TARGET_VELOCITY_MODE" ]]; then
+  SIM_ARGS+=(--moving-target-velocity-mode "$MOVING_TARGET_VELOCITY_MODE")
+fi
+if [[ -n "$MOVING_TARGET_VE_MPS" ]]; then
+  SIM_ARGS+=(--moving-target-ve-mps "$MOVING_TARGET_VE_MPS")
+fi
+if [[ -n "$MOVING_TARGET_VN_MPS" ]]; then
+  SIM_ARGS+=(--moving-target-vn-mps "$MOVING_TARGET_VN_MPS")
+fi
+if [[ -n "$MOVING_TARGET_RADIAL_SPEED_MPS" ]]; then
+  SIM_ARGS+=(--moving-target-radial-speed-mps "$MOVING_TARGET_RADIAL_SPEED_MPS")
+fi
+if [[ -n "$MOVING_TARGET_TANGENTIAL_SPEED_MPS" ]]; then
+  SIM_ARGS+=(--moving-target-tangential-speed-mps "$MOVING_TARGET_TANGENTIAL_SPEED_MPS")
+fi
+if [[ -n "$MOVING_TARGET_RCS_DB" ]]; then
+  SIM_ARGS+=(--moving-target-rcs-db "$MOVING_TARGET_RCS_DB")
+fi
+"${SIM_ARGS[@]}" 2>&1 | tee "$OUTPUT_DIR/logs/simulate_stage2_console.log"
+
+python3 - "$OUTPUT_DIR" "$TARGET_ENABLED" <<'PY'
+import csv
+import math
+import sys
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+target_enabled = sys.argv[2].lower() in {"1", "true", "yes", "on"}
+path = out_dir / "truth" / "target_truth_beam_summary.csv"
+
+def to_float(v, default=math.nan):
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+def fmt(v):
+    if v is None:
+        return ""
+    return str(v)
+
+if not path.exists():
+    print(f"[oneclick][target] summary not found: {path}")
+    if target_enabled:
+        print("[oneclick][ERR] target-enabled=true but target truth summary is missing.", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+with path.open("r", encoding="utf-8", newline="") as f:
+    rows = list(csv.DictReader(f))
+
+injected = [r for r in rows if to_float(r.get("injected_sample_count"), 0.0) > 0.0]
+print(f"[oneclick][target] injected rows = {len(injected)}")
+
+for r in injected[:5]:
+    fields = [
+        "beam_id",
+        "beam_id_0based",
+        "beam_id_1based",
+        "expected_range_bin",
+        "visible_pulse_count",
+        "injected_sample_count",
+        "moving_target_speed_mps",
+        "rcs_db",
+        "target_ve_mps",
+        "target_vn_mps",
+        "target_vr_self_mps",
+        "target_vt_self_mps",
+        "af_motion_truth_hz",
+    ]
+    print("[oneclick][target] " + " ".join(f"{k}={fmt(r.get(k, ''))}" for k in fields))
+
+if target_enabled and not injected:
+    print("[oneclick][ERR] target-enabled=true but no cooperative target was injected.", file=sys.stderr)
+    sys.exit(1)
+PY
 
 if [[ "$RUN_ALGORITHM" == "true" ]]; then
   echo "[oneclick] run GMTI_core"
@@ -94,4 +220,3 @@ REPORT_PATH="$(python3 simulator/reporting/generate_simulation_report.py \
   --target-enabled "$TARGET_ENABLED")"
 
 echo "[oneclick] report: $REPORT_PATH"
-

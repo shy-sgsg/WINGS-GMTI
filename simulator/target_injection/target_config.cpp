@@ -134,19 +134,35 @@ void initTargetFromRangeAzimuth(const RadarConfig &radar,
                                 const TargetGlobalConfig &global,
                                 TargetConfig &target)
 {
-    const double az = deg2rad(target.azimuth_deg);
-    const double dz = target.height_m - global.platform_height_m;
-    const double horiz = std::sqrt(std::max(0.0, target.slant_range_m * target.slant_range_m - dz * dz));
-    target.p0.x = horiz * std::cos(az);
-    target.p0.y = horiz * std::sin(az);
+    const gmti::sim_geometry::LocalPoint ref_platform(0.0, 0.0, global.platform_height_m);
+    const gmti::sim_geometry::LocalVelocity ref_velocity(global.platform_speed_mps, 0.0, 0.0);
+    const gmti::sim_geometry::LocalPoint target_local =
+        gmti::sim_geometry::makePointFromRangeAzimuth(ref_platform,
+                                                      ref_velocity,
+                                                      target.slant_range_m,
+                                                      target.azimuth_deg,
+                                                      global.platform_height_m,
+                                                      target.height_m,
+                                                      global.geometry);
+    target.p0.x = target_local.x;
+    target.p0.y = target_local.y;
     target.p0.z = target.height_m;
-    const double urx = std::cos(az);
-    const double ury = std::sin(az);
-    const double ucx = -std::sin(az);
-    const double ucy = std::cos(az);
-    target.v.x = target.radial_velocity_mps * urx + target.cross_velocity_mps * ucx;
-    target.v.y = target.radial_velocity_mps * ury + target.cross_velocity_mps * ucy;
-    target.v.z = 0.0;
+    const gmti::sim_geometry::ENUVelocity ref_enu_velocity =
+        gmti::sim_geometry::localVelocityToEnu(ref_velocity, global.geometry);
+    const gmti::sim_geometry::LookVectorEN look =
+        gmti::sim_geometry::makeAlgorithmLookVectorEN(ref_enu_velocity.ve,
+                                                      ref_enu_velocity.vn,
+                                                      target.azimuth_deg,
+                                                      global.geometry);
+    const gmti::sim_geometry::ENUVelocity target_enu_velocity(
+        target.radial_velocity_mps * look.east,
+        target.radial_velocity_mps * look.north,
+        0.0);
+    const gmti::sim_geometry::LocalVelocity target_local_velocity =
+        gmti::sim_geometry::enuVelocityToLocal(target_enu_velocity, global.geometry);
+    target.v.x = target_local_velocity.vx;
+    target.v.y = target_local_velocity.vy;
+    target.v.z = target_local_velocity.vz;
     (void)radar;
 }
 
@@ -246,6 +262,37 @@ bool loadTargetConfig(const std::string &json_path,
     global.carrier_phase_sign = jsonInt(g, "carrier_phase_sign", global.carrier_phase_sign);
     global.platform_speed_mps = jsonDouble(g, "platform_speed_mps", global.platform_speed_mps);
     global.platform_height_m = jsonDouble(g, "platform_height_m", global.platform_height_m);
+    global.platform_origin_lat_deg = jsonDouble(g, "platform_origin_lat_deg", global.platform_origin_lat_deg);
+    global.platform_origin_lon_deg = jsonDouble(g, "platform_origin_lon_deg", global.platform_origin_lon_deg);
+    global.platform_origin_alt_m = jsonDouble(g, "platform_origin_alt_m", global.platform_origin_alt_m);
+    global.projection_ref_lon_deg = jsonDouble(g, "projection_ref_lon_deg", global.projection_ref_lon_deg);
+    global.geometry.platform_origin_lat_deg = global.platform_origin_lat_deg;
+    global.geometry.platform_origin_lon_deg = global.platform_origin_lon_deg;
+    global.geometry.platform_origin_alt_m = global.platform_origin_alt_m;
+    global.geometry.projection_ref_lon_deg = global.projection_ref_lon_deg;
+    const std::string geom = sectionObject(txt, "simulation_geometry");
+    if (!geom.empty()) {
+        global.geometry.geometry_config_name = jsonString(geom, "geometry_config_name", global.geometry.geometry_config_name);
+        global.geometry.local_x_axis = jsonString(geom, "local_x_axis", global.geometry.local_x_axis);
+        global.geometry.local_y_axis = jsonString(geom, "local_y_axis", global.geometry.local_y_axis);
+        global.geometry.platform_heading_source = jsonString(geom, "platform_heading_source", global.geometry.platform_heading_source);
+        global.geometry.platform_heading_deg = jsonDouble(geom, "platform_heading_deg", global.geometry.platform_heading_deg);
+        global.geometry.beam_angle_reference = jsonString(geom, "beam_angle_reference", global.geometry.beam_angle_reference);
+        global.geometry.beam_zero_direction = jsonString(geom, "beam_zero_direction", global.geometry.beam_zero_direction);
+        global.geometry.beam_positive_direction = jsonString(geom, "beam_positive_direction", global.geometry.beam_positive_direction);
+        global.geometry.beam_theta_offset_deg = jsonDouble(geom, "beam_theta_offset_deg", global.geometry.beam_theta_offset_deg);
+        global.geometry.range_geometry = jsonString(geom, "range_geometry", global.geometry.range_geometry);
+        global.geometry.use_ground_range_for_position = jsonBool(geom, "use_ground_range_for_position", global.geometry.use_ground_range_for_position);
+        global.geometry.platform_origin_lat_deg = jsonDouble(geom, "platform_origin_lat_deg", global.geometry.platform_origin_lat_deg);
+        global.geometry.platform_origin_lon_deg = jsonDouble(geom, "platform_origin_lon_deg", global.geometry.platform_origin_lon_deg);
+        global.geometry.platform_origin_alt_m = jsonDouble(geom, "platform_origin_alt_m", global.geometry.platform_origin_alt_m);
+        global.geometry.projection_ref_lon_deg = jsonDouble(geom, "projection_ref_lon_deg", global.geometry.projection_ref_lon_deg);
+        global.geometry.squint_side = jsonInt(geom, "squint_side", global.geometry.squint_side);
+        global.platform_origin_lat_deg = global.geometry.platform_origin_lat_deg;
+        global.platform_origin_lon_deg = global.geometry.platform_origin_lon_deg;
+        global.platform_origin_alt_m = global.geometry.platform_origin_alt_m;
+        global.projection_ref_lon_deg = global.geometry.projection_ref_lon_deg;
+    }
 
     target.id = jsonInt(t, "id", target.id);
     target.name = jsonString(t, "name", target.name);
@@ -331,8 +378,28 @@ bool writeDefaultTargetsJson(const std::string &path, std::string &err)
         "    \"platform_mode\": \"ideal_platform\",\n"
         "    \"platform_speed_mps\": 60.0,\n"
         "    \"platform_height_m\": 6000.0,\n"
+        "    \"platform_origin_lat_deg\": 40.45121057,\n"
+        "    \"platform_origin_lon_deg\": 116.98377429,\n"
+        "    \"platform_origin_alt_m\": 6000.0,\n"
+        "    \"projection_ref_lon_deg\": 117.0,\n"
         "    \"beam_gain_threshold\": 0.05,\n"
         "    \"rms_floor\": 1e-6\n"
+        "  },\n"
+        "  \"simulation_geometry\": {\n"
+        "    \"geometry_config_name\": \"algorithm_axis_x_north\",\n"
+        "    \"local_x_axis\": \"north\", \"local_y_axis\": \"east\",\n"
+        "    \"platform_heading_source\": \"velocity\", \"platform_heading_deg\": 0.0,\n"
+        "    \"beam_angle_reference\": \"algorithm\",\n"
+        "    \"beam_zero_direction\": \"algorithm\",\n"
+        "    \"beam_positive_direction\": \"algorithm\",\n"
+        "    \"beam_theta_offset_deg\": 0.0,\n"
+        "    \"range_geometry\": \"algorithm\",\n"
+        "    \"use_ground_range_for_position\": true,\n"
+        "    \"platform_origin_lat_deg\": 40.4512107203,\n"
+        "    \"platform_origin_lon_deg\": 116.985931582,\n"
+        "    \"platform_origin_alt_m\": 6000.0,\n"
+        "    \"projection_ref_lon_deg\": 117.0,\n"
+        "    \"squint_side\": 1\n"
         "  },\n"
         "  \"targets\": [\n"
         "    {\n"
