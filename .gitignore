@@ -51,6 +51,12 @@ CTestTestfile.cmake
 *.bin
 *.elf
 *.hex
+*.pyc
+
+# 文档
+*.pdf
+*.docx
+*.csv
 
 # 临时文件和日志
 *.log
