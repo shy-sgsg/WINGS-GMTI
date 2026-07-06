@@ -3,6 +3,8 @@
 #include "dbs/NewProtocolLayout.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <complex>
 #include <cstring>
 
 namespace gmti {
@@ -96,6 +98,98 @@ gmti::sim_geometry::GeoPoint localToGeoPose(const TargetGlobalConfig &global, co
     const gmti::sim_geometry::ENUPoint enu =
         gmti::sim_geometry::localToEnu(toLocalPoint(local), global.geometry);
     return gmti::sim_geometry::enuToLatLon(enu.e, enu.n, local.z, global.geometry);
+}
+
+GeometrySample geometryAtTime(const RadarConfig &radar,
+                              const TargetGlobalConfig &global,
+                              const TargetConfig &target,
+                              int beam_id,
+                              double time_sec)
+{
+    GeometrySample g;
+    g.time_sec = time_sec;
+    g.theta_cmd_deg = radar.scan_min_deg + radar.scan_step_deg * static_cast<double>(beam_id);
+    g.theta_true_deg = g.theta_cmd_deg;
+    g.platform = evaluatePlatformState(global, time_sec);
+    g.target = evaluateTargetState(target, time_sec);
+    g.los = g.target.position - g.platform.position;
+    g.range_m = norm(g.los);
+    if (g.range_m > 0.0) {
+        g.los_unit = g.los * (1.0 / g.range_m);
+    }
+    g.tau_abs_sec = 2.0 * g.range_m / kC;
+    g.tau_rel_sec = g.tau_abs_sec - radar.sample_delay_sec;
+    g.range_sample_float = g.tau_rel_sec * radar.fs_hz;
+    g.range_sample_int = static_cast<int>(std::floor(g.range_sample_float + 0.5));
+    g.in_range_window = (g.range_sample_float >= 0.0 &&
+                         g.range_sample_float < static_cast<double>(radar.pulse_len));
+
+    const gmti::sim_geometry::ENUPoint platform_enu =
+        gmti::sim_geometry::localToEnu(toLocalPoint(g.platform.position), global.geometry);
+    const gmti::sim_geometry::ENUPoint target_enu =
+        gmti::sim_geometry::localToEnu(toLocalPoint(g.target.position), global.geometry);
+    const gmti::sim_geometry::ENUVelocity platform_vel =
+        gmti::sim_geometry::localVelocityToEnu(toLocalVelocity(g.platform.velocity), global.geometry);
+    const double de = target_enu.e - platform_enu.e;
+    const double dn = target_enu.n - platform_enu.n;
+    const double horizontal = std::sqrt(de * de + dn * dn);
+    const gmti::sim_geometry::LookVectorEN look =
+        gmti::sim_geometry::makeAlgorithmLookVectorEN(platform_vel.ve,
+                                                      platform_vel.vn,
+                                                      g.theta_true_deg,
+                                                      global.geometry);
+    if (horizontal > 1.0e-9) {
+        const double ue = de / horizontal;
+        const double un = dn / horizontal;
+        const double dot_en = std::max(-1.0, std::min(1.0, look.east * ue + look.north * un));
+        const double cross_en = look.east * un - look.north * ue;
+        g.angle_error_deg = rad2deg(std::atan2(cross_en, dot_en));
+    } else {
+        g.angle_error_deg = 0.0;
+    }
+    g.target_azimuth_deg = wrapTo180(g.theta_true_deg + g.angle_error_deg);
+    const Vec3 rel_v = g.target.velocity - g.platform.velocity;
+    g.radial_velocity_mps = dot(rel_v, g.los_unit);
+    return g;
+}
+
+void addForwardEchoForChannel(std::vector<uint8_t> &packet,
+                              const RadarConfig &radar,
+                              const TargetGlobalConfig &global,
+                              const GeometrySample &geom,
+                              int channel,
+                              double amplitude,
+                              double beam_gain,
+                              double lambda,
+                              double kr,
+                              int &count)
+{
+    if (!geom.in_range_window || amplitude <= 0.0 || beam_gain <= 0.0) {
+        return;
+    }
+    const int np = static_cast<int>(std::floor(radar.tr_sec * radar.fs_hz + 0.5));
+    const int n_start = static_cast<int>(std::floor(geom.range_sample_float));
+    const int n_end = std::min(radar.pulse_len, n_start + np);
+    if (n_end <= 0 || n_start >= radar.pulse_len) {
+        return;
+    }
+    const double carrier_phase =
+        static_cast<double>(global.carrier_phase_sign) * 4.0 * kPi * geom.range_m / lambda;
+    const std::complex<double> carrier = std::exp(std::complex<double>(0.0, carrier_phase));
+    for (int n = std::max(0, n_start); n < n_end; ++n) {
+        const double t_fast = static_cast<double>(n) / radar.fs_hz;
+        const double dt = t_fast - geom.tau_rel_sec;
+        if (dt < 0.0 || dt >= radar.tr_sec) continue;
+        const double chirp_phase =
+            static_cast<double>(global.chirp_phase_sign) * kPi * kr * dt * dt;
+        const std::complex<double> echo =
+            amplitude * beam_gain *
+            std::exp(std::complex<double>(0.0, chirp_phase)) * carrier;
+        const std::complex<float> e(static_cast<float>(echo.real()), static_cast<float>(echo.imag()));
+        const std::complex<float> cur = loadComplexCh(packet, radar.pulse_len, n, channel);
+        storeComplexCh(packet, radar.pulse_len, n, channel, cur + e);
+        ++count;
+    }
 }
 
 } // namespace
@@ -245,7 +339,15 @@ PulseTruth injectOnePulse(std::vector<uint8_t> &packet,
     truth.target_period_enabled = target.enabled &&
                                   period_id >= target.start_period &&
                                   period_id <= target.end_period;
-    truth.delta_phi_ch_rad = channelPhaseRad(radar, global, truth.geom);
+    const double platform_speed = norm(truth.geom.platform.velocity);
+    const double channel_delta_t = (platform_speed > 1.0e-9)
+        ? (radar.d_chan_m / platform_speed)
+        : 0.0;
+    const GeometrySample geom_ch2 =
+        geometryAtTime(radar, global, target, beam_id, truth.geom.time_sec + channel_delta_t);
+    truth.delta_phi_ch_rad =
+        static_cast<double>(global.carrier_phase_sign) * 4.0 * kPi *
+        (geom_ch2.range_m - truth.geom.range_m) / (kC / radar.fc_hz);
     truth.local_background_rms = estimateLocalRms(packet, radar, truth.geom.range_sample_int, global.rms_floor);
     if (global.amplitude_mode == "direct_amplitude") {
         truth.target_amplitude = global.direct_amplitude;
@@ -259,34 +361,16 @@ PulseTruth injectOnePulse(std::vector<uint8_t> &packet,
 
     const double kr = radar.br_hz / radar.tr_sec;
     const double lambda = kC / radar.fc_hz;
-    const int np = static_cast<int>(std::floor(radar.tr_sec * radar.fs_hz + 0.5));
-    const int n_start = static_cast<int>(std::floor(truth.geom.range_sample_float));
-    const int n_end = std::min(radar.pulse_len, n_start + np);
-    const std::complex<double> ch2_phase =
-        std::exp(std::complex<double>(0.0, truth.delta_phi_ch_rad));
-    const double carrier_phase =
-        static_cast<double>(global.carrier_phase_sign) * 4.0 * kPi * truth.geom.range_m / lambda;
-    const std::complex<double> carrier = std::exp(std::complex<double>(0.0, carrier_phase));
-    for (int n = std::max(0, n_start); n < n_end; ++n) {
-        const double t_fast = static_cast<double>(n) / radar.fs_hz;
-        const double dt = t_fast - truth.geom.tau_rel_sec;
-        if (dt < 0.0 || dt >= radar.tr_sec) continue;
-        const double chirp_phase =
-            static_cast<double>(global.chirp_phase_sign) * kPi * kr * dt * dt;
-        const std::complex<double> echo =
-            truth.target_amplitude * truth.beam_gain *
-            std::exp(std::complex<double>(0.0, chirp_phase)) * carrier;
-        const std::complex<float> e1(static_cast<float>(echo.real()), static_cast<float>(echo.imag()));
-        const std::complex<double> echo2 = echo * ch2_phase;
-        const std::complex<float> e2(static_cast<float>(echo2.real()), static_cast<float>(echo2.imag()));
-        const std::complex<float> c1 = loadComplexCh(packet, radar.pulse_len, n, 1);
-        const std::complex<float> c2 = loadComplexCh(packet, radar.pulse_len, n, 2);
-        const std::complex<float> o1 = c1 + e1;
-        const std::complex<float> o2 = c2 + e2;
-        storeComplexCh(packet, radar.pulse_len, n, 1, o1);
-        storeComplexCh(packet, radar.pulse_len, n, 2, o2);
-        ++truth.injected_sample_count;
-    }
+    int ch1_count = 0;
+    int ch2_count = 0;
+    addForwardEchoForChannel(packet, radar, global, truth.geom, 1,
+                             truth.target_amplitude, truth.beam_gain,
+                             lambda, kr, ch1_count);
+    const VisibilityResult vr_ch2 = evaluateVisibility(radar, global, geom_ch2.angle_error_deg);
+    addForwardEchoForChannel(packet, radar, global, geom_ch2, 2,
+                             truth.target_amplitude, vr_ch2.beam_gain,
+                             lambda, kr, ch2_count);
+    truth.injected_sample_count = std::max(ch1_count, ch2_count);
     return truth;
 }
 

@@ -22,6 +22,7 @@
 #include "geo/geoProj.hpp"
 #include "rotation_xy.hpp"
 #include "unwrap_fd.hpp"
+#include "motion_comp.hpp"
 #include "dbs/NewProtocolReader.hpp"
 #include "trig_lut.hpp"
 
@@ -1297,6 +1298,15 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     std::vector<double> MT; // MT(i,:) = [lat,lng,cfg.MT_nowz,xP,yP]
     // MT.resize(L * 6, 0.0);
 
+    size_t n_selected = L;
+    size_t n_old_valid = 0;
+    size_t n_comp_valid = 0;
+    size_t n_old_invalid_comp_valid = 0;
+    size_t n_old_valid_comp_invalid = 0;
+    size_t n_both_valid = 0;
+    size_t n_both_invalid = 0;
+    size_t n_output = 0;
+
     // 参考相位：ref_phase 已在外部给定
     const double k = p_38[0]; // slope
     const double b = p_38[1]; // intercept
@@ -1332,15 +1342,14 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
             dphi = ref_phase + diff;
         }
 
-        // af_ransac = (dphi - b) / k
-        if (std::abs(k) < 1e-12)
-        {
-            af_ransac[i] = 0.0; // 防除零，可按需改成 continue/报错
-        }
-        else
-        {
-            af_ransac[i] = (dphi - b) / k;
-        }
+        const double af_row = (r >= 0 && r < static_cast<int>(faAxis.size()))
+            ? faAxis[static_cast<size_t>(r)]
+            : std::numeric_limits<double>::quiet_NaN();
+        const double af_phase_legacy = (std::abs(k) < 1e-12) ? 0.0 : ((dphi - b) / k);
+        const double af_total = cfg.motion_comp_use_row_doppler ? af_row : af_phase_legacy;
+        const MotionCompResult motion =
+            compensateTargetMotionDoppler(cfg, plane, dphi, af_total, k, b, cfg.lambda, theta_deg);
+        af_ransac[i] = motion.af_phase;
 
         // row_af(i) = round((af_ransac - faAxis(1)) / fd_res) + 1
         // —— 这里改为 0-based：不再 +1
@@ -1353,7 +1362,47 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         // }
 
         // 几何定位（需要 plane.V, plane.H, plane.E, plane.N；cfg.Rg 为距离轴）
-        const double sinA = (af_ransac[i]) * cfg.lambda / (2.0 * plane.V);
+        double lambda_loc = cfg.lambda;
+        if (!(lambda_loc > 0.0) && cfg.fc > 0.0) {
+            lambda_loc = C / (cfg.fc * 1.0e9);
+        }
+        const double denom = 2.0 * plane.V;
+        const double sinA_old = (denom != 0.0) ? (motion.af_phase * lambda_loc / denom)
+                                               : std::numeric_limits<double>::quiet_NaN();
+        const double sinA_comp = (denom != 0.0) ? (motion.af_geometry * lambda_loc / denom)
+                                                : std::numeric_limits<double>::quiet_NaN();
+        const bool old_valid = std::isfinite(sinA_old) && std::abs(sinA_old) <= 1.0;
+        const bool comp_valid = cfg.motion_comp_enable && motion.ok &&
+                                std::isfinite(sinA_comp) && std::abs(sinA_comp) <= 1.0;
+        if (old_valid) ++n_old_valid;
+        if (comp_valid) ++n_comp_valid;
+        if (!old_valid && comp_valid) ++n_old_invalid_comp_valid;
+        if (old_valid && !comp_valid) ++n_old_valid_comp_invalid;
+        if (old_valid && comp_valid) ++n_both_valid;
+        if (!old_valid && !comp_valid) ++n_both_invalid;
+
+        const bool use_comp_loc = cfg.motion_comp_enable && motion.ok;
+        const double sinA = use_comp_loc ? sinA_comp : sinA_old;
+        const char *loc_used_mode = use_comp_loc ? "comp" : "old";
+        const char *motion_comp_status = !cfg.motion_comp_enable ? "disabled"
+            : (comp_valid ? "analytic_valid"
+                          : (motion.fallback_legacy ? "analytic_fallback_old" : "analytic_invalid"));
+        const bool used_valid = use_comp_loc ? comp_valid : old_valid;
+        if (!used_valid) {
+            DBG("目标 " << i << " 当前定位方法 sinA 无效，剔除"
+                        << " loc_used_mode=" << loc_used_mode
+                        << " sinA_old=" << sinA_old
+                        << " sinA_comp=" << sinA_comp
+                        << " old_valid=" << old_valid
+                        << " comp_valid=" << comp_valid
+                        << " af_phase=" << motion.af_phase
+                        << " af_total=" << motion.af_total
+                        << " af_geometry=" << motion.af_geometry
+                        << " af_motion=" << motion.af_motion
+                        << " v_radial=" << motion.v_radial
+                        << " phi_motion=" << motion.phi_motion);
+            continue;
+        }
         const double Rg = cfg.Rg[static_cast<size_t>(c)];
         const double py = Rg * sinA;
 
@@ -1371,6 +1420,19 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
 
         xP += plane.E;
         yP += plane.N;
+
+        double oldXP = std::numeric_limits<double>::quiet_NaN();
+        double oldYP = std::numeric_limits<double>::quiet_NaN();
+        if (std::isfinite(sinA_old) && std::abs(sinA_old) <= 1.0) {
+            const double py_old = Rg * sinA_old;
+            const double px2_old = Rg * Rg - py_old * py_old - dz * dz;
+            if (px2_old >= 0.0) {
+                const double px_old = (px2_old > 0.0) ? std::sqrt(px2_old) : 0.0;
+                rotation_xy(py_old, px_old, flag, cosT, sinT, oldXP, oldYP);
+                oldXP += plane.E;
+                oldYP += plane.N;
+            }
+        }
 
         double lat = 0.0, lng = 0.0;               // 由投影坐标反解经纬
         (void)Gaussp3RV(xP, yP, cfg.L0, lat, lng); // 假定返回 bool，忽略失败则保持 0
@@ -1417,8 +1479,63 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         rec.lat = lat;
         rec.lon = lng;
         rec.utc = out.utcMid;
+        rec.radial_velocity_mps = motion.v_radial;
+        rec.phase_rad = dphi;
+        rec.p38_k = motion.k;
+        rec.p38_b = motion.b;
+        rec.phi_static_rad = motion.phi_static;
+        rec.phi_static_total_rad = motion.phi_static_total;
+        rec.phi_res_rad = motion.phi_res;
+        rec.phi_static_at_zero = motion.phi_static_at_zero;
+        rec.phi_res_at_zero = motion.phi_res_at_zero;
+        rec.phi_static_geometry_rad = motion.phi_static_geometry;
+        rec.af_phase = motion.af_phase;
+        rec.af_total = motion.af_total;
+        rec.af_geometry = motion.af_geometry;
+        rec.af_motion = motion.af_motion;
+        rec.phi_motion = motion.phi_motion;
+        rec.delta_t_s = motion.delta_t;
+        rec.motion_comp_denom = motion.denom;
+        rec.denom_without_k = motion.denom_without_k;
+        rec.v_from_phase_raw = motion.v_from_phase_raw;
+        rec.v_from_phi_res = motion.v_from_phi_res;
+        rec.sinA_old = sinA_old;
+        rec.sinA_comp = sinA_comp;
+        rec.sinA_used = sinA;
+        rec.old_e = oldXP;
+        rec.old_n = oldYP;
+        rec.new_e = xP;
+        rec.new_n = yP;
+        rec.old_valid = old_valid ? 1 : 0;
+        rec.comp_valid = comp_valid ? 1 : 0;
+        rec.old_invalid_comp_valid = (!old_valid && comp_valid) ? 1 : 0;
+        rec.motion_comp_valid = motion.ok ? 1 : 0;
+        rec.motion_comp_enable = cfg.motion_comp_enable ? 1 : 0;
+        rec.motion_comp_used = motion.used_motion_comp ? 1 : 0;
+        rec.motion_comp_fallback = motion.fallback_legacy ? 1 : 0;
+        rec.p38_theory_sign = motion.p38_theory_sign;
+        rec.motion_doppler_axis_sign = motion.motion_doppler_axis_sign;
+        rec.ati_phase_to_velocity_sign = motion.ati_phase_to_velocity_sign;
+        rec.p38_mode = motion.p38_mode;
+        rec.geometry_calib_mode = motion.geometry_calib_mode;
+        rec.loc_used_mode = loc_used_mode;
+        rec.motion_comp_status = motion_comp_status;
+        rec.motion_comp_solver = motion.solver;
         out.detection_records.push_back(rec);
+        ++n_output;
         DBG("目标 " << i << " 定位成功: Lat=" << lat << " Lng=" << lng);
+    }
+
+    if (cfg.motion_comp_debug || cfg.runtime_diagnostics_enabled) {
+        std::cout << "[motion_comp][loc][period=" << periodIdx
+                  << "] n_selected=" << n_selected
+                  << " n_old_valid=" << n_old_valid
+                  << " n_comp_valid=" << n_comp_valid
+                  << " n_old_invalid_comp_valid=" << n_old_invalid_comp_valid
+                  << " n_old_valid_comp_invalid=" << n_old_valid_comp_invalid
+                  << " n_both_valid=" << n_both_valid
+                  << " n_both_invalid=" << n_both_invalid
+                  << " n_output=" << n_output << std::endl;
     }
 
     out.detect = targetSel;
@@ -1874,6 +1991,12 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
             const double af_wrapped = (std::abs(p_38[0]) < 1e-12)
                 ? ((r < static_cast<int>(faAxis.size())) ? faAxis[static_cast<size_t>(r)] : fa_ctr)
                 : ((dphi - p_38[1]) / p_38[0]);
+            const double af_phase = (std::abs(p_38[0]) < 1e-12)
+                ? 0.0
+                : ((dphi - p_38[1]) / p_38[0]);
+            const double af_total = (r >= 0 && r < static_cast<int>(faAxis.size()))
+                ? faAxis[static_cast<size_t>(r)]
+                : af_wrapped;
 
             DetectionRaw d;
             d.beam_index = periodIdx;
@@ -1883,6 +2006,10 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
             d.range_m = cfg.Rg.empty() ? (cfg.R_min + static_cast<double>(c) * cfg.R_bin)
                                        : cfg.Rg[static_cast<size_t>(c)];
             d.af_wrapped = af_wrapped;
+            d.af_row = af_total;
+            d.af_phase = af_phase;
+            d.af_total = af_total;
+            d.af_geometry = af_phase;
             d.phase = dphi;
             d.amplitude = (i < refined_mydata.size()) ? static_cast<double>(refined_mydata[i]) : 0.0;
             d.utc_mid = beamMeta.utc_mid;

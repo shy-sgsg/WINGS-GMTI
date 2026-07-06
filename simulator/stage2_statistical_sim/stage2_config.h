@@ -43,6 +43,7 @@ struct SceneConfig {
     double azimuth_min_deg = -60.0;
     double azimuth_max_deg = 60.0;
     double ground_z_m = 0.0;
+    double clutter_amplitude_scale = 1.0;
     AreaClutterConfig area;
     StrongScattererConfig strong;
     LineScattererConfig line;
@@ -105,6 +106,17 @@ struct Stage2RunOptions {
     double moving_target_radial_speed_mps = std::numeric_limits<double>::quiet_NaN();
     double moving_target_tangential_speed_mps = std::numeric_limits<double>::quiet_NaN();
     double moving_target_rcs_db = -999.0;
+    double clutter_amplitude_scale = std::numeric_limits<double>::quiet_NaN();
+    int area_clutter_scatterer_count = -1;
+    double area_clutter_mean_power = std::numeric_limits<double>::quiet_NaN();
+    double area_clutter_texture_sigma = std::numeric_limits<double>::quiet_NaN();
+    int strong_scatterer_count = -1;
+    double strong_rcs_db_min = std::numeric_limits<double>::quiet_NaN();
+    double strong_rcs_db_max = std::numeric_limits<double>::quiet_NaN();
+    int line_scatterer_count = -1;
+    int line_points_per_line = -1;
+    double line_rcs_db = std::numeric_limits<double>::quiet_NaN();
+    double noise_power = std::numeric_limits<double>::quiet_NaN();
 };
 
 bool parseStage2CommandLine(int argc, char **argv, Stage2RunOptions &opt);

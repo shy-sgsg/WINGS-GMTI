@@ -76,7 +76,18 @@
         <period_first>1</period_first>
         <period_num>61</period_num>
         <n_tiaoguo>1</n_tiaoguo>
-        <raw_fenbianlv>8</raw_fenbianlv>
+        <raw_fenbianlv>25</raw_fenbianlv>
+        <motion_comp_enable>1</motion_comp_enable>
+        <motion_comp_analytic_enable>1</motion_comp_analytic_enable>
+        <motion_comp_use_row_doppler>1</motion_comp_use_row_doppler>
+        <motion_comp_iter>3</motion_comp_iter>
+        <ati_velocity_sign>1</ati_velocity_sign>
+        <ati_phase_to_velocity_sign>1</ati_phase_to_velocity_sign>
+        <motion_doppler_axis_sign>1</motion_doppler_axis_sign>
+        <ati_phase_bias_rad>0.0</ati_phase_bias_rad>
+        <ati_vmax_mps>60.0</ati_vmax_mps>
+        <motion_comp_denom_min>1e-6</motion_comp_denom_min>
+        <motion_comp_debug>1</motion_comp_debug>
         <len_tiaoguo>200</len_tiaoguo>
         <dbs_max_mosaic_pixels>100000000</dbs_max_mosaic_pixels>
         <dbs_mosaic_margin_ratio>0.05</dbs_mosaic_margin_ratio>

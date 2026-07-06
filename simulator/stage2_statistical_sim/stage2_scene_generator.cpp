@@ -65,6 +65,7 @@ void appendArea(const Stage2Config &cfg, std::mt19937 &rng, ScattererList &out, 
         if (cfg.scene.area.model == "rayleigh_lognormal_texture") {
             amp *= texture(rng);
         }
+        amp *= cfg.scene.clutter_amplitude_scale;
         out.push_back(makeScattererFromRangeAzimuth(cfg, next_id++, "area", r, az, cfg.scene.ground_z_m,
                                                     amp, uni(rng, 0.0, 2.0 * kPi), 20.0 * std::log10(std::max(amp, 1e-12))));
     }
@@ -77,7 +78,7 @@ void appendStrong(const Stage2Config &cfg, std::mt19937 &rng, ScattererList &out
         const double r = uni(rng, cfg.scene.range_min_m, cfg.scene.range_max_m);
         const double az = uni(rng, cfg.scene.azimuth_min_deg, cfg.scene.azimuth_max_deg);
         const double rcs = uni(rng, cfg.scene.strong.rcs_db_min, cfg.scene.strong.rcs_db_max);
-        const double amp = std::pow(10.0, rcs / 20.0);
+        const double amp = cfg.scene.clutter_amplitude_scale * std::pow(10.0, rcs / 20.0);
         out.push_back(makeScattererFromRangeAzimuth(cfg, next_id++, "strong", r, az, cfg.scene.ground_z_m,
                                                     amp, uni(rng, 0.0, 2.0 * kPi), rcs));
     }
@@ -98,7 +99,7 @@ void appendLines(const Stage2Config &cfg, std::mt19937 &rng, ScattererList &out,
             const double r = r0 + (r1 - r0) * w;
             const double az = a0 + (a1 - a0) * w;
             const double rcs = cfg.scene.line.rcs_db + jitter(rng);
-            const double amp = std::pow(10.0, rcs / 20.0);
+            const double amp = cfg.scene.clutter_amplitude_scale * std::pow(10.0, rcs / 20.0);
             out.push_back(makeScattererFromRangeAzimuth(cfg, next_id++, "line", r, az, cfg.scene.ground_z_m,
                                                         amp, uni(rng, 0.0, 2.0 * kPi), rcs));
         }

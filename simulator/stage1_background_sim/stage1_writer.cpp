@@ -437,6 +437,18 @@ bool writeStage1ConfigXml(const Stage1OldSystemConfig &old_cfg,
     setInt("period_first", 1);
     setInt("period_num", new_cfg.beam_count);
     setInt("rg_ed", new_cfg.pc_crop_len - 1);
+    setInt("raw_fenbianlv", 25);
+    setInt("motion_comp_enable", 0);
+    setInt("motion_comp_analytic_enable", 1);
+    setInt("motion_comp_use_row_doppler", 1);
+    setInt("motion_comp_iter", 3);
+    setInt("ati_velocity_sign", 1);
+    setInt("ati_phase_to_velocity_sign", 1);
+    setInt("motion_doppler_axis_sign", -1);
+    setDouble("ati_phase_bias_rad", 0.0);
+    setDouble("ati_vmax_mps", 60.0);
+    setDouble("motion_comp_denom_min", 1.0e-6);
+    setInt("motion_comp_debug", 1);
 
     if (!doc.SaveFile(path.c_str())) {
         err = "failed to save generated XML: " + path;

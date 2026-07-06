@@ -225,6 +225,18 @@ bool saveFromTemplate(const Stage2Config &cfg,
         setOrReplaceInt(p, "debug_pc_peak", 1);
         setOrReplace(p, "pc_peak_scene_truth", root_dir + "/truth/scene_truth.csv");
     }
+    setOrReplaceDouble(p, "raw_fenbianlv", 25.0);
+    setOrReplaceInt(p, "motion_comp_enable", 0);
+    setOrReplaceInt(p, "motion_comp_analytic_enable", 1);
+    setOrReplaceInt(p, "motion_comp_use_row_doppler", 1);
+    setOrReplaceInt(p, "motion_comp_iter", 3);
+    setOrReplaceInt(p, "ati_velocity_sign", 1);
+    setOrReplaceInt(p, "ati_phase_to_velocity_sign", 1);
+    setOrReplaceInt(p, "motion_doppler_axis_sign", -1);
+    setOrReplaceDouble(p, "ati_phase_bias_rad", 0.0);
+    setOrReplaceDouble(p, "ati_vmax_mps", 60.0);
+    setOrReplaceDouble(p, "motion_comp_denom_min", 1.0e-6);
+    setOrReplaceInt(p, "motion_comp_debug", 1);
     return doc.SaveFile(out_xml.c_str());
 }
 
@@ -256,6 +268,17 @@ bool parseStage2CommandLine(int argc, char **argv, Stage2RunOptions &opt)
         else if (k == "--moving-target-radial-speed-mps") opt.moving_target_radial_speed_mps = parseDoubleArg(valueArg(i, argc, argv), opt.moving_target_radial_speed_mps);
         else if (k == "--moving-target-tangential-speed-mps") opt.moving_target_tangential_speed_mps = parseDoubleArg(valueArg(i, argc, argv), opt.moving_target_tangential_speed_mps);
         else if (k == "--moving-target-rcs-db") opt.moving_target_rcs_db = parseDoubleArg(valueArg(i, argc, argv), opt.moving_target_rcs_db);
+        else if (k == "--clutter-amplitude-scale") opt.clutter_amplitude_scale = parseDoubleArg(valueArg(i, argc, argv), opt.clutter_amplitude_scale);
+        else if (k == "--area-clutter-scatterer-count") opt.area_clutter_scatterer_count = parseIntArg(valueArg(i, argc, argv), opt.area_clutter_scatterer_count);
+        else if (k == "--area-clutter-mean-power") opt.area_clutter_mean_power = parseDoubleArg(valueArg(i, argc, argv), opt.area_clutter_mean_power);
+        else if (k == "--area-clutter-texture-sigma") opt.area_clutter_texture_sigma = parseDoubleArg(valueArg(i, argc, argv), opt.area_clutter_texture_sigma);
+        else if (k == "--strong-scatterer-count") opt.strong_scatterer_count = parseIntArg(valueArg(i, argc, argv), opt.strong_scatterer_count);
+        else if (k == "--strong-rcs-db-min") opt.strong_rcs_db_min = parseDoubleArg(valueArg(i, argc, argv), opt.strong_rcs_db_min);
+        else if (k == "--strong-rcs-db-max") opt.strong_rcs_db_max = parseDoubleArg(valueArg(i, argc, argv), opt.strong_rcs_db_max);
+        else if (k == "--line-scatterer-count") opt.line_scatterer_count = parseIntArg(valueArg(i, argc, argv), opt.line_scatterer_count);
+        else if (k == "--line-points-per-line") opt.line_points_per_line = parseIntArg(valueArg(i, argc, argv), opt.line_points_per_line);
+        else if (k == "--line-rcs-db") opt.line_rcs_db = parseDoubleArg(valueArg(i, argc, argv), opt.line_rcs_db);
+        else if (k == "--noise-power") opt.noise_power = parseDoubleArg(valueArg(i, argc, argv), opt.noise_power);
         else if (k == "--validate") opt.validate = (v != "false" && v != "0");
     }
     return true;
@@ -341,6 +364,7 @@ bool loadStage2Config(const std::string &path, Stage2Config &cfg, std::string &e
     cfg.scene.azimuth_min_deg = jsonDouble(scene, "azimuth_min_deg", cfg.scene.azimuth_min_deg);
     cfg.scene.azimuth_max_deg = jsonDouble(scene, "azimuth_max_deg", cfg.scene.azimuth_max_deg);
     cfg.scene.ground_z_m = jsonDouble(scene, "ground_z_m", cfg.scene.ground_z_m);
+    cfg.scene.clutter_amplitude_scale = jsonDouble(scene, "clutter_amplitude_scale", cfg.scene.clutter_amplitude_scale);
     const std::string area = sectionObject(scene, "area_clutter");
     cfg.scene.area.enabled = jsonBool(area, "enabled", cfg.scene.area.enabled);
     cfg.scene.area.model = jsonString(area, "model", cfg.scene.area.model);
@@ -414,6 +438,7 @@ bool writeDefaultStage2Config(const std::string &path, std::string &err)
         "  \"scene\": {\n"
         "    \"range_min_m\": 82800.0, \"range_max_m\": 93000.0,\n"
         "    \"azimuth_min_deg\": -60.0, \"azimuth_max_deg\": 60.0, \"ground_z_m\": 0.0,\n"
+        "    \"clutter_amplitude_scale\": 1.0,\n"
         "    \"area_clutter\": {\"enabled\": true, \"model\": \"rayleigh_lognormal_texture\", \"scatterer_count\": 1000, \"mean_power\": 1.0, \"texture_sigma\": 0.4, \"spatial_cell_m\": 30.0},\n"
         "    \"strong_scatterers\": {\"enabled\": true, \"count\": 20, \"rcs_db_min\": 10.0, \"rcs_db_max\": 30.0},\n"
         "    \"line_scatterers\": {\"enabled\": true, \"line_count\": 1, \"points_per_line\": 50, \"rcs_db\": 12.0},\n"
@@ -463,6 +488,18 @@ bool writeStage2OutputConfig(const Stage2Config &cfg,
     setDouble(p, "sample_window_us", static_cast<double>(cfg.radar.pulse_len) / cfg.radar.fs_hz * 1.0e6);
     setInt(p, "estimate_error_angle", 0);
     setDouble(p, "squint_angle", cfg.geometry.beam_theta_offset_deg);
+    setDouble(p, "raw_fenbianlv", 25.0);
+    setInt(p, "motion_comp_enable", 0);
+    setInt(p, "motion_comp_analytic_enable", 1);
+    setInt(p, "motion_comp_use_row_doppler", 1);
+    setInt(p, "motion_comp_iter", 3);
+    setInt(p, "ati_velocity_sign", 1);
+    setInt(p, "ati_phase_to_velocity_sign", 1);
+    setInt(p, "motion_doppler_axis_sign", -1);
+    setDouble(p, "ati_phase_bias_rad", 0.0);
+    setDouble(p, "ati_vmax_mps", 60.0);
+    setDouble(p, "motion_comp_denom_min", 1.0e-6);
+    setInt(p, "motion_comp_debug", 1);
     writeGeometryXml(p, cfg.geometry);
     if (!doc.SaveFile(out_xml.c_str())) {
         err = "failed to save stage2 output xml";

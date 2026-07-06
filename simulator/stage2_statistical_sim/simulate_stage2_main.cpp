@@ -200,6 +200,43 @@ void applyMovingTargetOverride(const Stage2Config &cfg,
     }
 }
 
+void applyClutterOverrides(Stage2Config &cfg, const Stage2RunOptions &opt)
+{
+    if (std::isfinite(opt.clutter_amplitude_scale)) {
+        cfg.scene.clutter_amplitude_scale = opt.clutter_amplitude_scale;
+    }
+    if (opt.area_clutter_scatterer_count >= 0) {
+        cfg.scene.area.scatterer_count = opt.area_clutter_scatterer_count;
+    }
+    if (std::isfinite(opt.area_clutter_mean_power)) {
+        cfg.scene.area.mean_power = opt.area_clutter_mean_power;
+    }
+    if (std::isfinite(opt.area_clutter_texture_sigma)) {
+        cfg.scene.area.texture_sigma = opt.area_clutter_texture_sigma;
+    }
+    if (opt.strong_scatterer_count >= 0) {
+        cfg.scene.strong.count = opt.strong_scatterer_count;
+    }
+    if (std::isfinite(opt.strong_rcs_db_min)) {
+        cfg.scene.strong.rcs_db_min = opt.strong_rcs_db_min;
+    }
+    if (std::isfinite(opt.strong_rcs_db_max)) {
+        cfg.scene.strong.rcs_db_max = opt.strong_rcs_db_max;
+    }
+    if (opt.line_scatterer_count >= 0) {
+        cfg.scene.line.line_count = opt.line_scatterer_count;
+    }
+    if (opt.line_points_per_line >= 0) {
+        cfg.scene.line.points_per_line = opt.line_points_per_line;
+    }
+    if (std::isfinite(opt.line_rcs_db)) {
+        cfg.scene.line.rcs_db = opt.line_rcs_db;
+    }
+    if (std::isfinite(opt.noise_power)) {
+        cfg.scene.noise.noise_power = opt.noise_power;
+    }
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -216,6 +253,7 @@ int main(int argc, char **argv)
     if (opt.period_start >= 0) cfg.sim.period_start = opt.period_start;
     if (opt.period_count > 0) cfg.sim.period_count = opt.period_count;
     if (!opt.target_config.empty()) cfg.target.target_config_path = opt.target_config;
+    applyClutterOverrides(cfg, opt);
 
     makeDirs(opt.output_dir);
     copyTextFile(opt.stage2_config, joinPath(joinPath(opt.output_dir, "config"), "stage2_config.json"));
@@ -311,6 +349,17 @@ int main(int argc, char **argv)
         log << "period_start=" << cfg.sim.period_start << "\n";
         log << "period_count=" << cfg.sim.period_count << "\n";
         log << "scatterers=" << scatterers.size() << "\n";
+        log << "clutter_amplitude_scale=" << cfg.scene.clutter_amplitude_scale << "\n";
+        log << "area_clutter_scatterer_count=" << cfg.scene.area.scatterer_count << "\n";
+        log << "area_clutter_mean_power=" << cfg.scene.area.mean_power << "\n";
+        log << "area_clutter_texture_sigma=" << cfg.scene.area.texture_sigma << "\n";
+        log << "strong_scatterer_count=" << cfg.scene.strong.count << "\n";
+        log << "strong_rcs_db_min=" << cfg.scene.strong.rcs_db_min << "\n";
+        log << "strong_rcs_db_max=" << cfg.scene.strong.rcs_db_max << "\n";
+        log << "line_scatterer_count=" << cfg.scene.line.line_count << "\n";
+        log << "line_points_per_line=" << cfg.scene.line.points_per_line << "\n";
+        log << "line_rcs_db=" << cfg.scene.line.rcs_db << "\n";
+        log << "noise_power=" << cfg.scene.noise.noise_power << "\n";
         log << "packets_written=" << stats.packets_written << "\n";
     }
     if (!writeStage2Report(joinPath(joinPath(opt.output_dir, "reports"), "stage2_simulation_report.md"),

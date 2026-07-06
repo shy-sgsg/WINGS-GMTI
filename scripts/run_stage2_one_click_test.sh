@@ -23,6 +23,17 @@ MOVING_TARGET_VN_MPS=""
 MOVING_TARGET_RADIAL_SPEED_MPS=""
 MOVING_TARGET_TANGENTIAL_SPEED_MPS=""
 MOVING_TARGET_RCS_DB=""
+CLUTTER_AMPLITUDE_SCALE=""
+AREA_CLUTTER_SCATTERER_COUNT=""
+AREA_CLUTTER_MEAN_POWER=""
+AREA_CLUTTER_TEXTURE_SIGMA=""
+STRONG_SCATTERER_COUNT=""
+STRONG_RCS_DB_MIN=""
+STRONG_RCS_DB_MAX=""
+LINE_SCATTERER_COUNT=""
+LINE_POINTS_PER_LINE=""
+LINE_RCS_DB=""
+NOISE_POWER=""
 
 usage() {
   cat <<'EOF'
@@ -48,6 +59,17 @@ Options:
   --moving-target-radial-speed-mps V
   --moving-target-tangential-speed-mps V
   --moving-target-rcs-db RCS
+  --clutter-amplitude-scale S
+  --area-clutter-scatterer-count N
+  --area-clutter-mean-power P
+  --area-clutter-texture-sigma S
+  --strong-scatterer-count N
+  --strong-rcs-db-min DB
+  --strong-rcs-db-max DB
+  --line-scatterer-count N
+  --line-points-per-line N
+  --line-rcs-db DB
+  --noise-power P
   --run-algorithm true|false Default: false
   --build-type TYPE          Optional CMake build type
 
@@ -76,6 +98,17 @@ while [[ $# -gt 0 ]]; do
     --moving-target-radial-speed-mps) MOVING_TARGET_RADIAL_SPEED_MPS="$2"; shift 2 ;;
     --moving-target-tangential-speed-mps) MOVING_TARGET_TANGENTIAL_SPEED_MPS="$2"; shift 2 ;;
     --moving-target-rcs-db) MOVING_TARGET_RCS_DB="$2"; shift 2 ;;
+    --clutter-amplitude-scale) CLUTTER_AMPLITUDE_SCALE="$2"; shift 2 ;;
+    --area-clutter-scatterer-count) AREA_CLUTTER_SCATTERER_COUNT="$2"; shift 2 ;;
+    --area-clutter-mean-power) AREA_CLUTTER_MEAN_POWER="$2"; shift 2 ;;
+    --area-clutter-texture-sigma) AREA_CLUTTER_TEXTURE_SIGMA="$2"; shift 2 ;;
+    --strong-scatterer-count) STRONG_SCATTERER_COUNT="$2"; shift 2 ;;
+    --strong-rcs-db-min) STRONG_RCS_DB_MIN="$2"; shift 2 ;;
+    --strong-rcs-db-max) STRONG_RCS_DB_MAX="$2"; shift 2 ;;
+    --line-scatterer-count) LINE_SCATTERER_COUNT="$2"; shift 2 ;;
+    --line-points-per-line) LINE_POINTS_PER_LINE="$2"; shift 2 ;;
+    --line-rcs-db) LINE_RCS_DB="$2"; shift 2 ;;
+    --noise-power) NOISE_POWER="$2"; shift 2 ;;
     --run-algorithm) RUN_ALGORITHM="$2"; shift 2 ;;
     --build-type) BUILD_TYPE="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
@@ -140,6 +173,39 @@ if [[ -n "$MOVING_TARGET_TANGENTIAL_SPEED_MPS" ]]; then
 fi
 if [[ -n "$MOVING_TARGET_RCS_DB" ]]; then
   SIM_ARGS+=(--moving-target-rcs-db "$MOVING_TARGET_RCS_DB")
+fi
+if [[ -n "$CLUTTER_AMPLITUDE_SCALE" ]]; then
+  SIM_ARGS+=(--clutter-amplitude-scale "$CLUTTER_AMPLITUDE_SCALE")
+fi
+if [[ -n "$AREA_CLUTTER_SCATTERER_COUNT" ]]; then
+  SIM_ARGS+=(--area-clutter-scatterer-count "$AREA_CLUTTER_SCATTERER_COUNT")
+fi
+if [[ -n "$AREA_CLUTTER_MEAN_POWER" ]]; then
+  SIM_ARGS+=(--area-clutter-mean-power "$AREA_CLUTTER_MEAN_POWER")
+fi
+if [[ -n "$AREA_CLUTTER_TEXTURE_SIGMA" ]]; then
+  SIM_ARGS+=(--area-clutter-texture-sigma "$AREA_CLUTTER_TEXTURE_SIGMA")
+fi
+if [[ -n "$STRONG_SCATTERER_COUNT" ]]; then
+  SIM_ARGS+=(--strong-scatterer-count "$STRONG_SCATTERER_COUNT")
+fi
+if [[ -n "$STRONG_RCS_DB_MIN" ]]; then
+  SIM_ARGS+=(--strong-rcs-db-min "$STRONG_RCS_DB_MIN")
+fi
+if [[ -n "$STRONG_RCS_DB_MAX" ]]; then
+  SIM_ARGS+=(--strong-rcs-db-max "$STRONG_RCS_DB_MAX")
+fi
+if [[ -n "$LINE_SCATTERER_COUNT" ]]; then
+  SIM_ARGS+=(--line-scatterer-count "$LINE_SCATTERER_COUNT")
+fi
+if [[ -n "$LINE_POINTS_PER_LINE" ]]; then
+  SIM_ARGS+=(--line-points-per-line "$LINE_POINTS_PER_LINE")
+fi
+if [[ -n "$LINE_RCS_DB" ]]; then
+  SIM_ARGS+=(--line-rcs-db "$LINE_RCS_DB")
+fi
+if [[ -n "$NOISE_POWER" ]]; then
+  SIM_ARGS+=(--noise-power "$NOISE_POWER")
 fi
 "${SIM_ARGS[@]}" 2>&1 | tee "$OUTPUT_DIR/logs/simulate_stage2_console.log"
 

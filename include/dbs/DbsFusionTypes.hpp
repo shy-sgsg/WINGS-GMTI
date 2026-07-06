@@ -38,7 +38,15 @@ struct DetectionRaw {
 
     double range_m = 0.0;
     double af_wrapped = 0.0;
+    double af_row = 0.0;
+    double af_phase = 0.0;
+    double af_total = 0.0;
+    double af_motion = 0.0;
+    double af_geometry = 0.0;
     double phase = 0.0;
+    double phi_motion = 0.0;
+    double v_radial = 0.0;
+    int motion_comp_valid = 0;
     double amplitude = 0.0;
     double utc_mid = 0.0;
 };

@@ -509,6 +509,23 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     if (cfg.pc_peak_scene_truth.empty()) {
         cfg.pc_peak_scene_truth = parseOptionalString("scene_truth", cfg.pc_peak_scene_truth);
     }
+    cfg.motion_comp_enable = parseOptionalBool("motion_comp_enable", cfg.motion_comp_enable);
+    cfg.motion_comp_analytic_enable =
+        parseOptionalBool("motion_comp_analytic_enable", cfg.motion_comp_analytic_enable);
+    cfg.motion_comp_use_row_doppler =
+        parseOptionalBool("motion_comp_use_row_doppler", cfg.motion_comp_use_row_doppler);
+    cfg.motion_comp_iter = parseOptionalInt("motion_comp_iter", cfg.motion_comp_iter);
+    cfg.ati_velocity_sign = parseOptionalInt("ati_velocity_sign", cfg.ati_velocity_sign);
+    cfg.ati_phase_to_velocity_sign = cfg.ati_velocity_sign;
+    cfg.ati_phase_to_velocity_sign =
+        parseOptionalInt("ati_phase_to_velocity_sign", cfg.ati_phase_to_velocity_sign);
+    cfg.motion_doppler_axis_sign =
+        parseOptionalInt("motion_doppler_axis_sign", cfg.motion_doppler_axis_sign);
+    cfg.ati_phase_bias_rad = parseOptionalDouble("ati_phase_bias_rad", cfg.ati_phase_bias_rad);
+    cfg.ati_vmax_mps = parseOptionalDouble("ati_vmax_mps", cfg.ati_vmax_mps);
+    cfg.motion_comp_denom_min =
+        parseOptionalDouble("motion_comp_denom_min", cfg.motion_comp_denom_min);
+    cfg.motion_comp_debug = parseOptionalBool("motion_comp_debug", cfg.motion_comp_debug);
     cfg.runtime_mode = parseOptionalString("runtime_mode", cfg.runtime_mode);
     std::transform(cfg.runtime_mode.begin(), cfg.runtime_mode.end(), cfg.runtime_mode.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });

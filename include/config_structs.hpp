@@ -128,6 +128,17 @@ struct Config {
     bool runtime_diagnostics_enabled = true; // release 模式下默认由 loadXML 关闭
     bool debug_pc_peak = false; // P1.5: 输出脉压后、对消前单点峰值检查
     std::string pc_peak_scene_truth; // 可选 scene_truth.csv 路径；为空时按 result_add 推断
+    bool motion_comp_enable = false; // 动目标定位时扣除目标自身运动多普勒
+    bool motion_comp_analytic_enable = true; // true: 使用解析式运动补偿；false: 回退旧定位
+    bool motion_comp_use_row_doppler = true; // true: af_total 使用检测所在 Doppler row
+    int motion_comp_iter = 3; // 运动补偿迭代次数
+    int ati_velocity_sign = 1; // ATI 相位到径向速度符号，必要时可设为 -1
+    int ati_phase_to_velocity_sign = 1; // ATI 相位残差到径向速度的符号
+    int motion_doppler_axis_sign = 1; // 径向速度到多普勒轴方向的符号
+    double ati_phase_bias_rad = 0.0; // ATI 固定相位偏置
+    double ati_vmax_mps = 60.0; // ATI 径向速度限幅，<=0 表示不限幅
+    double motion_comp_denom_min = 1.0e-6; // 解析式分母过小则回退旧定位
+    bool motion_comp_debug = false; // 输出运动多普勒补偿调试字段/日志
 
     // 推导参数
     double lambda;              // 波长
@@ -142,8 +153,8 @@ struct Config {
 
     // ★ 新增：是否启用波位并行处理（true 表示并行，false 表示逐波位顺序处理）
     bool wavepos_parallel = true;
-    bool enable_dbs_fusion = false;
-    double dbs_out_res_m = 1.0; // DBS 成像输出分辨率，对应 XML raw_fenbianlv
+    bool enable_dbs_fusion = true;
+    double dbs_out_res_m = 25.0; // DBS 成像输出分辨率，对应 XML raw_fenbianlv
     int dbs_beam_skip = 1;      // DBS 波位跳过数，对应 XML n_tiaoguo
     int dbs_range_skip = 1;     // DBS 距离抽样步长，对应 XML len_tiaoguo
     int dbs_interp_mode = 1;    // DBS 拼图插值模式，1=最近邻，2=双线性
@@ -251,6 +262,47 @@ struct GMTIOutput {
         double utc = std::numeric_limits<double>::quiet_NaN();
         double amplitude = std::numeric_limits<double>::quiet_NaN();
         double radial_velocity_mps = std::numeric_limits<double>::quiet_NaN();
+        double phase_rad = std::numeric_limits<double>::quiet_NaN();
+        double p38_k = std::numeric_limits<double>::quiet_NaN();
+        double p38_b = std::numeric_limits<double>::quiet_NaN();
+        double phi_static_rad = std::numeric_limits<double>::quiet_NaN();
+        double phi_static_total_rad = std::numeric_limits<double>::quiet_NaN();
+        double phi_res_rad = std::numeric_limits<double>::quiet_NaN();
+        double phi_static_at_zero = std::numeric_limits<double>::quiet_NaN();
+        double phi_res_at_zero = std::numeric_limits<double>::quiet_NaN();
+        double phi_static_geometry_rad = std::numeric_limits<double>::quiet_NaN();
+        double af_phase = std::numeric_limits<double>::quiet_NaN();
+        double af_total = std::numeric_limits<double>::quiet_NaN();
+        double af_geometry = std::numeric_limits<double>::quiet_NaN();
+        double af_motion = std::numeric_limits<double>::quiet_NaN();
+        double phi_motion = std::numeric_limits<double>::quiet_NaN();
+        double delta_t_s = std::numeric_limits<double>::quiet_NaN();
+        double motion_comp_denom = std::numeric_limits<double>::quiet_NaN();
+        double denom_without_k = std::numeric_limits<double>::quiet_NaN();
+        double v_from_phase_raw = std::numeric_limits<double>::quiet_NaN();
+        double v_from_phi_res = std::numeric_limits<double>::quiet_NaN();
+        double sinA_old = std::numeric_limits<double>::quiet_NaN();
+        double sinA_comp = std::numeric_limits<double>::quiet_NaN();
+        double sinA_used = std::numeric_limits<double>::quiet_NaN();
+        double old_e = std::numeric_limits<double>::quiet_NaN();
+        double old_n = std::numeric_limits<double>::quiet_NaN();
+        double new_e = std::numeric_limits<double>::quiet_NaN();
+        double new_n = std::numeric_limits<double>::quiet_NaN();
+        int old_valid = 0;
+        int comp_valid = 0;
+        int old_invalid_comp_valid = 0;
+        int motion_comp_valid = 0;
+        int motion_comp_enable = 0;
+        int motion_comp_used = 0;
+        int motion_comp_fallback = 0;
+        int p38_theory_sign = 0;
+        int motion_doppler_axis_sign = 0;
+        int ati_phase_to_velocity_sign = 0;
+        std::string p38_mode;
+        std::string geometry_calib_mode;
+        std::string loc_used_mode;
+        std::string motion_comp_status;
+        std::string motion_comp_solver;
     };
     std::vector<DetectionCsvRecord> detection_records;
 };

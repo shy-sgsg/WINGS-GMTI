@@ -2,6 +2,7 @@
 #include "dbs/DbsStitcher.hpp"
 #include "rotation_xy.hpp"
 #include "unwrap_fd.hpp"
+#include "motion_comp.hpp"
 #include "trig_lut.hpp"
 
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <limits>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -375,6 +377,13 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
     size_t totalDropSin = 0;
     size_t totalDropPx = 0;
     size_t totalDropGate = 0;
+    size_t totalOldValid = 0;
+    size_t totalCompValid = 0;
+    size_t totalOldInvalidCompValid = 0;
+    size_t totalOldValidCompInvalid = 0;
+    size_t totalBothValid = 0;
+    size_t totalBothInvalid = 0;
+    size_t totalDuplicateRaw = 0;
     std::ofstream trace;
     if (cfg.runtime_diagnostics_enabled && !cfg.result_add.empty()) {
         trace.open((cfg.result_add + "/fusion_localization_trace.csv").c_str());
@@ -383,9 +392,19 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
                      "theta_cmd_deg,theta_true_deg,theta_used_deg,"
                      "ref_platform_e,ref_platform_n,ref_platform_lat,ref_platform_lon,"
                      "ref_platform_v,ref_platform_v_angle_deg,ref_platform_ve,ref_platform_vn,"
-                     "af_wrapped,af_ransac,fa_shift,af_used,sinA,px,py,ground_range_m,"
+                     "af_wrapped,af_phase,af_total,af_ransac,fa_shift,af_geometry,af_motion,"
+                     "v_radial_mps,k,b,p38_mode,geometry_calib_mode,p38_theory_sign,"
+                     "motion_doppler_axis_sign,ati_phase_to_velocity_sign,"
+                     "phi_static_total_rad,phi_static_at_zero,phi_res_at_zero,phi_res_rad,"
+                     "phi_static_geometry_rad,phi_motion,delta_t_s,denom,"
+                     "denom_without_k,v_from_phase_raw,v_from_phi_res,motion_comp_valid,"
+                     "motion_comp_enable,motion_comp_used,motion_comp_fallback,"
+                     "sinA_old,sinA_comp,sinA_used,old_valid,comp_valid,"
+                     "old_invalid_comp_valid,loc_used_mode,motion_comp_status,motion_comp_solver,"
+                     "px,py,ground_range_m,"
                      "look_e_used,look_n_used,direct_localized_e,direct_localized_n,"
                      "fused_localized_e,fused_localized_n,final_output_e,final_output_n,"
+                     "old_e,old_n,new_e,new_n,"
                      "lat,lon,beam_center_dir_deg,target_direction_deg,beam_dir_err_deg\n";
         }
     }
@@ -413,7 +432,10 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
         int flag = flight_flag_by_sign_local(vE, vN);
         flag += cfg.squint_side * 4;
 
-        const double lambda = (m.lambda > 0.0) ? m.lambda : cfg.lambda;
+        double lambda = (m.lambda > 0.0) ? m.lambda : cfg.lambda;
+        if (!(lambda > 0.0) && cfg.fc > 0.0) {
+            lambda = C / (cfg.fc * 1.0e9);
+        }
         if (!(lambda > 0.0) || !(m.plane.V > 0.0)) {
             continue;
         }
@@ -426,14 +448,93 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
         size_t dropSin = 0;
         size_t dropPx = 0;
         size_t dropGate = 0;
+        size_t oldValidCount = 0;
+        size_t compValidCount = 0;
+        size_t oldInvalidCompValidCount = 0;
+        size_t oldValidCompInvalidCount = 0;
+        size_t bothValidCount = 0;
+        size_t bothInvalidCount = 0;
+        size_t duplicateRawCount = 0;
+        std::set<std::pair<int, int>> emittedRawKeys;
         for (const DetectionRaw &d : rawList) {
             double afRansac = d.af_wrapped;
             if (std::abs(m.phase_slope) >= 1e-12) {
                 afRansac = (d.phase - m.phase_intercept) / m.phase_slope;
             }
-            const double af = afRansac + faShift;
-            const double sinA = af * lambda / (2.0 * m.plane.V);
-            if (std::abs(sinA) > 1.0) {
+            const double legacyAf = afRansac + faShift;
+            const double motionAfTotal = cfg.motion_comp_use_row_doppler
+                ? (d.af_total + faShift)
+                : legacyAf;
+            MotionCompResult motion =
+                compensateTargetMotionDoppler(cfg, m.plane, d.phase, motionAfTotal,
+                                              m.phase_slope, m.phase_intercept, lambda,
+                                              m.theta_true);
+            if (!motion.used_motion_comp) {
+                motion.af_phase = afRansac;
+                motion.af_total = motionAfTotal;
+                motion.af_geometry = legacyAf;
+            }
+            const double denom = 2.0 * m.plane.V;
+            const double sinAOld = (denom != 0.0)
+                ? legacyAf * lambda / denom
+                : std::numeric_limits<double>::quiet_NaN();
+            const double sinAComp = (denom != 0.0)
+                ? motion.af_geometry * lambda / denom
+                : std::numeric_limits<double>::quiet_NaN();
+            const bool oldValid = std::isfinite(sinAOld) && std::abs(sinAOld) <= 1.0;
+            const bool compValid = cfg.motion_comp_enable && motion.ok &&
+                std::isfinite(sinAComp) && std::abs(sinAComp) <= 1.0;
+            const bool oldInvalidCompValid = !oldValid && compValid;
+            const bool oldValidCompInvalid = oldValid && !compValid;
+
+            oldValidCount += oldValid ? 1U : 0U;
+            compValidCount += compValid ? 1U : 0U;
+            oldInvalidCompValidCount += oldInvalidCompValid ? 1U : 0U;
+            oldValidCompInvalidCount += oldValidCompInvalid ? 1U : 0U;
+            bothValidCount += (oldValid && compValid) ? 1U : 0U;
+            bothInvalidCount += (!oldValid && !compValid) ? 1U : 0U;
+
+            const std::pair<int, int> rawKey(d.prow, d.pcol);
+            if (!emittedRawKeys.insert(rawKey).second) {
+                ++duplicateRawCount;
+                if (cfg.runtime_diagnostics_enabled || cfg.motion_comp_debug) {
+                    std::cout << "[fusion][loc][DBG] drop duplicate raw detection"
+                              << " beam=" << m.beam_index
+                              << " row=" << d.prow
+                              << " col=" << d.pcol << std::endl;
+                }
+                continue;
+            }
+
+            const bool useCompLoc = cfg.motion_comp_enable && motion.ok;
+            const double af = useCompLoc ? motion.af_geometry : legacyAf;
+            const double sinA = useCompLoc ? sinAComp : sinAOld;
+            const char *locUsedMode = useCompLoc ? "comp" : "old";
+            const char *motionCompStatus = !cfg.motion_comp_enable
+                ? "disabled"
+                : (compValid ? "analytic_valid"
+                             : (motion.fallback_legacy ? "analytic_fallback_old"
+                                                       : "analytic_invalid"));
+            const bool usedValid = useCompLoc ? compValid : oldValid;
+            if (!usedValid) {
+                if (cfg.runtime_diagnostics_enabled || cfg.motion_comp_debug) {
+                    std::cout << "[fusion][loc][DBG] drop target: selected sinA out of range"
+                              << " beam=" << m.beam_index
+                              << " row=" << d.prow
+                              << " col=" << d.pcol
+                              << " loc_used_mode=" << locUsedMode
+                              << " sinA_old=" << sinAOld
+                              << " sinA_comp=" << sinAComp
+                              << " old_valid=" << (oldValid ? 1 : 0)
+                              << " comp_valid=" << (compValid ? 1 : 0)
+                              << " old_invalid_comp_valid=" << (oldInvalidCompValid ? 1 : 0)
+                              << " af_phase=" << motion.af_phase
+                              << " af_total=" << motion.af_total
+                              << " af_geometry=" << motion.af_geometry
+                              << " af_motion=" << motion.af_motion
+                              << " v_radial=" << motion.v_radial
+                              << " phi_motion=" << motion.phi_motion << std::endl;
+                }
                 ++dropSin;
                 continue;
             }
@@ -453,6 +554,19 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
             rotation_xy(py, px, flag, cosT, sinT, xP, yP);
             xP += m.plane.E;
             yP += m.plane.N;
+
+            double oldXP = std::numeric_limits<double>::quiet_NaN();
+            double oldYP = std::numeric_limits<double>::quiet_NaN();
+            if (std::isfinite(sinAOld) && std::abs(sinAOld) <= 1.0) {
+                const double pyOld = Rg * sinAOld;
+                const double px2Old = Rg * Rg - pyOld * pyOld - dz * dz;
+                if (px2Old >= 0.0) {
+                    const double pxOld = (px2Old > 0.0) ? std::sqrt(px2Old) : 0.0;
+                    rotation_xy(pyOld, pxOld, flag, cosT, sinT, oldXP, oldYP);
+                    oldXP += m.plane.E;
+                    oldYP += m.plane.N;
+                }
+            }
 
             double lat = 0.0;
             double lng = 0.0;
@@ -506,6 +620,48 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
             rec.lon = lng;
             rec.utc = m.utc_mid;
             rec.amplitude = d.amplitude;
+            rec.radial_velocity_mps = motion.v_radial;
+            rec.phase_rad = d.phase;
+            rec.p38_k = motion.k;
+            rec.p38_b = motion.b;
+            rec.phi_static_rad = motion.phi_static;
+            rec.phi_static_total_rad = motion.phi_static_total;
+            rec.phi_res_rad = motion.phi_res;
+            rec.phi_static_at_zero = motion.phi_static_at_zero;
+            rec.phi_res_at_zero = motion.phi_res_at_zero;
+            rec.phi_static_geometry_rad = motion.phi_static_geometry;
+            rec.af_phase = motion.af_phase;
+            rec.af_total = motion.af_total;
+            rec.af_geometry = motion.af_geometry;
+            rec.af_motion = motion.af_motion;
+            rec.phi_motion = motion.phi_motion;
+            rec.delta_t_s = motion.delta_t;
+            rec.motion_comp_denom = motion.denom;
+            rec.denom_without_k = motion.denom_without_k;
+            rec.v_from_phase_raw = motion.v_from_phase_raw;
+            rec.v_from_phi_res = motion.v_from_phi_res;
+            rec.sinA_old = sinAOld;
+            rec.sinA_comp = sinAComp;
+            rec.sinA_used = sinA;
+            rec.old_e = oldXP;
+            rec.old_n = oldYP;
+            rec.new_e = xP;
+            rec.new_n = yP;
+            rec.old_valid = oldValid ? 1 : 0;
+            rec.comp_valid = compValid ? 1 : 0;
+            rec.old_invalid_comp_valid = oldInvalidCompValid ? 1 : 0;
+            rec.motion_comp_valid = motion.ok ? 1 : 0;
+            rec.motion_comp_enable = cfg.motion_comp_enable ? 1 : 0;
+            rec.motion_comp_used = motion.used_motion_comp ? 1 : 0;
+            rec.motion_comp_fallback = motion.fallback_legacy ? 1 : 0;
+            rec.p38_theory_sign = motion.p38_theory_sign;
+            rec.motion_doppler_axis_sign = motion.motion_doppler_axis_sign;
+            rec.ati_phase_to_velocity_sign = motion.ati_phase_to_velocity_sign;
+            rec.p38_mode = motion.p38_mode;
+            rec.geometry_calib_mode = motion.geometry_calib_mode;
+            rec.loc_used_mode = locUsedMode;
+            rec.motion_comp_status = motionCompStatus;
+            rec.motion_comp_solver = motion.solver;
             out.detection_records.push_back(rec);
             if (trace) {
                 trace << 0 << ','
@@ -527,10 +683,44 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
                       << vE << ','
                       << vN << ','
                       << d.af_wrapped << ','
+                      << motion.af_phase << ','
+                      << motion.af_total << ','
                       << afRansac << ','
                       << faShift << ','
-                      << af << ','
+                      << motion.af_geometry << ','
+                      << motion.af_motion << ','
+                      << motion.v_radial << ','
+                      << motion.k << ','
+                      << motion.b << ','
+                      << motion.p38_mode << ','
+                      << motion.geometry_calib_mode << ','
+                      << motion.p38_theory_sign << ','
+                      << motion.motion_doppler_axis_sign << ','
+                      << motion.ati_phase_to_velocity_sign << ','
+                      << motion.phi_static_total << ','
+                      << motion.phi_static_at_zero << ','
+                      << motion.phi_res_at_zero << ','
+                      << motion.phi_res << ','
+                      << motion.phi_static_geometry << ','
+                      << motion.phi_motion << ','
+                      << motion.delta_t << ','
+                      << motion.denom << ','
+                      << motion.denom_without_k << ','
+                      << motion.v_from_phase_raw << ','
+                      << motion.v_from_phi_res << ','
+                      << (motion.ok ? 1 : 0) << ','
+                      << (cfg.motion_comp_enable ? 1 : 0) << ','
+                      << (motion.used_motion_comp ? 1 : 0) << ','
+                      << (motion.fallback_legacy ? 1 : 0) << ','
+                      << sinAOld << ','
+                      << sinAComp << ','
                       << sinA << ','
+                      << (oldValid ? 1 : 0) << ','
+                      << (compValid ? 1 : 0) << ','
+                      << (oldInvalidCompValid ? 1 : 0) << ','
+                      << locUsedMode << ','
+                      << motionCompStatus << ','
+                      << motion.solver << ','
                       << px << ','
                       << py << ','
                       << range << ','
@@ -540,6 +730,10 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
                       << yP << ','
                       << xP << ','
                       << yP << ','
+                      << xP << ','
+                      << yP << ','
+                      << oldXP << ','
+                      << oldYP << ','
                       << xP << ','
                       << yP << ','
                       << lat << ','
@@ -556,6 +750,25 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
         totalDropSin += dropSin;
         totalDropPx += dropPx;
         totalDropGate += dropGate;
+        totalOldValid += oldValidCount;
+        totalCompValid += compValidCount;
+        totalOldInvalidCompValid += oldInvalidCompValidCount;
+        totalOldValidCompInvalid += oldValidCompInvalidCount;
+        totalBothValid += bothValidCount;
+        totalBothInvalid += bothInvalidCount;
+        totalDuplicateRaw += duplicateRawCount;
+        if (cfg.runtime_diagnostics_enabled || cfg.motion_comp_debug) {
+            std::cout << "[motion_comp][fusion_loc][beam=" << m.beam_index
+                      << "] n_selected=" << rawList.size()
+                      << " n_old_valid=" << oldValidCount
+                      << " n_comp_valid=" << compValidCount
+                      << " n_old_invalid_comp_valid=" << oldInvalidCompValidCount
+                      << " n_old_valid_comp_invalid=" << oldValidCompInvalidCount
+                      << " n_both_valid=" << bothValidCount
+                      << " n_both_invalid=" << bothInvalidCount
+                      << " n_duplicate_raw=" << duplicateRawCount
+                      << " n_output=" << kept << std::endl;
+        }
         // std::cout << "[fusion][loc][summary] beam=" << m.beam_index
         //           << " raw=" << rawList.size()
         //           << " kept=" << kept
@@ -571,7 +784,16 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
                   << " kept=" << totalKept
                   << " drop_sin=" << totalDropSin
                   << " drop_px=" << totalDropPx
-                  << " drop_gate=" << totalDropGate << std::endl;
+                  << " drop_gate=" << totalDropGate
+                  << " n_selected=" << totalRaw
+                  << " n_old_valid=" << totalOldValid
+                  << " n_comp_valid=" << totalCompValid
+                  << " n_old_invalid_comp_valid=" << totalOldInvalidCompValid
+                  << " n_old_valid_comp_invalid=" << totalOldValidCompInvalid
+                  << " n_both_valid=" << totalBothValid
+                  << " n_both_invalid=" << totalBothInvalid
+                  << " n_duplicate_raw=" << totalDuplicateRaw
+                  << " n_output=" << totalKept << std::endl;
     }
 
     return true;

@@ -350,6 +350,28 @@ bool writeOutputConfig(const std::string &input_xml,
     }
     node->Clear();
     node->LinkEndChild(new TiXmlText(out_data_file.c_str()));
+
+    auto setTextNode = [&](const char *name, const char *value) {
+        TiXmlElement *e = param->FirstChildElement(name);
+        if (!e) {
+            e = new TiXmlElement(name);
+            param->LinkEndChild(e);
+        }
+        e->Clear();
+        e->LinkEndChild(new TiXmlText(value));
+    };
+    setTextNode("raw_fenbianlv", "25");
+    setTextNode("motion_comp_enable", "1");
+    setTextNode("motion_comp_analytic_enable", "1");
+    setTextNode("motion_comp_use_row_doppler", "1");
+    setTextNode("motion_comp_iter", "3");
+    setTextNode("ati_velocity_sign", "1");
+    setTextNode("ati_phase_to_velocity_sign", "1");
+    setTextNode("motion_doppler_axis_sign", "-1");
+    setTextNode("ati_phase_bias_rad", "0.0");
+    setTextNode("ati_vmax_mps", "60.0");
+    setTextNode("motion_comp_denom_min", "1e-6");
+    setTextNode("motion_comp_debug", "1");
     if (!doc.SaveFile(out_xml.c_str())) {
         err = "failed to save output config";
         return false;
