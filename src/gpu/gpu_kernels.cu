@@ -1141,7 +1141,8 @@ bool GMTIProcessor::dpca_cfar2_fast_cuda(const std::vector<std::complex<float>> 
                                          int band_st, int band_ed,
                                          float pf, int c_num, int b_num, const std::string &type,
                                          const Config &cfg,
-                                         std::vector<float> &mydata)
+                                         std::vector<float> &mydata,
+                                         std::vector<float> *power_map)
 {
     const int H = effectivePulseNum(cfg);
     const int W = cfg.rg_len;
@@ -1264,8 +1265,15 @@ bool GMTIProcessor::dpca_cfar2_fast_cuda(const std::vector<std::complex<float>> 
     CUDA_CHECK(cudaGetLastError());
 
     mydata.resize(total);
+    if (power_map) {
+        power_map->resize(total);
+    }
     CUDA_CHECK(cudaMemcpyAsync(mydata.data(), d_mydata, total * sizeof(float),
                                cudaMemcpyDeviceToHost, stream_compute_));
+    if (power_map) {
+        CUDA_CHECK(cudaMemcpyAsync(power_map->data(), d_power, total * sizeof(float),
+                                   cudaMemcpyDeviceToHost, stream_compute_));
+    }
     CUDA_CHECK(cudaStreamSynchronize(stream_compute_));
 
     if (owns_csi) {
@@ -1515,11 +1523,11 @@ bool GMTIProcessor::target_select_cuda(const std::vector<int> &prow,
 }
 
 bool GMTIProcessor::clutter_cancel_38_paper_1_p38_cuda(
-    const std::vector<double>& y_faAxis,
+    const std::vector<float>& y_faAxis,
     int az_st, int rg_st, int az_ed, int rg_ed,
     const Config& cfg,
-    std::array<double,2>& p_38,
-    std::vector<double>* phase_tra_38)
+    std::array<float,2>& p_38,
+    std::vector<float>* phase_tra_38)
 {
     (void)rg_st;
     (void)rg_ed;
@@ -1532,11 +1540,10 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_p38_cuda(
     az_ed = std::max(0, std::min(az_ed, int(Na) - 1));
     if (az_st > az_ed) return false;
 
-    // 确认是否需要
     if (!initcuFFTPlans(cfg)) return false;
 
-    std::vector<double> phase_tra_local;
-    std::vector<double>& phase_tra = phase_tra_38 ? *phase_tra_38 : phase_tra_local;
+    std::vector<float> phase_tra_local;
+    std::vector<float> &phase_tra = phase_tra_38 ? *phase_tra_38 : phase_tra_local;
 
     float* d_phase = nullptr;
     CUDA_CHECK(cudaMalloc(&d_phase, Na * sizeof(float)));
@@ -1563,62 +1570,61 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_p38_cuda(
     CUDA_CHECK(cudaStreamSynchronize(stream_compute_));
     CUDA_CHECK(cudaFree(d_phase));
 
-    phase_tra.resize(Na);
-    for (size_t i = 0; i < Na; ++i) phase_tra[i] = static_cast<double>(phase_tra_f[i]);
+    phase_tra = phase_tra_f;
 
-    auto unwrap_inplace = [](std::vector<double>& v) {
+    auto unwrap_inplace = [](std::vector<float>& v) {
         for (size_t i = 1; i < v.size(); ++i) {
-            double d = v[i] - v[i - 1];
-            if (d > M_PI) v[i] -= 2 * M_PI;
-            if (d < -M_PI) v[i] += 2 * M_PI;
+            float d = v[i] - v[i - 1];
+            if (d > static_cast<float>(M_PI)) v[i] -= static_cast<float>(2.0 * M_PI);
+            if (d < static_cast<float>(-M_PI)) v[i] += static_cast<float>(2.0 * M_PI);
         }
     };
 
     int mid_num = std::max(1, std::min(int(std::round(double(az_ed - az_st + 1))), int(Na)));
-    const double mid_phase = phase_tra[size_t(mid_num - 1)];
+    const float mid_phase = phase_tra[size_t(mid_num - 1)];
     unwrap_inplace(phase_tra);
-    const double delta = mid_phase - phase_tra[size_t(mid_num - 1)];
-    for (double& v : phase_tra) v += delta;
+    const float delta = mid_phase - phase_tra[size_t(mid_num - 1)];
+    for (float &v : phase_tra) v += delta;
 
     const int M = az_ed - az_st + 1;
-    std::vector<double> phase_tra_38_cut(M);
-    std::vector<double> row_fa_cut(M);
+    std::vector<float> phase_tra_38_cut(M);
+    std::vector<float> row_fa_cut(M);
     for (int i = 0; i < M; ++i) {
         phase_tra_38_cut[i] = phase_tra[size_t(az_st + i)];
         row_fa_cut[i] = y_faAxis[size_t(az_st + i)];
     }
 
-    auto linfit = [](const std::vector<double>& x, const std::vector<double>& y, double& k, double& b) -> bool {
+    auto linfit = [](const std::vector<float>& x, const std::vector<float>& y, float& k, float& b) -> bool {
         if (x.size() != y.size() || x.size() < 2) return false;
         const size_t n = x.size();
-        double Sx = 0, Sy = 0, Sxx = 0, Sxy = 0;
+        float Sx = 0.0f, Sy = 0.0f, Sxx = 0.0f, Sxy = 0.0f;
         for (size_t i = 0; i < n; ++i) {
             Sx += x[i];
             Sy += y[i];
             Sxx += x[i] * x[i];
             Sxy += x[i] * y[i];
         }
-        double det = n * Sxx - Sx * Sx;
-        if (std::fabs(det) < 1e-12) return false;
-        k = (n * Sxy - Sx * Sy) / det;
+        float det = static_cast<float>(n) * Sxx - Sx * Sx;
+        if (std::fabs(det) < 1e-8f) return false;
+        k = (static_cast<float>(n) * Sxy - Sx * Sy) / det;
         b = (Sy * Sxx - Sx * Sxy) / det;
         return true;
     };
 
-    double k = 0.0, b = 0.0;
+    float k = 0.0f, b = 0.0f;
     if (!linfit(row_fa_cut, phase_tra_38_cut, k, b)) return false;
     p_38 = {k, b};
     return true;
 }
 
 bool GMTIProcessor::clutter_cancel_38_paper_1_cuda(
-    const std::vector<double>& y_faAxis,
+    const std::vector<float>& y_faAxis,
     int az_st, int rg_st, int az_ed, int rg_ed,
     const Config& cfg,
-    std::vector<std::complex<double>>& prosig_38,
-    std::array<double,2>& p_38,
-    std::vector<double>& phase_tra_38_cut,
-    std::vector<double>& row_fa_cut)
+    std::vector<std::complex<float>>& prosig_38,
+    std::array<float,2>& p_38,
+    std::vector<float>& phase_tra_38_cut,
+    std::vector<float>& row_fa_cut)
 {
     (void)rg_st;
     (void)rg_ed;
@@ -1632,7 +1638,7 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_cuda(
     az_ed = std::max(0, std::min(az_ed, int(Na) - 1));
     if (az_st > az_ed) return false;
 
-    std::vector<double> phase_tra_38;
+    std::vector<float> phase_tra_38;
     if (!clutter_cancel_38_paper_1_p38_cuda(y_faAxis, az_st, rg_st, az_ed, rg_ed, cfg, p_38, &phase_tra_38)) {
         return false;
     }
@@ -1646,7 +1652,7 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_cuda(
     }
 
     std::vector<float> y_faAxis_f(Na);
-    for (size_t i = 0; i < Na; ++i) y_faAxis_f[i] = static_cast<float>(y_faAxis[i]);
+    for (size_t i = 0; i < Na; ++i) y_faAxis_f[i] = y_faAxis[i];
 
     float* d_fa = nullptr;
     CUDA_CHECK(cudaMalloc(&d_fa, Na * sizeof(float)));
@@ -1670,19 +1676,15 @@ bool GMTIProcessor::clutter_cancel_38_paper_1_cuda(
         (cuFloatComplex*)gpu_ptrs_.csi,
         (int)Na,
         (int)Nr,
-        static_cast<float>(p_38[0]),
-        static_cast<float>(p_38[1]),
+        p_38[0],
+        p_38[1],
         trig_cfg);
     CUDA_CHECK(cudaGetLastError());
 
-    std::vector<std::complex<float>> prosig_38_f(total);
-    CUDA_CHECK(cudaMemcpyAsync(prosig_38_f.data(), gpu_ptrs_.csi, total * sizeof(cudacd),
+    prosig_38.resize(total);
+    CUDA_CHECK(cudaMemcpyAsync(prosig_38.data(), gpu_ptrs_.csi, total * sizeof(cudacd),
                                cudaMemcpyDeviceToHost, stream_compute_));
     CUDA_CHECK(cudaStreamSynchronize(stream_compute_));
-    prosig_38.resize(total);
-    for (size_t i = 0; i < total; ++i) {
-        prosig_38[i] = std::complex<double>(prosig_38_f[i].real(), prosig_38_f[i].imag());
-    }
 
     CUDA_CHECK(cudaFree(d_fa));
     return true;

@@ -135,6 +135,10 @@ bool parseCommandLine(int argc, char **argv, Stage1RunOptions &opt, Stage1NewSys
         else if (k == "--scan-max" && v) new_cfg.scan_max_deg = std::atof(argv[++i]);
         else if (k == "--scan-step" && v) new_cfg.scan_step_deg = std::atof(argv[++i]);
         else if (k == "--beam-count" && v) new_cfg.beam_count = std::atoi(argv[++i]);
+        else if (k == "--iq-data-type" && v) new_cfg.iq_data_type = argv[++i];
+        else if (k == "--new-protocol-channel-count" && v) new_cfg.new_protocol_channel_count = std::atoi(argv[++i]);
+        else if (k == "--new-protocol-read-channel-1" && v) new_cfg.new_protocol_read_channel_1 = std::atoi(argv[++i]);
+        else if (k == "--new-protocol-read-channel-2" && v) new_cfg.new_protocol_read_channel_2 = std::atoi(argv[++i]);
         else if (k == "--pulse-resample-mode" && v) opt.pulse_resample_mode = argv[++i];
         else if (k == "--range-resize-mode" && v) opt.range_resize_mode = argv[++i];
         else if (k == "--period-start" && v) opt.period_start = std::atoi(argv[++i]);

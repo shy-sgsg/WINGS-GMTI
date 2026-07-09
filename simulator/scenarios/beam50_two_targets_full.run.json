@@ -1,0 +1,133 @@
+{
+  "case_id": "beam50_two_targets",
+  "output_dir": "outputs/beam50_two_targets",
+  "scene_mode": "full",
+  "truth_output": true,
+  "waveform": {
+    "fc_ghz": 16.0,
+    "bandwidth_mhz": 50.0,
+    "fs_mhz": 60.0,
+    "tr_us": 130.0,
+    "prf_hz": 1300.0,
+    "pulse_len": 11820,
+    "pulse_num": 130,
+    "d_chan_m": 0.17,
+    "iq_data_type": "float32",
+    "new_protocol_channel_count": 2,
+    "new_protocol_read_channel_1": 1,
+    "new_protocol_read_channel_2": 2
+  },
+  "range_processing": {
+    "range_fft_len": 12288,
+    "range_crop_start": 3864,
+    "range_crop_len": 4096,
+    "sample_delay_us": 488.0
+  },
+  "scan": {
+    "scan_min_deg": -60.0,
+    "scan_step_deg": 2.0,
+    "beam_count": 61,
+    "beam_width_deg": 2.28,
+    "beam_index_base": 1
+  },
+  "platform": {
+    "speed_mps": 60.0,
+    "height_m": 6000.0,
+    "origin_lat_deg": 40.4512107203,
+    "origin_lon_deg": 116.985931582,
+    "origin_alt_m": 6000.0,
+    "projection_ref_lon_deg": 117.0,
+    "squint_side": 1
+  },
+  "random": {
+    "period_start": 0,
+    "period_count": 1,
+    "random_seed": 202606
+  },
+  "scene": {
+    "mode": "full",
+    "range_min_m": 82800.0,
+    "range_max_m": 93000.0,
+    "azimuth_min_deg": -60.0,
+    "azimuth_max_deg": 60.0,
+    "ground_z_m": 0.0,
+    "clutter_amplitude_scale": 1.0,
+    "single_point": {
+      "range_m": 85000.0,
+      "beam_id": -1,
+      "expected_bin": -1,
+      "azimuth_deg": 0.0,
+      "amplitude": 1.0
+    },
+    "area_clutter": {
+      "enabled": true,
+      "model": "rayleigh_lognormal_texture",
+      "scatterer_count": 10000,
+      "mean_power": 0.1,
+      "texture_sigma": 0.4,
+      "spatial_cell_m": 30.0
+    },
+    "strong_scatterers": {
+      "enabled": false,
+      "count": 0,
+      "rcs_db_min": 10.0,
+      "rcs_db_max": 30.0
+    },
+    "line_scatterers": {
+      "enabled": false,
+      "line_count": 1,
+      "points_per_line": 50,
+      "rcs_db": 12.0
+    },
+    "thermal_noise": {
+      "enabled": true,
+      "noise_power": 0.01
+    }
+  },
+  "targets": [
+    {
+      "target_id": "T_plus05_bin2000",
+      "enabled": true,
+      "init": {
+        "type": "beam_bin_azimuth_offset",
+        "beam_id": 50,
+        "expected_bin": 2000,
+        "azimuth_offset_deg": 0.5
+      },
+      "motion": {
+        "type": "enu_velocity",
+        "ve_mps": 1.0,
+        "vn_mps": 1.0
+      },
+      "amplitude": {
+        "type": "snr_db",
+        "snr_db": 10.0
+      },
+      "visibility": {
+        "type": "gaussian"
+      }
+    },
+    {
+      "target_id": "T_minus05_bin3000",
+      "enabled": true,
+      "init": {
+        "type": "beam_bin_azimuth_offset",
+        "beam_id": 50,
+        "expected_bin": 3000,
+        "azimuth_offset_deg": -0.5
+      },
+      "motion": {
+        "type": "enu_velocity",
+        "ve_mps": -1.0,
+        "vn_mps": -1.0
+      },
+      "amplitude": {
+        "type": "snr_db",
+        "snr_db": 10.0
+      },
+      "visibility": {
+        "type": "gaussian"
+      }
+    }
+  ]
+}

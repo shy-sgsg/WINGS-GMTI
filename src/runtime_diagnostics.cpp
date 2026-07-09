@@ -472,6 +472,10 @@ void writeRuntimeConfigJson(const Config& cfg)
     os << "    \"loc_beam_gate_deg\": " << cfg.loc_beam_gate_deg << "\n";
     os << "  },\n";
     os << "  \"channel_and_gmti\": {\n";
+    os << "    \"iq_data_type\": " << q(cfg.iq_data_type) << ",\n";
+    os << "    \"new_protocol_channel_count\": " << cfg.new_protocol_channel_count << ",\n";
+    os << "    \"new_protocol_read_channel_1\": " << cfg.new_protocol_read_channel_1 << ",\n";
+    os << "    \"new_protocol_read_channel_2\": " << cfg.new_protocol_read_channel_2 << ",\n";
     os << "    \"d_chan\": " << cfg.d_channel << ",\n";
     os << "    \"calib_coef\": " << cfg.calib_coef << ",\n";
     os << "    \"channel_phase_enabled\": " << q("called_in_processOnePeriod") << ",\n";
@@ -481,9 +485,20 @@ void writeRuntimeConfigJson(const Config& cfg)
     os << "    \"motion_comp_enable\": " << (cfg.motion_comp_enable ? "true" : "false") << ",\n";
     os << "    \"motion_comp_analytic_enable\": " << (cfg.motion_comp_analytic_enable ? "true" : "false") << ",\n";
     os << "    \"motion_comp_use_row_doppler\": " << (cfg.motion_comp_use_row_doppler ? "true" : "false") << ",\n";
+    os << "    \"motion_comp_solver\": " << q(cfg.motion_comp_solver) << ",\n";
     os << "    \"motion_comp_iter\": " << cfg.motion_comp_iter << ",\n";
+    os << "    \"motion_comp_iter_tol_mps\": " << cfg.motion_comp_iter_tol_mps << ",\n";
+    os << "    \"p38_refit_enable\": " << (cfg.p38_refit_enable ? "true" : "false") << ",\n";
+    os << "    \"p38_refit_row_guard_bins\": " << cfg.p38_refit_row_guard_bins << ",\n";
+    os << "    \"p38_refit_range_guard_bins\": " << cfg.p38_refit_range_guard_bins << ",\n";
+    os << "    \"p38_refit_top_power_frac\": " << cfg.p38_refit_top_power_frac << ",\n";
+    os << "    \"p38_refit_min_sample_count\": " << cfg.p38_refit_min_sample_count << ",\n";
+    os << "    \"p38_refit_min_inlier_ratio\": " << cfg.p38_refit_min_inlier_ratio << ",\n";
+    os << "    \"p38_refit_max_rmse_rad\": " << cfg.p38_refit_max_rmse_rad << ",\n";
+    os << "    \"p38_refit_max_delta_k\": " << cfg.p38_refit_max_delta_k << ",\n";
+    os << "    \"p38_refit_max_delta_b_rad\": " << cfg.p38_refit_max_delta_b_rad << ",\n";
     os << "    \"p38_mode\": " << q("clutter_cancel_38_paper_1_p38_cuda") << ",\n";
-    os << "    \"geometry_calib_mode\": " << q("strict_dual_channel_forward") << ",\n";
+    os << "    \"geometry_calib_mode\": " << q("linear_p38_phase_vs_doppler") << ",\n";
     os << "    \"p38_theory_sign\": 1,\n";
     os << "    \"ati_velocity_sign\": " << cfg.ati_velocity_sign << ",\n";
     os << "    \"ati_phase_to_velocity_sign\": " << cfg.ati_phase_to_velocity_sign << ",\n";
@@ -491,6 +506,8 @@ void writeRuntimeConfigJson(const Config& cfg)
     os << "    \"ati_phase_bias_rad\": " << cfg.ati_phase_bias_rad << ",\n";
     os << "    \"ati_vmax_mps\": " << cfg.ati_vmax_mps << ",\n";
     os << "    \"motion_comp_denom_min\": " << cfg.motion_comp_denom_min << ",\n";
+    os << "    \"motion_comp_root_grid_step_mps\": " << cfg.motion_comp_root_grid_step_mps << ",\n";
+    os << "    \"motion_comp_root_cost_max\": " << cfg.motion_comp_root_cost_max << ",\n";
     os << "    \"motion_comp_debug\": " << (cfg.motion_comp_debug ? "true" : "false") << "\n";
     os << "  },\n";
     os << "  \"detection\": {\n";
@@ -597,6 +614,10 @@ void writeRuntimeConfigTxt(const Config& cfg)
     os << "beam_pointing_bias_source = no_explicit_algorithm_config_field\n\n";
 
     os << "[CHANNEL_AND_GMTI]\n";
+    os << "iq_data_type = " << cfg.iq_data_type << "\n";
+    os << "new_protocol_channel_count = " << cfg.new_protocol_channel_count << "\n";
+    os << "new_protocol_read_channel_1 = " << cfg.new_protocol_read_channel_1 << "\n";
+    os << "new_protocol_read_channel_2 = " << cfg.new_protocol_read_channel_2 << "\n";
     os << "d_chan = " << cfg.d_channel << "\n";
     os << "calib_coef = " << cfg.calib_coef << "\n";
     os << "channel_phase_enabled = called_in_processOnePeriod\n";
@@ -606,9 +627,20 @@ void writeRuntimeConfigTxt(const Config& cfg)
     os << "motion_comp_enable = " << (cfg.motion_comp_enable ? "true" : "false") << "\n";
     os << "motion_comp_analytic_enable = " << (cfg.motion_comp_analytic_enable ? "true" : "false") << "\n";
     os << "motion_comp_use_row_doppler = " << (cfg.motion_comp_use_row_doppler ? "true" : "false") << "\n";
+    os << "motion_comp_solver = " << cfg.motion_comp_solver << "\n";
     os << "motion_comp_iter = " << cfg.motion_comp_iter << "\n";
+    os << "motion_comp_iter_tol_mps = " << cfg.motion_comp_iter_tol_mps << "\n";
+    os << "p38_refit_enable = " << (cfg.p38_refit_enable ? "true" : "false") << "\n";
+    os << "p38_refit_row_guard_bins = " << cfg.p38_refit_row_guard_bins << "\n";
+    os << "p38_refit_range_guard_bins = " << cfg.p38_refit_range_guard_bins << "\n";
+    os << "p38_refit_top_power_frac = " << cfg.p38_refit_top_power_frac << "\n";
+    os << "p38_refit_min_sample_count = " << cfg.p38_refit_min_sample_count << "\n";
+    os << "p38_refit_min_inlier_ratio = " << cfg.p38_refit_min_inlier_ratio << "\n";
+    os << "p38_refit_max_rmse_rad = " << cfg.p38_refit_max_rmse_rad << "\n";
+    os << "p38_refit_max_delta_k = " << cfg.p38_refit_max_delta_k << "\n";
+    os << "p38_refit_max_delta_b_rad = " << cfg.p38_refit_max_delta_b_rad << "\n";
     os << "p38_mode = clutter_cancel_38_paper_1_p38_cuda\n";
-    os << "geometry_calib_mode = strict_dual_channel_forward\n";
+    os << "geometry_calib_mode = linear_p38_phase_vs_doppler\n";
     os << "p38_theory_sign = 1\n";
     os << "ati_velocity_sign = " << cfg.ati_velocity_sign << "\n";
     os << "ati_phase_to_velocity_sign = " << cfg.ati_phase_to_velocity_sign << "\n";
@@ -616,6 +648,8 @@ void writeRuntimeConfigTxt(const Config& cfg)
     os << "ati_phase_bias_rad = " << cfg.ati_phase_bias_rad << "\n";
     os << "ati_vmax_mps = " << cfg.ati_vmax_mps << "\n";
     os << "motion_comp_denom_min = " << cfg.motion_comp_denom_min << "\n";
+    os << "motion_comp_root_grid_step_mps = " << cfg.motion_comp_root_grid_step_mps << "\n";
+    os << "motion_comp_root_cost_max = " << cfg.motion_comp_root_cost_max << "\n";
     os << "motion_comp_debug = " << (cfg.motion_comp_debug ? "true" : "false") << "\n\n";
 
     os << "[DETECTION]\n";

@@ -4,6 +4,7 @@
 #include "../target_injection/beam_visibility.h"
 #include "../target_injection/channel_phase_model.h"
 #include "../target_injection/radar_geometry.h"
+#include "dbs/NewProtocolLayout.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -23,29 +24,43 @@ using gmti::target_injection::evaluatePlatformState;
 using gmti::target_injection::evaluateVisibility;
 using gmti::target_injection::kC;
 using gmti::target_injection::kPi;
-using gmti::target_injection::loadF32LE;
 using gmti::target_injection::norm;
 using gmti::target_injection::pulseTimeSec;
 using gmti::target_injection::rad2deg;
-using gmti::target_injection::storeF32LE;
 using gmti::target_injection::wrapTo180;
 
 namespace {
 
-const size_t kHeaderBytes = 256;
-const size_t kBytesPerSample = 16;
+const size_t kHeaderBytes = gmti::new_protocol::kHeaderBytes;
 
-std::complex<float> loadCh(const std::vector<uint8_t> &packet, int n, int ch)
+std::complex<float> loadCh(const std::vector<uint8_t> &packet,
+                           int n,
+                           int ch,
+                           std::size_t channel_count,
+                           const std::string &iq_type)
 {
-    const size_t off = kHeaderBytes + static_cast<size_t>(n) * kBytesPerSample + (ch == 1 ? 0U : 8U);
-    return std::complex<float>(loadF32LE(&packet[off]), loadF32LE(&packet[off + 4]));
+    const std::size_t iq_bytes = gmti::new_protocol::bytesPerIq(iq_type);
+    const size_t off = kHeaderBytes +
+                       static_cast<size_t>(n) * gmti::new_protocol::sampleBytes(channel_count, iq_type) +
+                       gmti::new_protocol::channelOffset(static_cast<size_t>(ch), iq_type);
+    return std::complex<float>(
+        gmti::new_protocol::loadIqAsFloat(&packet[off], iq_type),
+        gmti::new_protocol::loadIqAsFloat(&packet[off + iq_bytes], iq_type));
 }
 
-void storeCh(std::vector<uint8_t> &packet, int n, int ch, const std::complex<float> &v)
+void storeCh(std::vector<uint8_t> &packet,
+             int n,
+             int ch,
+             std::size_t channel_count,
+             const std::string &iq_type,
+             const std::complex<float> &v)
 {
-    const size_t off = kHeaderBytes + static_cast<size_t>(n) * kBytesPerSample + (ch == 1 ? 0U : 8U);
-    storeF32LE(&packet[off], v.real());
-    storeF32LE(&packet[off + 4], v.imag());
+    const std::size_t iq_bytes = gmti::new_protocol::bytesPerIq(iq_type);
+    const size_t off = kHeaderBytes +
+                       static_cast<size_t>(n) * gmti::new_protocol::sampleBytes(channel_count, iq_type) +
+                       gmti::new_protocol::channelOffset(static_cast<size_t>(ch), iq_type);
+    gmti::new_protocol::storeIqFromFloat(&packet[off], iq_type, v.real());
+    gmti::new_protocol::storeIqFromFloat(&packet[off + iq_bytes], iq_type, v.imag());
 }
 
 GeometrySample scattererGeometry(const gmti::target_injection::RadarConfig &radar,
@@ -109,6 +124,44 @@ double channelPhaseRad(const gmti::target_injection::RadarConfig &radar, const G
     return 2.0 * kPi * radar.d_chan_m * std::sin(deg2rad(g.theta_true_deg)) / lambda;
 }
 
+uint64_t mix64(uint64_t x)
+{
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+double hashUnit(uint64_t seed,
+                int period_id,
+                int beam_id,
+                int pulse_id,
+                int sample_id,
+                uint64_t salt)
+{
+    uint64_t x = seed;
+    x ^= mix64(static_cast<uint64_t>(period_id) + 0x100000001b3ULL * salt);
+    x ^= mix64(static_cast<uint64_t>(beam_id) + 0x9e3779b9ULL * salt);
+    x ^= mix64(static_cast<uint64_t>(pulse_id) + 0x7f4a7c15ULL * salt);
+    x ^= mix64(static_cast<uint64_t>(sample_id) + 0xbf58476dULL * salt);
+    const uint64_t y = mix64(x);
+    return (static_cast<double>((y >> 11) & ((1ULL << 53) - 1)) + 0.5) *
+           (1.0 / static_cast<double>(1ULL << 53));
+}
+
+double hashGaussian(uint64_t seed,
+                    int period_id,
+                    int beam_id,
+                    int pulse_id,
+                    int sample_id,
+                    uint64_t salt0,
+                    uint64_t salt1)
+{
+    const double u1 = std::max(1.0e-12, hashUnit(seed, period_id, beam_id, pulse_id, sample_id, salt0));
+    const double u2 = hashUnit(seed, period_id, beam_id, pulse_id, sample_id, salt1);
+    return std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * kPi * u2);
+}
+
 } // namespace
 
 void addScatterersToPacket(std::vector<uint8_t> &packet,
@@ -124,6 +177,10 @@ void addScatterersToPacket(std::vector<uint8_t> &packet,
     const double kr = radar.br_hz / radar.tr_sec;
     const double lambda = kC / radar.fc_hz;
     const int np = static_cast<int>(std::floor(radar.tr_sec * radar.fs_hz + 0.5));
+    const std::size_t channel_count = static_cast<std::size_t>(std::max(2, radar.new_protocol_channel_count));
+    const std::string iq_type = radar.iq_data_type.empty() ? "float32" : radar.iq_data_type;
+    const int ch1 = radar.new_protocol_read_channel_1;
+    const int ch2 = radar.new_protocol_read_channel_2;
     for (size_t i = 0; i < scatterers.size(); ++i) {
         const Scatterer &s = scatterers[i];
         const GeometrySample g = scattererGeometry(radar, global, s, period_id, beam_id, pulse_id);
@@ -150,14 +207,82 @@ void addScatterersToPacket(std::vector<uint8_t> &packet,
             const std::complex<float> e1(static_cast<float>(echo.real()), static_cast<float>(echo.imag()));
             const std::complex<double> echo2 = echo * ch2_phase;
             const std::complex<float> e2(static_cast<float>(echo2.real()), static_cast<float>(echo2.imag()));
-            storeCh(packet, n, 1, loadCh(packet, n, 1) + e1);
-            storeCh(packet, n, 2, loadCh(packet, n, 2) + e2);
+            storeCh(packet, n, ch1, channel_count, iq_type, loadCh(packet, n, ch1, channel_count, iq_type) + e1);
+            storeCh(packet, n, ch2, channel_count, iq_type, loadCh(packet, n, ch2, channel_count, iq_type) + e2);
             ++touched;
         }
         if (touched > 0) {
             ++stats.scatterer_echoes;
             stats.scatterer_samples += static_cast<uint64_t>(touched);
         }
+    }
+}
+
+void addContinuousAreaClutter(std::vector<uint8_t> &packet,
+                              const gmti::target_injection::RadarConfig &radar,
+                              const TargetGlobalConfig &global,
+                              const SceneConfig &scene,
+                              uint32_t random_seed,
+                              int period_id,
+                              int beam_id,
+                              int pulse_id,
+                              Stage2Stats &stats)
+{
+    if (!scene.area.enabled) return;
+    const bool continuous_mode =
+        scene.area.model == "continuous_texture" ||
+        scene.area.model == "continuous_surface" ||
+        scene.area.model == "continuous_grid" ||
+        scene.area.model == "grid_texture";
+    if (!continuous_mode) return;
+
+    const std::size_t channel_count = static_cast<std::size_t>(std::max(2, radar.new_protocol_channel_count));
+    const std::string iq_type = radar.iq_data_type.empty() ? "float32" : radar.iq_data_type;
+    const int ch1 = radar.new_protocol_read_channel_1;
+    const int ch2 = radar.new_protocol_read_channel_2;
+    const double lambda = kC / radar.fc_hz;
+    const double theta_cmd_deg =
+        radar.scan_min_deg + radar.scan_step_deg * static_cast<double>(beam_id);
+    const double ch2_phase_rad = 2.0 * kPi * radar.d_chan_m * std::sin(deg2rad(theta_cmd_deg)) / lambda;
+    const std::complex<float> ch2_phase(
+        static_cast<float>(std::cos(ch2_phase_rad)),
+        static_cast<float>(std::sin(ch2_phase_rad)));
+    const double beam_gain = 1.0;
+    const double sigma = std::sqrt(std::max(1.0e-12, scene.area.mean_power) / 2.0);
+    const double t = pulseTimeSec(radar, period_id, beam_id, pulse_id);
+    const PlatformState platform = evaluatePlatformState(global, t);
+    (void)platform;
+
+    const uint64_t seed = static_cast<uint64_t>(random_seed);
+    int injected = 0;
+    for (int n = 0; n < radar.pulse_len; ++n) {
+        const double range_m =
+            0.5 * kC * (radar.sample_delay_sec + static_cast<double>(n) / radar.fs_hz);
+        if (range_m < scene.range_min_m || range_m > scene.range_max_m) {
+            continue;
+        }
+        const double u_phase = hashUnit(seed, period_id, beam_id, pulse_id, n, 11ULL);
+        const double g0 = hashGaussian(seed, period_id, beam_id, pulse_id, n, 23ULL, 29ULL);
+        const double g1 = hashGaussian(seed, period_id, beam_id, pulse_id, n, 31ULL, 37ULL);
+        double amp = sigma * std::sqrt(-2.0 * std::log(std::max(1.0e-12, u_phase)));
+        if (scene.area.texture_sigma > 0.0) {
+            amp *= std::exp(scene.area.texture_sigma * g0);
+        }
+        amp *= scene.clutter_amplitude_scale * beam_gain;
+        const double carrier_phase = static_cast<double>(global.carrier_phase_sign) * 4.0 * kPi * range_m / lambda;
+        const double clutter_phase = 2.0 * kPi * hashUnit(seed, period_id, beam_id, pulse_id, n, 41ULL) + g1 * 0.15;
+        const std::complex<double> echo1 =
+            amp * std::exp(std::complex<double>(0.0, carrier_phase + clutter_phase));
+        const std::complex<double> echo2 = echo1 * std::complex<double>(ch2_phase.real(), ch2_phase.imag());
+        const std::complex<float> e1(static_cast<float>(echo1.real()), static_cast<float>(echo1.imag()));
+        const std::complex<float> e2(static_cast<float>(echo2.real()), static_cast<float>(echo2.imag()));
+        storeCh(packet, n, ch1, channel_count, iq_type, loadCh(packet, n, ch1, channel_count, iq_type) + e1);
+        storeCh(packet, n, ch2, channel_count, iq_type, loadCh(packet, n, ch2, channel_count, iq_type) + e2);
+        ++injected;
+    }
+    if (injected > 0) {
+        ++stats.continuous_area_packets;
+        stats.continuous_area_samples += static_cast<uint64_t>(injected);
     }
 }
 
@@ -170,11 +295,15 @@ void addThermalNoise(std::vector<uint8_t> &packet,
     if (noise_power <= 0.0) return;
     const double sigma = std::sqrt(noise_power / 2.0);
     std::normal_distribution<float> n01(0.0f, static_cast<float>(sigma));
+    const std::size_t channel_count = static_cast<std::size_t>(std::max(2, radar.new_protocol_channel_count));
+    const std::string iq_type = radar.iq_data_type.empty() ? "float32" : radar.iq_data_type;
+    const int ch1 = radar.new_protocol_read_channel_1;
+    const int ch2 = radar.new_protocol_read_channel_2;
     for (int n = 0; n < radar.pulse_len; ++n) {
         const std::complex<float> z1(n01(rng), n01(rng));
         const std::complex<float> z2(n01(rng), n01(rng));
-        storeCh(packet, n, 1, loadCh(packet, n, 1) + z1);
-        storeCh(packet, n, 2, loadCh(packet, n, 2) + z2);
+        storeCh(packet, n, ch1, channel_count, iq_type, loadCh(packet, n, ch1, channel_count, iq_type) + z1);
+        storeCh(packet, n, ch2, channel_count, iq_type, loadCh(packet, n, ch2, channel_count, iq_type) + z2);
         stats.sum_noise_power += static_cast<double>(std::norm(z1) + std::norm(z2));
         stats.noise_samples += 2U;
     }
@@ -184,9 +313,13 @@ void scanPacketStats(const std::vector<uint8_t> &packet,
                      const gmti::target_injection::RadarConfig &radar,
                      Stage2Stats &stats)
 {
+    const std::size_t channel_count = static_cast<std::size_t>(std::max(2, radar.new_protocol_channel_count));
+    const std::string iq_type = radar.iq_data_type.empty() ? "float32" : radar.iq_data_type;
+    const int ch1 = radar.new_protocol_read_channel_1;
+    const int ch2 = radar.new_protocol_read_channel_2;
     for (int n = 0; n < radar.pulse_len; ++n) {
-        const std::complex<float> c1 = loadCh(packet, n, 1);
-        const std::complex<float> c2 = loadCh(packet, n, 2);
+        const std::complex<float> c1 = loadCh(packet, n, ch1, channel_count, iq_type);
+        const std::complex<float> c2 = loadCh(packet, n, ch2, channel_count, iq_type);
         const float vals[4] = {c1.real(), c1.imag(), c2.real(), c2.imag()};
         for (int k = 0; k < 4; ++k) {
             if (std::isnan(vals[k])) stats.has_nan = true;

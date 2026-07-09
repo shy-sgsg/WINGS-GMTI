@@ -17,6 +17,8 @@ struct Stage2Stats {
     uint64_t scatterer_samples = 0;
     uint64_t target_pulses_injected = 0;
     uint64_t target_samples_injected = 0;
+    uint64_t continuous_area_packets = 0;
+    uint64_t continuous_area_samples = 0;
     double max_abs_component = 0.0;
     double sum_noise_power = 0.0;
     uint64_t noise_samples = 0;
@@ -34,6 +36,16 @@ void addScatterersToPacket(std::vector<uint8_t> &packet,
                            double beam_gain_threshold,
                            Stage2Stats &stats);
 
+void addContinuousAreaClutter(std::vector<uint8_t> &packet,
+                              const gmti::target_injection::RadarConfig &radar,
+                              const gmti::target_injection::TargetGlobalConfig &global,
+                              const SceneConfig &scene,
+                              uint32_t random_seed,
+                              int period_id,
+                              int beam_id,
+                              int pulse_id,
+                              Stage2Stats &stats);
+
 void addThermalNoise(std::vector<uint8_t> &packet,
                      const gmti::target_injection::RadarConfig &radar,
                      double noise_power,
@@ -46,4 +58,3 @@ void scanPacketStats(const std::vector<uint8_t> &packet,
 
 } // namespace stage2
 } // namespace gmti
-

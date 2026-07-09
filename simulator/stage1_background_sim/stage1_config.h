@@ -43,6 +43,10 @@ struct Stage1NewSystemConfig {
     double scan_step_deg = 2.0;
     int beam_count = 61;
     int pulse_num_new = 130;
+    std::string iq_data_type = "float32";
+    int new_protocol_channel_count = 2;
+    int new_protocol_read_channel_1 = 1;
+    int new_protocol_read_channel_2 = 2;
     int ddc_len_new = 11820;
     int fft_len_new = 12288;
     int pc_crop_start = 3864;
@@ -83,4 +87,3 @@ std::string boolText(bool v);
 
 } // namespace sim_stage1
 } // namespace gmti
-

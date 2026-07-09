@@ -25,6 +25,10 @@ struct Config {
     std::string reffunc_add;     // 参考函数文件路径
     std::string channel_mode;    // 通道模式
     std::string iq_compose;      // IQ 组合方式
+    std::string iq_data_type = "float32"; // 原始 IQ 数据类型：float32 / int16
+    int new_protocol_channel_count = 2;    // 新协议交织通道总数
+    int new_protocol_read_channel_1 = 1;   // 新协议读取通道1（1-based）
+    int new_protocol_read_channel_2 = 2;   // 新协议读取通道2（1-based）
     std::vector<int> track_idx_range; // 航迹关联读取的周期索引
     int result_file_id = -1;     // 当前检测结果固定写入 GMTIxx.bin 的 xx，<=0 时才使用自动编号
 
@@ -131,13 +135,26 @@ struct Config {
     bool motion_comp_enable = false; // 动目标定位时扣除目标自身运动多普勒
     bool motion_comp_analytic_enable = true; // true: 使用解析式运动补偿；false: 回退旧定位
     bool motion_comp_use_row_doppler = true; // true: af_total 使用检测所在 Doppler row
-    int motion_comp_iter = 3; // 运动补偿迭代次数
+    std::string motion_comp_solver = "analytic"; // old / iterative / analytic / root1d / debug
+    int motion_comp_iter = 8; // 运动补偿迭代次数
+    double motion_comp_iter_tol_mps = 1.0e-4; // 迭代收敛阈值
+    bool p38_refit_enable = true; // CFAR/聚类后是否执行 p38 二阶段重估
+    int p38_refit_row_guard_bins = 2; // 检测点 row 方向排除半径
+    int p38_refit_range_guard_bins = 2; // 检测点 range 方向排除半径
+    double p38_refit_top_power_frac = 0.01; // 按 power_map 排除的顶部百分位
+    int p38_refit_min_sample_count = 8; // p38_refit 最小样本行数
+    double p38_refit_min_inlier_ratio = 0.60; // p38_refit 最小内点占比
+    double p38_refit_max_rmse_rad = 0.60; // p38_refit 最大 RMSE
+    double p38_refit_max_delta_k = 0.01; // p38_refit 与 p38_pre 的 k 限幅
+    double p38_refit_max_delta_b_rad = 1.50; // p38_refit 与 p38_pre 的 b 限幅
     int ati_velocity_sign = 1; // ATI 相位到径向速度符号，必要时可设为 -1
     int ati_phase_to_velocity_sign = 1; // ATI 相位残差到径向速度的符号
-    int motion_doppler_axis_sign = 1; // 径向速度到多普勒轴方向的符号
+    int motion_doppler_axis_sign = -1; // 径向速度到多普勒轴方向的符号
     double ati_phase_bias_rad = 0.0; // ATI 固定相位偏置
-    double ati_vmax_mps = 60.0; // ATI 径向速度限幅，<=0 表示不限幅
+    double ati_vmax_mps = 1.6; // ATI 径向速度限幅，<=0 表示不限幅
     double motion_comp_denom_min = 1.0e-6; // 解析式分母过小则回退旧定位
+    double motion_comp_root_grid_step_mps = 0.02; // root1d 粗搜索步长
+    double motion_comp_root_cost_max = 0.25; // root1d 最大可接受 cost
     bool motion_comp_debug = false; // 输出运动多普勒补偿调试字段/日志
 
     // 推导参数
@@ -249,6 +266,13 @@ struct GMTIOutput {
     struct DetectionCsvRecord {
         int period_id = -1;
         int beam_id = -1;
+        double platform_e = std::numeric_limits<double>::quiet_NaN();
+        double platform_n = std::numeric_limits<double>::quiet_NaN();
+        double platform_h = std::numeric_limits<double>::quiet_NaN();
+        double platform_v = std::numeric_limits<double>::quiet_NaN();
+        double platform_v_angle_deg = std::numeric_limits<double>::quiet_NaN();
+        double fd_ctr_wrapped = std::numeric_limits<double>::quiet_NaN();
+        double fd_ctr_unwrapped = std::numeric_limits<double>::quiet_NaN();
         int range_bin = -1;
         int row = -1;
         int col = -1;
@@ -265,6 +289,10 @@ struct GMTIOutput {
         double phase_rad = std::numeric_limits<double>::quiet_NaN();
         double p38_k = std::numeric_limits<double>::quiet_NaN();
         double p38_b = std::numeric_limits<double>::quiet_NaN();
+        double phi_static_model_rad = std::numeric_limits<double>::quiet_NaN();
+        std::string phi_static_model_name;
+        double C_ati = std::numeric_limits<double>::quiet_NaN();
+        double k_eff_static_phase_df = std::numeric_limits<double>::quiet_NaN();
         double phi_static_rad = std::numeric_limits<double>::quiet_NaN();
         double phi_static_total_rad = std::numeric_limits<double>::quiet_NaN();
         double phi_res_rad = std::numeric_limits<double>::quiet_NaN();
@@ -281,9 +309,42 @@ struct GMTIOutput {
         double denom_without_k = std::numeric_limits<double>::quiet_NaN();
         double v_from_phase_raw = std::numeric_limits<double>::quiet_NaN();
         double v_from_phi_res = std::numeric_limits<double>::quiet_NaN();
+        double v_iterative_mps = std::numeric_limits<double>::quiet_NaN();
+        double v_analytic_mps = std::numeric_limits<double>::quiet_NaN();
+        double v_root1d_mps = std::numeric_limits<double>::quiet_NaN();
+        double v_old_mps = std::numeric_limits<double>::quiet_NaN();
+        double af_geometry_old_hz = std::numeric_limits<double>::quiet_NaN();
+        double af_geometry_iterative_hz = std::numeric_limits<double>::quiet_NaN();
+        double af_geometry_analytic_hz = std::numeric_limits<double>::quiet_NaN();
+        double af_geometry_root1d_hz = std::numeric_limits<double>::quiet_NaN();
+        double root1d_cost = std::numeric_limits<double>::quiet_NaN();
+        double p38_pre_k = std::numeric_limits<double>::quiet_NaN();
+        double p38_pre_b = std::numeric_limits<double>::quiet_NaN();
+        double p38_pre_rmse = std::numeric_limits<double>::quiet_NaN();
+        double p38_refit_k = std::numeric_limits<double>::quiet_NaN();
+        double p38_refit_b = std::numeric_limits<double>::quiet_NaN();
+        double p38_refit_rmse = std::numeric_limits<double>::quiet_NaN();
+        int p38_refit_sample_count = 0;
+        double p38_refit_inlier_ratio = std::numeric_limits<double>::quiet_NaN();
+        int p38_refit_valid = 0;
+        double p38_used_k = std::numeric_limits<double>::quiet_NaN();
+        double p38_used_b = std::numeric_limits<double>::quiet_NaN();
+        std::string p38_used_source;
+        double phi_static_pre_rad = std::numeric_limits<double>::quiet_NaN();
+        double phi_res_pre_rad = std::numeric_limits<double>::quiet_NaN();
+        double v_pre_mps = std::numeric_limits<double>::quiet_NaN();
+        double phi_static_refit_rad = std::numeric_limits<double>::quiet_NaN();
+        double phi_res_refit_rad = std::numeric_limits<double>::quiet_NaN();
+        double v_refit_mps = std::numeric_limits<double>::quiet_NaN();
         double sinA_old = std::numeric_limits<double>::quiet_NaN();
         double sinA_comp = std::numeric_limits<double>::quiet_NaN();
         double sinA_used = std::numeric_limits<double>::quiet_NaN();
+        double angle_from_sinA_deg = std::numeric_limits<double>::quiet_NaN();
+        double theta_used_for_position_deg = std::numeric_limits<double>::quiet_NaN();
+        double look_from_sinA_e = std::numeric_limits<double>::quiet_NaN();
+        double look_from_sinA_n = std::numeric_limits<double>::quiet_NaN();
+        double look_e_diff = std::numeric_limits<double>::quiet_NaN();
+        double look_n_diff = std::numeric_limits<double>::quiet_NaN();
         double old_e = std::numeric_limits<double>::quiet_NaN();
         double old_n = std::numeric_limits<double>::quiet_NaN();
         double new_e = std::numeric_limits<double>::quiet_NaN();

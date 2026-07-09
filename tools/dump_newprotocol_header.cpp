@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <cstdlib>
 
 namespace {
 
@@ -60,12 +61,18 @@ void printHeader(const std::string &path, std::size_t packet_bytes, std::size_t 
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
-        std::cerr << "usage: dump_newprotocol_header <stage2_statistical_newprotocol.bin>\n";
+    if (argc < 2 || argc > 4) {
+        std::cerr << "usage: dump_newprotocol_header <stage2_statistical_newprotocol.bin> [channel_count] [iq_data_type]\n";
         return 2;
     }
     try {
         const std::string path = argv[1];
+        const std::size_t channel_count = (argc >= 3)
+            ? static_cast<std::size_t>(std::max(1, std::atoi(argv[2])))
+            : 2U;
+        const std::string iq_data_type = (argc >= 4) ? argv[3] : "float32";
+        const std::size_t sample_bytes =
+            gmti::new_protocol::sampleBytes(channel_count, iq_data_type);
         const std::vector<uint8_t> first =
             readAt(path, 0, gmti::new_protocol::kHeaderBytes);
         const std::size_t packet_bytes =
@@ -73,7 +80,7 @@ int main(int argc, char **argv)
                 first.data() + gmti::new_protocol::kOffPrtLen));
         if (packet_bytes < gmti::new_protocol::kHeaderBytes ||
             ((packet_bytes - gmti::new_protocol::kHeaderBytes) %
-             gmti::new_protocol::kBytesPerSample) != 0U) {
+             sample_bytes) != 0U) {
             throw std::runtime_error("invalid prt_len in first header");
         }
         const std::size_t size = fileSize(path);
@@ -82,9 +89,11 @@ int main(int argc, char **argv)
         }
         const std::size_t total = size / packet_bytes;
         std::cout << "# packet_bytes=" << packet_bytes
+                  << " channel_count=" << channel_count
+                  << " iq_data_type=" << iq_data_type
                   << " samples_per_prt="
                   << ((packet_bytes - gmti::new_protocol::kHeaderBytes) /
-                      gmti::new_protocol::kBytesPerSample)
+                      sample_bytes)
                   << " total_prt=" << total << "\n";
         std::cout << "pulse_idx,utc,lat,lon,h,vn,ve,vd,theta_cmd_deg\n";
         printHeader(path, packet_bytes, 0);

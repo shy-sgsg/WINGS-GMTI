@@ -637,20 +637,21 @@ GMTIResult read_mt_result_bin(const std::string& binFile) {
     // 1. 读取目标总数 (uint8)
     uint16_t N_raw;
     fs.read(reinterpret_cast<char*>(&N_raw), 2);
-    int N = std::min((int)N_raw, MAX_TGT);
+    const int N_file = static_cast<int>(N_raw);
+    int N = std::min(N_file, MAX_TGT);
     out.count = N;
 
-    const std::streamoff new_size_36 = 2 + static_cast<std::streamoff>(N) * 36;
-    const std::streamoff new_size_28 = 2 + static_cast<std::streamoff>(N) * 28 + 8;
-    const std::streamoff legacy_size_28_no_tail = 2 + static_cast<std::streamoff>(N) * 28;
-    const std::streamoff old_size_27 = 2 + static_cast<std::streamoff>(N) * 27 + 4;
+    const std::streamoff new_size_36 = 2 + static_cast<std::streamoff>(N_file) * 36;
+    const std::streamoff new_size_28 = 2 + static_cast<std::streamoff>(N_file) * 28 + 8;
+    const std::streamoff legacy_size_28_no_tail = 2 + static_cast<std::streamoff>(N_file) * 28;
+    const std::streamoff old_size_27 = 2 + static_cast<std::streamoff>(N_file) * 27 + 4;
     const bool use_new_layout_36 = (file_size == new_size_36);
     const bool use_new_layout_28 = (file_size == new_size_28);
     const bool use_legacy_layout_28_no_tail = (file_size == legacy_size_28_no_tail);
     const bool use_old_layout = (!use_new_layout_36 && !use_new_layout_28 && !use_legacy_layout_28_no_tail && file_size == old_size_27);
 
     // 2. 循环读取每个目标
-    for (int i = 0; i < N; ++i) {
+    for (int i = 0; i < N_file; ++i) {
         GMTIDetection det{};
         int32_t lon_int = 0, lat_int = 0;
 
@@ -691,16 +692,18 @@ GMTIResult read_mt_result_bin(const std::string& binFile) {
             throw std::runtime_error("Unsupported GMTI binary layout: " + binFile);
         }
 
-        det.lon = lon_int * LSB;
-        det.lat = lat_int * LSB;
-        out.targets.push_back(det);
+        if (i < N) {
+            det.lon = lon_int * LSB;
+            det.lat = lat_int * LSB;
+            out.targets.push_back(det);
+        }
     }
 
     // 3. 读取全局 utcMid（仅兼容旧布局，不参与新布局速度计算）
     if (use_new_layout_36) {
         out.utcGlobal = out.targets.empty() ? 0.0 : out.targets.front().utcMid;
     } else if (use_new_layout_28) {
-        fs.seekg(2 + static_cast<std::streamoff>(N) * 28, std::ios::beg);
+        fs.seekg(2 + static_cast<std::streamoff>(N_file) * 28, std::ios::beg);
         fs.read(reinterpret_cast<char*>(&out.utcGlobal), 8);
         for (auto& det : out.targets) {
             det.utcMid = out.utcGlobal;

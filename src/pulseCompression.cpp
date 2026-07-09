@@ -2,6 +2,7 @@
 #include <complex>
 #include <cmath>
 #include <cstring>
+#include <cctype>
 #include <mutex>
 #include "rangeCompress.hpp"
 #include "trig_lut.hpp"
@@ -13,6 +14,22 @@ static inline int16_t load_int16_le(const uint8_t* p) {
 }
 static inline uint32_t load_u32_le(const uint8_t* p) {
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static inline std::string normalize_iq_data_type(const std::string &type)
+{
+  std::string out;
+  out.reserve(type.size());
+  for (char ch : type) {
+    out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+  }
+  return out;
+}
+
+static inline bool raw_iq_is_int16(const Config &P)
+{
+  const std::string t = normalize_iq_data_type(P.iq_data_type);
+  return t == "int16" || t == "i16" || t == "s16" || t == "short";
 }
 
 inline std::vector<std::complex<double>>
@@ -182,8 +199,8 @@ bool readBeamRawFloat(const Config& P,
   const int hdr  = P.info_len;
   const int Lraw = P.pulse_len;
   const int W    = effectivePulseNum(P);
-
-  const size_t bytesIQperPulse = (size_t)Lraw * 2 /*I/Q*/ * sizeof(float);
+  const bool iq_int16 = raw_iq_is_int16(P);
+  const size_t bytesIQperPulse = (size_t)Lraw * 2U * (iq_int16 ? sizeof(int16_t) : sizeof(float));
   const size_t stride          = (size_t)hdr + bytesIQperPulse;
   const size_t off_bytes       = (size_t)(beamIdx - 1) * W * stride
                                + (size_t)P.skip_az_num * stride;
@@ -199,7 +216,13 @@ bool readBeamRawFloat(const Config& P,
   utc.assign(W, 0.0);
 
   std::vector<uint8_t> header(hdr);
-  std::vector<float>   iq_interleaved((size_t)Lraw * 2);
+  std::vector<float>   iq_interleaved_f;
+  std::vector<int16_t> iq_interleaved_i16;
+  if (iq_int16) {
+    iq_interleaved_i16.resize((size_t)Lraw * 2);
+  } else {
+    iq_interleaved_f.resize((size_t)Lraw * 2);
+  }
 
   for (int k = 0; k < W; ++k) {
     // 1) 读帧头
@@ -215,14 +238,22 @@ bool readBeamRawFloat(const Config& P,
     }
 
     // 2) 读 IQ（float32 交错）
-    nr = std::fread(iq_interleaved.data(), sizeof(float), (size_t)Lraw * 2, fp);
-    if (nr != (size_t)Lraw * 2) { std::fclose(fp); return false; }
-
-    // 交错转复数（保持float，不转double）
     std::complex<float>* row = &data[(size_t)k * Lraw];
-    const float* src = iq_interleaved.data();
-    for (int n = 0; n < Lraw; ++n) {
-      row[n] = std::complex<float>(src[2*n + 0], src[2*n + 1]);
+    if (iq_int16) {
+      nr = std::fread(iq_interleaved_i16.data(), sizeof(int16_t), (size_t)Lraw * 2, fp);
+      if (nr != (size_t)Lraw * 2) { std::fclose(fp); return false; }
+      const int16_t* src = iq_interleaved_i16.data();
+      for (int n = 0; n < Lraw; ++n) {
+        row[n] = std::complex<float>(static_cast<float>(src[2*n + 0]),
+                                     static_cast<float>(src[2*n + 1]));
+      }
+    } else {
+      nr = std::fread(iq_interleaved_f.data(), sizeof(float), (size_t)Lraw * 2, fp);
+      if (nr != (size_t)Lraw * 2) { std::fclose(fp); return false; }
+      const float* src = iq_interleaved_f.data();
+      for (int n = 0; n < Lraw; ++n) {
+        row[n] = std::complex<float>(src[2*n + 0], src[2*n + 1]);
+      }
     }
 
     // 3) UTC 时间解码（与你的 MATLAB 一致）
@@ -259,8 +290,8 @@ bool readBeamRaw(const Config& P,
   const int hdr  = P.info_len;
   const int Lraw = P.pulse_len;
   const int W    = effectivePulseNum(P);
-
-  const size_t bytesIQperPulse = (size_t)Lraw * 2 /*I/Q*/ * sizeof(float);
+  const bool iq_int16 = raw_iq_is_int16(P);
+  const size_t bytesIQperPulse = (size_t)Lraw * 2U * (iq_int16 ? sizeof(int16_t) : sizeof(float));
   const size_t stride          = (size_t)hdr + bytesIQperPulse;
   const size_t off_bytes       = (size_t)(beamIdx - 1) * W * stride
                                + (size_t)P.skip_az_num * stride;
@@ -276,7 +307,13 @@ bool readBeamRaw(const Config& P,
   utc.assign(W, 0.0);
 
   std::vector<uint8_t> header(hdr);
-  std::vector<float>   iq_interleaved((size_t)Lraw * 2);
+  std::vector<float>   iq_interleaved_f;
+  std::vector<int16_t> iq_interleaved_i16;
+  if (iq_int16) {
+    iq_interleaved_i16.resize((size_t)Lraw * 2);
+  } else {
+    iq_interleaved_f.resize((size_t)Lraw * 2);
+  }
 
   for (int k = 0; k < W; ++k) {
     // 1) 读帧头
@@ -292,14 +329,22 @@ bool readBeamRaw(const Config& P,
     }
 
     // 2) 读 IQ（float32 交错）
-    nr = std::fread(iq_interleaved.data(), sizeof(float), (size_t)Lraw * 2, fp);
-    if (nr != (size_t)Lraw * 2) { std::fclose(fp); return false; }
-
-    // 交错转复数
     std::complex<double>* row = &data[(size_t)k * Lraw];
-    const float* src = iq_interleaved.data();
-    for (int n = 0; n < Lraw; ++n) {
-      row[n] = std::complex<double>(src[2*n + 0], src[2*n + 1]);
+    if (iq_int16) {
+      nr = std::fread(iq_interleaved_i16.data(), sizeof(int16_t), (size_t)Lraw * 2, fp);
+      if (nr != (size_t)Lraw * 2) { std::fclose(fp); return false; }
+      const int16_t* src = iq_interleaved_i16.data();
+      for (int n = 0; n < Lraw; ++n) {
+        row[n] = std::complex<double>(static_cast<double>(src[2*n + 0]),
+                                      static_cast<double>(src[2*n + 1]));
+      }
+    } else {
+      nr = std::fread(iq_interleaved_f.data(), sizeof(float), (size_t)Lraw * 2, fp);
+      if (nr != (size_t)Lraw * 2) { std::fclose(fp); return false; }
+      const float* src = iq_interleaved_f.data();
+      for (int n = 0; n < Lraw; ++n) {
+        row[n] = std::complex<double>(src[2*n + 0], src[2*n + 1]);
+      }
     }
 
     // 3) UTC 时间解码（与你的 MATLAB 一致）

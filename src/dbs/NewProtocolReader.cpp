@@ -19,10 +19,26 @@ bool readPulseBlockNewProtocol(const Config &cfg,
         return false;
     }
     const size_t samples_per_prt = static_cast<size_t>(cfg.pulse_len);
-    const size_t prt_bytes = gmti::new_protocol::packetBytes(samples_per_prt);
+    const size_t channel_count = static_cast<size_t>(cfg.new_protocol_channel_count);
+    const std::string iq_type = cfg.iq_data_type.empty() ? "float32" : cfg.iq_data_type;
+    const size_t prt_bytes = gmti::new_protocol::packetBytes(samples_per_prt, channel_count, iq_type);
+    const int read_ch_1 = cfg.new_protocol_read_channel_1;
+    const int read_ch_2 = cfg.new_protocol_read_channel_2;
 
     if (cfg.pulse_num <= 0) {
         std::cerr << "[ERR] 新协议 pulse_num 非法: pulse_num=" << cfg.pulse_num << std::endl;
+        return false;
+    }
+    if (cfg.new_protocol_channel_count <= 0) {
+        std::cerr << "[ERR] 新协议 channel_count 非法: " << cfg.new_protocol_channel_count << std::endl;
+        return false;
+    }
+    if (read_ch_1 < 1 || read_ch_2 < 1 ||
+        read_ch_1 > cfg.new_protocol_channel_count ||
+        read_ch_2 > cfg.new_protocol_channel_count) {
+        std::cerr << "[ERR] 新协议读取通道超界: read_ch_1=" << read_ch_1
+                  << " read_ch_2=" << read_ch_2
+                  << " channel_count=" << cfg.new_protocol_channel_count << std::endl;
         return false;
     }
     const size_t period_pulses = static_cast<size_t>(cfg.pulse_num);
@@ -123,11 +139,14 @@ bool readPulseBlockNewProtocol(const Config &cfg,
 
         const uint8_t *payload = hdr + gmti::new_protocol::kHeaderBytes;
         for (size_t n = 0; n < samples_per_prt; ++n) {
-            const size_t off = n * gmti::new_protocol::kBytesPerSample;
-            const float ch1_i = gmti::new_protocol::loadF32LE(payload + off + 0);
-            const float ch1_q = gmti::new_protocol::loadF32LE(payload + off + 4);
-            const float ch2_i = gmti::new_protocol::loadF32LE(payload + off + 8);
-            const float ch2_q = gmti::new_protocol::loadF32LE(payload + off + 12);
+            const size_t off = n * gmti::new_protocol::sampleBytes(channel_count, iq_type);
+            const size_t iq_bytes = gmti::new_protocol::bytesPerIq(iq_type);
+            const size_t ch1_off = off + gmti::new_protocol::channelOffset(static_cast<size_t>(read_ch_1), iq_type);
+            const size_t ch2_off = off + gmti::new_protocol::channelOffset(static_cast<size_t>(read_ch_2), iq_type);
+            const float ch1_i = gmti::new_protocol::loadIqAsFloat(payload + ch1_off, iq_type);
+            const float ch1_q = gmti::new_protocol::loadIqAsFloat(payload + ch1_off + iq_bytes, iq_type);
+            const float ch2_i = gmti::new_protocol::loadIqAsFloat(payload + ch2_off, iq_type);
+            const float ch2_q = gmti::new_protocol::loadIqAsFloat(payload + ch2_off + iq_bytes, iq_type);
             data1[k * samples_per_prt + n] =
                 std::complex<float>(ch1_i, ch1_q);
             data2[k * samples_per_prt + n] =

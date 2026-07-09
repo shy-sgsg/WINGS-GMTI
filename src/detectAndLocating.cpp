@@ -71,7 +71,8 @@ bool GMTIProcessor::dpca_cfar2_fast(const std::vector<std::complex<double>> &GMT
                                     const Config &cfg,
                                     std::vector<double> &mydata,
                                     std::vector<int> &prow,
-                                    std::vector<int> &pcol)
+                                    std::vector<int> &pcol,
+                                    std::vector<float> *power_map)
 {
     const int H = effectivePulseNum(cfg); // 行（方位）
     const int W = cfg.rg_len;    // 列（距离）
@@ -130,6 +131,17 @@ bool GMTIProcessor::dpca_cfar2_fast(const std::vector<std::complex<double>> &GMT
             const double p = re * re + im * im; // double 功率
             rowsum += p;
             atI(r, c) = atI(r - 1, c) + rowsum;
+        }
+    }
+    if (power_map) {
+        power_map->assign((size_t)H * (size_t)W, 0.0f);
+        for (int r = 0; r < H; ++r) {
+            for (int c = 0; c < W; ++c) {
+                const size_t idx = (size_t)r * W + (size_t)c;
+                const double re = GMTI_new[idx].real();
+                const double im = GMTI_new[idx].imag();
+                (*power_map)[idx] = static_cast<float>(re * re + im * im);
+            }
         }
     }
 

@@ -212,6 +212,10 @@ bool loadRadarConfig(const std::string &xml_path, RadarConfig &cfg, std::string 
     }
     cfg.input_config = xml_path;
     cfg.input_data_file = textOf(param, "GMTI_data_new");
+    cfg.iq_data_type = textOf(param, "iq_data_type").empty() ? cfg.iq_data_type : textOf(param, "iq_data_type");
+    cfg.new_protocol_channel_count = toInt(textOf(param, "new_protocol_channel_count"), cfg.new_protocol_channel_count);
+    cfg.new_protocol_read_channel_1 = toInt(textOf(param, "new_protocol_read_channel_1"), cfg.new_protocol_read_channel_1);
+    cfg.new_protocol_read_channel_2 = toInt(textOf(param, "new_protocol_read_channel_2"), cfg.new_protocol_read_channel_2);
     cfg.pulse_len = toInt(textOf(param, "pulse_len"), cfg.pulse_len);
     cfg.pulse_num = toInt(textOf(param, "pulse_num"), cfg.pulse_num);
     cfg.beam_count = toInt(textOf(param, "az_count"), cfg.beam_count);
@@ -228,6 +232,7 @@ bool loadRadarConfig(const std::string &xml_path, RadarConfig &cfg, std::string 
     cfg.prf_hz = toDouble(textOf(param, "PRF"), cfg.prf_hz);
     cfg.sample_delay_sec = toDouble(textOf(param, "sample_delay_us"), cfg.sample_delay_sec * 1.0e6) * 1.0e-6;
     cfg.d_chan_m = toDouble(textOf(param, "d_chan"), cfg.d_chan_m);
+    cfg.motion_doppler_axis_sign = toInt(textOf(param, "motion_doppler_axis_sign"), cfg.motion_doppler_axis_sign);
     return true;
 }
 
@@ -360,18 +365,40 @@ bool writeOutputConfig(const std::string &input_xml,
         e->Clear();
         e->LinkEndChild(new TiXmlText(value));
     };
+    auto setDefaultTextNode = [&](const char *name, const char *value) {
+        if (textOf(param, name).empty()) {
+            setTextNode(name, value);
+        }
+    };
     setTextNode("raw_fenbianlv", "25");
+    setDefaultTextNode("iq_data_type", "float32");
+    setDefaultTextNode("new_protocol_channel_count", "2");
+    setDefaultTextNode("new_protocol_read_channel_1", "1");
+    setDefaultTextNode("new_protocol_read_channel_2", "2");
     setTextNode("motion_comp_enable", "1");
     setTextNode("motion_comp_analytic_enable", "1");
     setTextNode("motion_comp_use_row_doppler", "1");
-    setTextNode("motion_comp_iter", "3");
+    setTextNode("motion_comp_solver", "debug");
+    setTextNode("motion_comp_iter", "8");
+    setTextNode("motion_comp_iter_tol_mps", "1e-4");
     setTextNode("ati_velocity_sign", "1");
     setTextNode("ati_phase_to_velocity_sign", "1");
     setTextNode("motion_doppler_axis_sign", "-1");
     setTextNode("ati_phase_bias_rad", "0.0");
-    setTextNode("ati_vmax_mps", "60.0");
+    setTextNode("ati_vmax_mps", "1.6");
     setTextNode("motion_comp_denom_min", "1e-6");
+    setTextNode("motion_comp_root_grid_step_mps", "0.02");
+    setTextNode("motion_comp_root_cost_max", "0.25");
     setTextNode("motion_comp_debug", "1");
+    setTextNode("p38_refit_enable", "1");
+    setTextNode("p38_refit_row_guard_bins", "2");
+    setTextNode("p38_refit_range_guard_bins", "2");
+    setTextNode("p38_refit_top_power_frac", "0.01");
+    setTextNode("p38_refit_min_sample_count", "8");
+    setTextNode("p38_refit_min_inlier_ratio", "0.60");
+    setTextNode("p38_refit_max_rmse_rad", "0.60");
+    setTextNode("p38_refit_max_delta_k", "0.01");
+    setTextNode("p38_refit_max_delta_b_rad", "1.50");
     if (!doc.SaveFile(out_xml.c_str())) {
         err = "failed to save output config";
         return false;

@@ -13,6 +13,7 @@ struct BeamSummaryAccumulator {
     int period_id = 0;
     int beam_id = 0;
     int target_id = 0;
+    std::string target_name;
     int rows = 0;
     int visible_pulse_count = 0;
     double sum_range_m = 0.0;
@@ -25,6 +26,7 @@ struct BeamSummaryAccumulator {
     int injected_sample_count = 0;
     bool has_ref_geometry = false;
     int ref_pulse_idx = -1;
+    double ref_time_s = 0.0;
     Vec3 ref_platform;
     Vec3 ref_target;
     double ref_platform_e = 0.0;
@@ -48,15 +50,23 @@ struct BeamSummaryAccumulator {
     std::string geometry_config_name;
     double moving_target_speed_mps = std::numeric_limits<double>::quiet_NaN();
     double rcs_db = std::numeric_limits<double>::quiet_NaN();
+    double snr_db = std::numeric_limits<double>::quiet_NaN();
     double target_ve_mps = std::numeric_limits<double>::quiet_NaN();
     double target_vn_mps = std::numeric_limits<double>::quiet_NaN();
     double target_vr_self_mps = std::numeric_limits<double>::quiet_NaN();
     double target_vt_self_mps = std::numeric_limits<double>::quiet_NaN();
     double af_motion_truth_hz = std::numeric_limits<double>::quiet_NaN();
+    double af_geometry_truth_hz = std::numeric_limits<double>::quiet_NaN();
+    double af_total_truth_hz = std::numeric_limits<double>::quiet_NaN();
+    double phi_total_truth_rad = std::numeric_limits<double>::quiet_NaN();
+    double phi_static_truth_rad = std::numeric_limits<double>::quiet_NaN();
+    double phi_motion_truth_rad = std::numeric_limits<double>::quiet_NaN();
+    int row_truth = -1;
 };
 
 class TruthWriter {
 public:
+    void setCaseId(const std::string &case_id) { case_id_ = case_id; }
     bool open(const std::string &truth_dir, std::string &err);
     void writePulse(const PulseTruth &t);
     void writeSummary();
@@ -65,7 +75,9 @@ public:
 private:
     std::ofstream pulse_;
     std::ofstream summary_;
-    std::map<std::pair<int, int>, BeamSummaryAccumulator> acc_;
+    std::ofstream moving_;
+    std::string case_id_ = "stage2";
+    std::map<std::string, BeamSummaryAccumulator> acc_;
 };
 
 bool writeTargetInjectionReport(const std::string &path,

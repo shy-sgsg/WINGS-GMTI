@@ -20,11 +20,13 @@
 #include "GMTIProcessor.hpp"
 #include "rangeCompress.hpp"
 #include "geo/geoProj.hpp"
+#include "../simulator/common/SimulationGeometry.h"
 #include "rotation_xy.hpp"
 #include "unwrap_fd.hpp"
 #include "motion_comp.hpp"
 #include "dbs/NewProtocolReader.hpp"
 #include "trig_lut.hpp"
+#include "p38_refit_utils.hpp"
 
 using cudacd = cuFloatComplex;
 using cd = std::complex<float>;
@@ -74,6 +76,15 @@ std::string inferSceneTruthPath(const Config &cfg)
     }
     const std::string out_parent = parentDirLocal(cfg.result_add);
     return joinPathLocal(joinPathLocal(out_parent, "truth"), "scene_truth.csv");
+}
+
+void convertFloatComplexToDouble(const std::vector<std::complex<float>> &src,
+                                 std::vector<std::complex<double>> &dst)
+{
+    dst.resize(src.size());
+    for (size_t i = 0; i < src.size(); ++i) {
+        dst[i] = std::complex<double>(src[i].real(), src[i].imag());
+    }
 }
 
 std::vector<std::string> splitCsvLine(const std::string &line)
@@ -494,6 +505,52 @@ static inline double beam_center_relative_dir_deg(int squint_side, double theta_
 {
     const double side_dir = (squint_side == 1) ? -90.0 : 90.0;
     return wrap180_deg(side_dir - theta_deg);
+}
+
+static inline double clamp_unit_local(double v)
+{
+    if (!std::isfinite(v)) {
+        return v;
+    }
+    return std::max(-1.0, std::min(1.0, v));
+}
+
+static inline double theta_from_sinA_deg_local(double sinA)
+{
+    if (!std::isfinite(sinA)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return -gmti::trig_lut::asin(clamp_unit_local(sinA)) * 180.0 / M_PI;
+}
+
+static inline void project_position_from_sinA_local(const GMTIOutput::Plane &plane,
+                                                    const Config &cfg,
+                                                    double range_m,
+                                                    double sinA,
+                                                    double &theta_used_deg,
+                                                    double &look_e,
+                                                    double &look_n,
+                                                    double &e,
+                                                    double &n)
+{
+    if (!std::isfinite(sinA) || !std::isfinite(range_m) || !(range_m > 0.0)) {
+        look_e = std::numeric_limits<double>::quiet_NaN();
+        look_n = std::numeric_limits<double>::quiet_NaN();
+        e = std::numeric_limits<double>::quiet_NaN();
+        n = std::numeric_limits<double>::quiet_NaN();
+        theta_used_deg = std::numeric_limits<double>::quiet_NaN();
+        return;
+    }
+
+    const double vE = plane.V * gmti::trig_lut::cos(plane.V_angle * M_PI / 180.0);
+    const double vN = plane.V * gmti::trig_lut::sin(plane.V_angle * M_PI / 180.0);
+    const gmti::sim_geometry::LookVectorEN look =
+        gmti::sim_geometry::computeLookFromSinA(sinA, vE, vN, cfg.squint_side);
+    look_e = look.east;
+    look_n = look.north;
+    theta_used_deg = gmti::trig_lut::atan2(look_n, look_e) * 180.0 / M_PI;
+    e = plane.E + range_m * look_e;
+    n = plane.N + range_m * look_n;
 }
 
 static inline double location_beam_gate_deg(const Config &cfg)
@@ -1069,6 +1126,7 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
 
     int skipInt = 0;
     std::vector<std::complex<double>> F1, F2, F1_r, F2_r;
+    std::vector<std::complex<float>> F1_pre, F2_pre;
     const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
 
@@ -1077,11 +1135,14 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     std::vector<double> phi_diss_phase; // 存储相位值
     std::vector<int>    phi_diss_range; // 存储对应的距离向索引
 
-    std::array<double, 2> p_38;
+    std::array<float, 2> p_38;
+    std::array<float, 2> p_38_refit;
     std::vector<float> phase_map;
-    std::array<double, 2> p_38_csi;
+    std::vector<float> power_map;
     std::vector<double> ph_trace;
     std::vector<double> fa_cut;
+    std::vector<double> p38_pre_trace;
+    std::vector<double> p38_refit_trace;
     {
         gmti::runtime::TimingScope timing_channel_cancellation("channel_cancellation", 0, timing_beam_extra);
         if (!data_on_gpu) {
@@ -1114,15 +1175,24 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         }
         DBG("最终对齐完成，使用移位脉冲数: " << skipInt);
 
+        std::vector<float> faAxis_f(faAxis.begin(), faAxis.end());
+        std::array<float, 2> p_38_f;
+        std::vector<float> p38_pre_trace_f;
         if (!clutter_cancel_38_paper_1_p38_cuda(
-            faAxis,
+            faAxis_f,
             cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
             cfg,
-            p_38
+            p_38_f,
+            &p38_pre_trace_f
         )) return false;
+        p_38 = p_38_f;
+        p38_pre_trace.assign(p38_pre_trace_f.begin(), p38_pre_trace_f.end());
 
         // 计算用于 CFAR 的 phase_map（GPU 生成，避免回传大矩阵）
         if (!cuda_download_phase_map(phase_map, Na * Nr)) return false;
+        if (!cuda_download_sync(F1_pre, F2_pre, Na * Nr)) {
+            return false;
+        }
 
         // 对消
         cuda_stage_align_async(skipInt_theory, Na, Nr);
@@ -1138,11 +1208,15 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
          DBG("最终对齐完成，使用移位脉冲数: " << skipInt_theory);
 
         // --- 8) 最终 CSI 对消 ---
+        std::array<float, 2> p_38_csi_f;
+        std::vector<float> ph_trace_f;
+        std::vector<float> fa_cut_f;
+        std::vector<std::complex<float>> F1_r_f;
         if (!clutter_cancel_38_paper_1_cuda(
-            faAxis,
+            faAxis_f,
             cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
             cfg,
-            F1_r, p_38_csi, ph_trace, fa_cut
+            F1_r_f, p_38_csi_f, ph_trace_f, fa_cut_f
         )) return false;
     }
 
@@ -1151,6 +1225,7 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     bool targetDetection = false;
     const int band_st = std::max(0, std::min(az_st, effectivePulseNum(cfg) - 1));
     const int band_ed = std::max(0, std::min(az_ed, effectivePulseNum(cfg) - 1));
+    std::vector<int> prow_new, pcol_new;
     {
         gmti::runtime::TimingScope timing_detection("detection", 0, timing_beam_extra);
         std::vector<int> prow, pcol;
@@ -1161,19 +1236,15 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         bool cfarSuccess2 = false;
 
         std::vector<std::complex<float>> CSI_out;
-        cfarSuccess1 = dpca_cfar2_fast_cuda(CSI_out, band_st, band_ed, cfg.pf, c_num, cfar_bnum, "GO", cfg, mydata);
+        cfarSuccess1 = dpca_cfar2_fast_cuda(CSI_out, band_st, band_ed, cfg.pf, c_num, cfar_bnum, "GO", cfg, mydata, &power_map);
         if (!cfarSuccess1)
         {
             std::cerr << "GPU CFAR 处理失败，尝试回退到 CPU 路径。" << std::endl;
             // CPU 回退路径：需要回传 F1/F2
             std::vector<std::complex<float>> F1_f, F2_f;
             cuda_download_sync(F1_f, F2_f, Na * Nr);
-            F1.resize(F1_f.size());
-            F2.resize(F2_f.size());
-            for (size_t i = 0; i < F1_f.size(); ++i) {
-                F1[i] = std::complex<double>(F1_f[i].real(), F1_f[i].imag());
-                F2[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
-            }
+            convertFloatComplexToDouble(F1_f, F1);
+            convertFloatComplexToDouble(F2_f, F2);
             if (!cuda_download_csi_sync(CSI_out, Na * Nr))
             {
                 std::cerr << "CSI 回传失败。" << std::endl;
@@ -1192,9 +1263,11 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
                 }
             }
             std::vector<double> mydata_d;
-            cfarSuccess2 = dpca_cfar2_fast(detect_data, cfg.pf, c_num, cfar_bnum, "GO", cfg, mydata_d, prow, pcol);
+            std::vector<float> power_map_d;
+            cfarSuccess2 = dpca_cfar2_fast(detect_data, cfg.pf, c_num, cfar_bnum, "GO", cfg, mydata_d, prow, pcol, &power_map_d);
             if (cfarSuccess2) {
                 mydata.assign(mydata_d.begin(), mydata_d.end());
+                power_map.assign(power_map_d.begin(), power_map_d.end());
             }
             if (cfarSuccess2) {
                 DBG("合成检测数据完成(CPU)：杂波带内[" << band_st << ":" << band_ed << "]用CSI_out，带外用F2");
@@ -1206,7 +1279,6 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         }
 
         // --- 11) 聚类滤波 ---
-        std::vector<int> prow_new, pcol_new;
         std::vector<float> refined_mydata;
         std::vector<float> phase_std_list;
         // cluster_filter(mydata, cfg.min_points, cfg, refined_mydata, prow_new, pcol_new);
@@ -1276,17 +1348,81 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         {
             std::vector<std::complex<float>> F1_f, F2_f;
             cuda_download_sync(F1_f, F2_f, Na * Nr);
-            F1.resize(F1_f.size());
-            F2.resize(F2_f.size());
-            for (size_t i = 0; i < F1_f.size(); ++i) {
-                F1[i] = std::complex<double>(F1_f[i].real(), F1_f[i].imag());
-                F2[i] = std::complex<double>(F2_f[i].real(), F2_f[i].imag());
-            }
+            convertFloatComplexToDouble(F1_f, F1);
+            convertFloatComplexToDouble(F2_f, F2);
             targetDetection = target_select(F1, F2, prow_new, pcol_new, cfg, targetSel);
         }
     }
 
-    double ref_phase = faAxis[az_center] * p_38[0] + p_38[1];
+    std::vector<double> p38_pre_row_fa;
+    p38_pre_row_fa.reserve(static_cast<size_t>(std::max(0, az_ed - az_st + 1)));
+    for (int r = az_st; r <= az_ed && r >= 0 && r < static_cast<int>(faAxis.size()); ++r) {
+        p38_pre_row_fa.push_back(faAxis[static_cast<size_t>(r)]);
+    }
+    std::array<double, 2> p_38_eval{{static_cast<double>(p_38[0]), static_cast<double>(p_38[1])}};
+    P38StageMetrics p38_pre_metrics = evaluateP38FitMetrics(p38_pre_trace, p38_pre_row_fa, p_38_eval);
+
+    std::array<float, 2> p38_used = p_38;
+    std::string p38_used_source = "pre";
+    P38StageMetrics p38_refit_metrics;
+    if (cfg.p38_refit_enable && !power_map.empty() && !F1_pre.empty() && F1_pre.size() == F2_pre.size()) {
+            std::array<float, 2> p38_refit_candidate = {static_cast<float>(p_38[0]), static_cast<float>(p_38[1])};
+            auto estimate_p38 = [this](const std::vector<double> &fa_axis,
+                                       const std::vector<std::complex<float>> &F1_masked,
+                                       const std::vector<std::complex<float>> &F2_masked,
+                                       int az_st_local,
+                                       int rg_st_local,
+                                       int az_ed_local,
+                                       int rg_ed_local,
+                                       const Config &cfg_local,
+                                       std::vector<std::complex<float>> &prosig_38,
+                                       std::array<float, 2> &p38_out,
+                                       std::vector<double> &phase_samples,
+                                       std::vector<double> &row_samples) -> bool {
+                std::vector<float> fa_axis_f(fa_axis.begin(), fa_axis.end());
+                std::vector<float> phase_samples_f;
+                std::vector<float> row_samples_f;
+                const bool ok = this->clutter_cancel_38_paper_1(
+                    fa_axis_f,
+                    F1_masked,
+                    F2_masked,
+                    az_st_local, rg_st_local, az_ed_local, rg_ed_local,
+                    cfg_local,
+                    prosig_38,
+                    p38_out,
+                    phase_samples_f,
+                    row_samples_f);
+                phase_samples.assign(phase_samples_f.begin(), phase_samples_f.end());
+                row_samples.assign(row_samples_f.begin(), row_samples_f.end());
+                return ok;
+            };
+            p38_refit_metrics = refitP38WithMask(cfg,
+                                             faAxis, F1_pre, F2_pre,
+                                             az_st, rg_st, az_ed, rg_ed,
+                                             prow_new, pcol_new,
+                                             targetSel.prow, targetSel.pcol,
+                                             phase_map, power_map,
+                                             estimate_p38,
+                                             p38_refit_candidate,
+                                             &p38_refit_trace);
+        p_38_refit = p38_refit_candidate;
+        const double delta_k = std::abs(static_cast<double>(p38_refit_candidate[0]) - p_38[0]);
+        const double delta_b = std::abs(wrapPiLocal(static_cast<double>(p38_refit_candidate[1]) - p_38[1]));
+        const bool refit_valid = p38_refit_metrics.valid &&
+                                 p38_refit_metrics.sample_count >= std::max(0, cfg.p38_refit_min_sample_count) &&
+                                 p38_refit_metrics.inlier_ratio >= cfg.p38_refit_min_inlier_ratio &&
+                                 p38_refit_metrics.rmse <= cfg.p38_refit_max_rmse_rad &&
+                                 delta_k <= cfg.p38_refit_max_delta_k &&
+                                 delta_b <= cfg.p38_refit_max_delta_b_rad;
+        p38_refit_metrics.p38 = {p38_refit_candidate[0], p38_refit_candidate[1]};
+        p38_refit_metrics.valid = refit_valid;
+        if (refit_valid) {
+            p38_used = p38_refit_candidate;
+            p38_used_source = "refit";
+        }
+    }
+
+    double ref_phase = faAxis[az_center] * static_cast<double>(p38_used[0]) + static_cast<double>(p38_used[1]);
 
     auto deg2rad = [](double d)
     { return d * M_PI / 180.0; };
@@ -1308,9 +1444,10 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
     size_t n_output = 0;
 
     // 参考相位：ref_phase 已在外部给定
-    const double k = p_38[0]; // slope
-    const double b = p_38[1]; // intercept
-    DBG("多普勒斜率 k = " << k << ", 截距 b = " << b);
+    const double k = p38_used[0]; // slope
+    const double b = p38_used[1]; // intercept
+    DBG("多普勒斜率 k = " << k << ", 截距 b = " << b
+        << " p38_used_source=" << p38_used_source);
     const double thetaRot = plane.V_angle; // 度
     DBG("旋转角 thetaRot = " << thetaRot << " 度");
     const double cosT = std::abs(gmti::trig_lut::cos(deg2rad(thetaRot)));
@@ -1347,8 +1484,13 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
             : std::numeric_limits<double>::quiet_NaN();
         const double af_phase_legacy = (std::abs(k) < 1e-12) ? 0.0 : ((dphi - b) / k);
         const double af_total = cfg.motion_comp_use_row_doppler ? af_row : af_phase_legacy;
+        const MotionCompResult motion_pre =
+            solveMotionCompensation(cfg, plane, dphi, af_total, p_38[0], p_38[1], cfg.lambda, theta_deg);
+        const MotionCompResult motion_refit =
+            solveMotionCompensation(cfg, plane, dphi, af_total,
+                                    p38_refit_metrics.p38[0], p38_refit_metrics.p38[1], cfg.lambda, theta_deg);
         const MotionCompResult motion =
-            compensateTargetMotionDoppler(cfg, plane, dphi, af_total, k, b, cfg.lambda, theta_deg);
+            (p38_used_source == "refit") ? motion_refit : motion_pre;
         af_ransac[i] = motion.af_phase;
 
         // row_af(i) = round((af_ransac - faAxis(1)) / fd_res) + 1
@@ -1384,9 +1526,15 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         const bool use_comp_loc = cfg.motion_comp_enable && motion.ok;
         const double sinA = use_comp_loc ? sinA_comp : sinA_old;
         const char *loc_used_mode = use_comp_loc ? "comp" : "old";
+        const std::string requested_solver = normalizeMotionCompSolver(cfg.motion_comp_solver);
         const char *motion_comp_status = !cfg.motion_comp_enable ? "disabled"
-            : (comp_valid ? "analytic_valid"
-                          : (motion.fallback_legacy ? "analytic_fallback_old" : "analytic_invalid"));
+            : (requested_solver == "debug"
+                   ? (comp_valid ? "debug_analytic_valid"
+                                 : (motion.fallback_legacy ? "debug_analytic_fallback_old"
+                                                           : "debug_analytic_invalid"))
+                   : (comp_valid ? "analytic_valid"
+                                 : (motion.fallback_legacy ? "analytic_fallback_old"
+                                                           : "analytic_invalid")));
         const bool used_valid = use_comp_loc ? comp_valid : old_valid;
         if (!used_valid) {
             DBG("目标 " << i << " 当前定位方法 sinA 无效，剔除"
@@ -1404,34 +1552,29 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
             continue;
         }
         const double Rg = cfg.Rg[static_cast<size_t>(c)];
-        const double py = Rg * sinA;
-
         const double dz = (plane.H - cfg.MT_nowz);
-        const double px2 = Rg * Rg - py * py - dz * dz;
-        if (px2 < 0.0) {
-            continue;
-            DBG("目标 " << i << " 几何解算失败 (虚数根 px2 < 0): " << px2);
-        }
-        const double px = (px2 > 0.0) ? std::sqrt(px2) : 0.0; // 物理约束，负值置 0
+        gmti::sim_geometry::Stage2GeometryConfig geom_cfg;
+        geom_cfg.squint_side = cfg.squint_side;
+        const double ground_range = gmti::sim_geometry::slantRangeToGroundRange(Rg, plane.H, cfg.MT_nowz, geom_cfg);
 
-        double xP, yP;
-
-        rotation_xy(py, px, flag, cosT, sinT, xP, yP);
-
-        xP += plane.E;
-        yP += plane.N;
+        double theta_used_deg = std::numeric_limits<double>::quiet_NaN();
+        double look_from_sinA_e = std::numeric_limits<double>::quiet_NaN();
+        double look_from_sinA_n = std::numeric_limits<double>::quiet_NaN();
+        double xP = std::numeric_limits<double>::quiet_NaN();
+        double yP = std::numeric_limits<double>::quiet_NaN();
+        project_position_from_sinA_local(plane, cfg, ground_range, sinA,
+                                         theta_used_deg, look_from_sinA_e, look_from_sinA_n,
+                                         xP, yP);
 
         double oldXP = std::numeric_limits<double>::quiet_NaN();
         double oldYP = std::numeric_limits<double>::quiet_NaN();
+        double theta_old_used_deg = std::numeric_limits<double>::quiet_NaN();
+        double look_old_e = std::numeric_limits<double>::quiet_NaN();
+        double look_old_n = std::numeric_limits<double>::quiet_NaN();
         if (std::isfinite(sinA_old) && std::abs(sinA_old) <= 1.0) {
-            const double py_old = Rg * sinA_old;
-            const double px2_old = Rg * Rg - py_old * py_old - dz * dz;
-            if (px2_old >= 0.0) {
-                const double px_old = (px2_old > 0.0) ? std::sqrt(px2_old) : 0.0;
-                rotation_xy(py_old, px_old, flag, cosT, sinT, oldXP, oldYP);
-                oldXP += plane.E;
-                oldYP += plane.N;
-            }
+            project_position_from_sinA_local(plane, cfg, ground_range, sinA_old,
+                                             theta_old_used_deg, look_old_e, look_old_n,
+                                             oldXP, oldYP);
         }
 
         double lat = 0.0, lng = 0.0;               // 由投影坐标反解经纬
@@ -1468,6 +1611,13 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         GMTIOutput::DetectionCsvRecord rec;
         rec.period_id = 0;
         rec.beam_id = periodIdx;
+        rec.platform_e = plane.E;
+        rec.platform_n = plane.N;
+        rec.platform_h = plane.H;
+        rec.platform_v = plane.V;
+        rec.platform_v_angle_deg = plane.V_angle;
+        rec.fd_ctr_wrapped = fa_ctr;
+        rec.fd_ctr_unwrapped = fa_ctr;
         rec.range_bin = c;
         rec.row = r;
         rec.col = c;
@@ -1483,6 +1633,10 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         rec.phase_rad = dphi;
         rec.p38_k = motion.k;
         rec.p38_b = motion.b;
+        rec.phi_static_model_rad = motion.phi_static_model;
+        rec.phi_static_model_name = motion.phi_static_model_name;
+        rec.C_ati = motion.C_ati;
+        rec.k_eff_static_phase_df = motion.k_eff_static_phase_df;
         rec.phi_static_rad = motion.phi_static;
         rec.phi_static_total_rad = motion.phi_static_total;
         rec.phi_res_rad = motion.phi_res;
@@ -1499,9 +1653,42 @@ bool GMTIProcessor::processOnePeriod(int periodIdx, const Config &cfg_, const st
         rec.denom_without_k = motion.denom_without_k;
         rec.v_from_phase_raw = motion.v_from_phase_raw;
         rec.v_from_phi_res = motion.v_from_phi_res;
+        rec.v_old_mps = motion.v_old_mps;
+        rec.v_iterative_mps = motion.v_iterative_mps;
+        rec.v_analytic_mps = motion.v_analytic_mps;
+        rec.v_root1d_mps = motion.v_root1d_mps;
+        rec.af_geometry_old_hz = motion.af_geometry_old_hz;
+        rec.af_geometry_iterative_hz = motion.af_geometry_iterative_hz;
+        rec.af_geometry_analytic_hz = motion.af_geometry_analytic_hz;
+        rec.af_geometry_root1d_hz = motion.af_geometry_root1d_hz;
+        rec.root1d_cost = motion.root1d_cost;
+        rec.p38_pre_k = p_38[0];
+        rec.p38_pre_b = p_38[1];
+        rec.p38_pre_rmse = p38_pre_metrics.rmse;
+        rec.p38_refit_k = p38_refit_metrics.p38[0];
+        rec.p38_refit_b = p38_refit_metrics.p38[1];
+        rec.p38_refit_rmse = p38_refit_metrics.rmse;
+        rec.p38_refit_sample_count = p38_refit_metrics.sample_count;
+        rec.p38_refit_inlier_ratio = p38_refit_metrics.inlier_ratio;
+        rec.p38_refit_valid = p38_refit_metrics.valid ? 1 : 0;
+        rec.p38_used_k = p38_used[0];
+        rec.p38_used_b = p38_used[1];
+        rec.p38_used_source = p38_used_source;
+        rec.phi_static_pre_rad = motion_pre.phi_static_total;
+        rec.phi_res_pre_rad = motion_pre.phi_res;
+        rec.v_pre_mps = motion_pre.v_radial;
+        rec.phi_static_refit_rad = motion_refit.phi_static_total;
+        rec.phi_res_refit_rad = motion_refit.phi_res;
+        rec.v_refit_mps = motion_refit.v_radial;
         rec.sinA_old = sinA_old;
         rec.sinA_comp = sinA_comp;
         rec.sinA_used = sinA;
+        rec.angle_from_sinA_deg = gmti::trig_lut::asin(clamp_unit_local(sinA)) * 180.0 / M_PI;
+        rec.theta_used_for_position_deg = theta_used_deg;
+        rec.look_from_sinA_e = look_from_sinA_e;
+        rec.look_from_sinA_n = look_from_sinA_n;
+        rec.look_e_diff = look_from_sinA_e - ((ground_range > 1.0e-9) ? (xP - plane.E) / ground_range : 0.0);
+        rec.look_n_diff = look_from_sinA_n - ((ground_range > 1.0e-9) ? (yP - plane.N) / ground_range : 0.0);
         rec.old_e = oldXP;
         rec.old_n = oldYP;
         rec.new_e = xP;
@@ -1782,8 +1969,14 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     const size_t Na = static_cast<size_t>(effectivePulseNum(cfg));
     const size_t Nr = static_cast<size_t>(cfg.rg_len);
     FusionBeamMeta beamMeta;
-    std::array<double, 2> p_38;
+    std::array<float, 2> p_38;
+    std::array<float, 2> p_38_refit;
     std::vector<float> phase_map;
+    std::vector<float> power_map;
+    std::vector<double> p38_pre_trace;
+    std::vector<double> p38_refit_trace;
+    std::vector<std::complex<float>> F1_pre;
+    std::vector<std::complex<float>> F2_pre;
     {
         gmti::runtime::TimingScope timing_channel_cancellation("channel_cancellation", 0, timing_beam_extra);
         if (!data_on_gpu) {
@@ -1826,15 +2019,24 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
         }
         cuda_apply_rg_correction_async(phi_fit, Na, Nr);
 
+        std::vector<float> faAxis_f(faAxis.begin(), faAxis.end());
+        std::array<float, 2> p_38_f;
+        std::vector<float> p38_pre_trace_f;
         if (!clutter_cancel_38_paper_1_p38_cuda(
-                faAxis,
+                faAxis_f,
                 cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
                 cfg,
-                p_38)) {
+                p_38_f,
+                &p38_pre_trace_f)) {
             return false;
         }
+        p_38 = {p_38_f[0], p_38_f[1]};
+        p38_pre_trace.assign(p38_pre_trace_f.begin(), p38_pre_trace_f.end());
 
         if (!cuda_download_phase_map(phase_map, Na * Nr)) {
+            return false;
+        }
+        if (!cuda_download_sync(F1_pre, F2_pre, Na * Nr)) {
             return false;
         }
 
@@ -1852,15 +2054,15 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
         }
         cuda_apply_rg_correction_async(phi_fit, Na, Nr);
 
-        std::array<double, 2> p_38_csi;
-        std::vector<double> ph_trace;
-        std::vector<double> fa_cut;
-        std::vector<std::complex<double>> csi_trace;
+        std::array<float, 2> p_38_csi_f;
+        std::vector<float> ph_trace_f;
+        std::vector<float> fa_cut_f;
+        std::vector<std::complex<float>> csi_trace_f;
         if (!clutter_cancel_38_paper_1_cuda(
-                faAxis,
+                faAxis_f,
                 cfg.az_st, cfg.rg_st, cfg.az_ed, cfg.rg_ed,
                 cfg,
-                csi_trace, p_38_csi, ph_trace, fa_cut)) {
+                csi_trace_f, p_38_csi_f, ph_trace_f, fa_cut_f)) {
             return false;
         }
     }
@@ -1876,7 +2078,7 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
         std::vector<float> mydata;
         std::vector<std::complex<float>> CSI_out;
         bool cfar_ok = dpca_cfar2_fast_cuda(CSI_out, band_st, band_ed,
-                                            cfg.pf, 4, 16, "GO", cfg, mydata);
+                                            cfg.pf, 4, 16, "GO", cfg, mydata, &power_map);
         if (!cfar_ok) {
             std::vector<std::complex<float>> F1_f, F2_f;
             if (!cuda_download_sync(F1_f, F2_f, Na * Nr)) {
@@ -1902,10 +2104,12 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
 
             std::vector<double> mydata_d;
             std::vector<int> prow_cpu, pcol_cpu;
+            std::vector<float> power_map_d;
             cfar_ok = dpca_cfar2_fast(detect_data, cfg.pf, 4, 16, "GO",
-                                      cfg, mydata_d, prow_cpu, pcol_cpu);
+                                      cfg, mydata_d, prow_cpu, pcol_cpu, &power_map_d);
             if (cfar_ok) {
                 mydata.assign(mydata_d.begin(), mydata_d.end());
+                power_map.assign(power_map_d.begin(), power_map_d.end());
             }
         }
         if (!cfar_ok) {
@@ -1962,15 +2166,95 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
     //           << " pf=" << cfg.pf << std::endl;
     (void)cfar_hits;
 
-    beamMeta.phase_slope = p_38[0];
-    beamMeta.phase_intercept = p_38[1];
+    std::vector<double> p38_pre_row_fa;
+    p38_pre_row_fa.reserve(static_cast<size_t>(std::max(0, az_ed - az_st + 1)));
+    for (int r = az_st; r <= az_ed && r >= 0 && r < static_cast<int>(faAxis.size()); ++r) {
+        p38_pre_row_fa.push_back(faAxis[static_cast<size_t>(r)]);
+    }
+    std::array<double, 2> p_38_eval{{static_cast<double>(p_38[0]), static_cast<double>(p_38[1])}};
+    P38StageMetrics p38_pre_metrics = evaluateP38FitMetrics(p38_pre_trace, p38_pre_row_fa, p_38_eval);
+
+    std::array<float, 2> p38_used = p_38;
+    std::string p38_used_source = "pre";
+    P38StageMetrics p38_refit_metrics;
+    if (cfg.p38_refit_enable && !power_map.empty() && !F1_pre.empty() && F1_pre.size() == F2_pre.size()) {
+        std::array<float, 2> p38_refit_candidate = p_38;
+        auto estimate_p38 = [this](const std::vector<double> &fa_axis,
+                                   const std::vector<std::complex<float>> &F1_masked,
+                                   const std::vector<std::complex<float>> &F2_masked,
+                                   int az_st_local,
+                                   int rg_st_local,
+                                   int az_ed_local,
+                                   int rg_ed_local,
+                                   const Config &cfg_local,
+                                   std::vector<std::complex<float>> &prosig_38,
+                                   std::array<float, 2> &p38_out,
+                                   std::vector<double> &phase_samples,
+                                   std::vector<double> &row_samples) -> bool {
+            std::vector<float> fa_axis_f(fa_axis.begin(), fa_axis.end());
+            std::vector<float> phase_samples_f;
+            std::vector<float> row_samples_f;
+            const bool ok = this->clutter_cancel_38_paper_1(
+                fa_axis_f,
+                F1_masked,
+                F2_masked,
+                az_st_local, rg_st_local, az_ed_local, rg_ed_local,
+                cfg_local,
+                prosig_38,
+                p38_out,
+                phase_samples_f,
+                row_samples_f);
+            phase_samples.assign(phase_samples_f.begin(), phase_samples_f.end());
+            row_samples.assign(row_samples_f.begin(), row_samples_f.end());
+            return ok;
+        };
+        p38_refit_metrics = refitP38WithMask(cfg,
+                                             faAxis, F1_pre, F2_pre,
+                                             az_st, rg_st, az_ed, rg_ed,
+                                             prow_new, pcol_new,
+                                             targetSel.prow, targetSel.pcol,
+                                             phase_map, power_map,
+                                             estimate_p38,
+                                             p38_refit_candidate,
+                                             &p38_refit_trace);
+        p_38_refit = p38_refit_candidate;
+        const double delta_k = std::abs(static_cast<double>(p38_refit_candidate[0] - p_38[0]));
+        const double delta_b = std::abs(wrapPiLocal(static_cast<double>(p38_refit_candidate[1] - p_38[1])));
+        const bool refit_valid = p38_refit_metrics.valid &&
+                                 p38_refit_metrics.sample_count >= std::max(0, cfg.p38_refit_min_sample_count) &&
+                                 p38_refit_metrics.inlier_ratio >= cfg.p38_refit_min_inlier_ratio &&
+                                 p38_refit_metrics.rmse <= cfg.p38_refit_max_rmse_rad &&
+                                 delta_k <= cfg.p38_refit_max_delta_k &&
+                                 delta_b <= cfg.p38_refit_max_delta_b_rad;
+        p38_refit_metrics.p38 = {p38_refit_candidate[0], p38_refit_candidate[1]};
+        p38_refit_metrics.valid = refit_valid;
+        if (refit_valid) {
+            p38_used = p38_refit_candidate;
+            p38_used_source = "refit";
+        }
+    }
+
+    beamMeta.phase_slope = p38_used[0];
+    beamMeta.phase_intercept = p38_used[1];
     beamMeta.az_center = az_center;
+    beamMeta.p38_pre_k = p_38[0];
+    beamMeta.p38_pre_b = p_38[1];
+    beamMeta.p38_pre_rmse = p38_pre_metrics.rmse;
+    beamMeta.p38_refit_k = p38_refit_metrics.p38[0];
+    beamMeta.p38_refit_b = p38_refit_metrics.p38[1];
+    beamMeta.p38_refit_rmse = p38_refit_metrics.rmse;
+    beamMeta.p38_refit_sample_count = p38_refit_metrics.sample_count;
+    beamMeta.p38_refit_inlier_ratio = p38_refit_metrics.inlier_ratio;
+    beamMeta.p38_refit_valid = p38_refit_metrics.valid ? 1 : 0;
+    beamMeta.p38_used_k = p38_used[0];
+    beamMeta.p38_used_b = p38_used[1];
+    beamMeta.p38_used_source = p38_used_source;
 
     if (slot < ctx.detections.size()) {
         auto &raw = ctx.detections[slot];
         raw.clear();
         raw.reserve(targetSel.prow.size());
-        const double ref_phase = faAxis[static_cast<size_t>(az_center)] * p_38[0] + p_38[1];
+        const double ref_phase = faAxis[static_cast<size_t>(az_center)] * p38_used[0] + p38_used[1];
         for (size_t i = 0; i < targetSel.prow.size(); ++i) {
             const int r = targetSel.prow[i];
             const int c = targetSel.pcol[i];
@@ -1988,12 +2272,12 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
             }
             dphi = ref_phase + diff;
 
-            const double af_wrapped = (std::abs(p_38[0]) < 1e-12)
+            const double af_wrapped = (std::abs(p38_used[0]) < 1e-12)
                 ? ((r < static_cast<int>(faAxis.size())) ? faAxis[static_cast<size_t>(r)] : fa_ctr)
-                : ((dphi - p_38[1]) / p_38[0]);
-            const double af_phase = (std::abs(p_38[0]) < 1e-12)
+                : ((dphi - p38_used[1]) / p38_used[0]);
+            const double af_phase = (std::abs(p38_used[0]) < 1e-12)
                 ? 0.0
-                : ((dphi - p_38[1]) / p_38[0]);
+                : ((dphi - p38_used[1]) / p38_used[0]);
             const double af_total = (r >= 0 && r < static_cast<int>(faAxis.size()))
                 ? faAxis[static_cast<size_t>(r)]
                 : af_wrapped;
@@ -2011,7 +2295,10 @@ bool GMTIProcessor::processOnePeriodFusionCache(int periodIdx,
             d.af_total = af_total;
             d.af_geometry = af_phase;
             d.phase = dphi;
-            d.amplitude = (i < refined_mydata.size()) ? static_cast<double>(refined_mydata[i]) : 0.0;
+            const double det_power = (off < power_map.size())
+                ? static_cast<double>(power_map[off])
+                : ((off < refined_mydata.size()) ? static_cast<double>(refined_mydata[off]) : 0.0);
+            d.amplitude = det_power > 0.0 ? std::sqrt(det_power) : 0.0;
             d.utc_mid = beamMeta.utc_mid;
             raw.push_back(d);
         }

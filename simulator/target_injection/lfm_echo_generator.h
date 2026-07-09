@@ -59,11 +59,18 @@ struct PulseTruth {
     std::string geometry_config_name;
     double moving_target_speed_mps = std::numeric_limits<double>::quiet_NaN();
     double rcs_db = std::numeric_limits<double>::quiet_NaN();
+    double snr_db = std::numeric_limits<double>::quiet_NaN();
     double target_ve_mps = std::numeric_limits<double>::quiet_NaN();
     double target_vn_mps = std::numeric_limits<double>::quiet_NaN();
     double target_vr_self_mps = std::numeric_limits<double>::quiet_NaN();
     double target_vt_self_mps = std::numeric_limits<double>::quiet_NaN();
     double af_motion_truth_hz = std::numeric_limits<double>::quiet_NaN();
+    double af_geometry_truth_hz = std::numeric_limits<double>::quiet_NaN();
+    double af_total_truth_hz = std::numeric_limits<double>::quiet_NaN();
+    double phi_total_truth_rad = std::numeric_limits<double>::quiet_NaN();
+    double phi_static_truth_rad = std::numeric_limits<double>::quiet_NaN();
+    double phi_motion_truth_rad = std::numeric_limits<double>::quiet_NaN();
+    int row_truth = -1;
 };
 
 struct InjectionStats {

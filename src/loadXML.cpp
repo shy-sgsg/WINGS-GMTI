@@ -310,6 +310,22 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     cfg.channel_mode = getRequiredText("isSeparated");
     cfg.INFO_Type = parseRequiredInt("INFO_Type");
     cfg.iq_compose = getOptionalText("iq_compose");
+    cfg.iq_data_type = getOptionalText("iq_data_type");
+    if (cfg.iq_data_type.empty()) {
+        cfg.iq_data_type = "float32";
+    }
+    cfg.new_protocol_channel_count = parseOptionalInt("new_protocol_channel_count", cfg.new_protocol_channel_count);
+    cfg.new_protocol_read_channel_1 = parseOptionalInt("new_protocol_read_channel_1", cfg.new_protocol_read_channel_1);
+    cfg.new_protocol_read_channel_2 = parseOptionalInt("new_protocol_read_channel_2", cfg.new_protocol_read_channel_2);
+    if (cfg.new_protocol_channel_count < 1) {
+        throw std::runtime_error("field <new_protocol_channel_count> must be >= 1");
+    }
+    if (cfg.new_protocol_read_channel_1 < 1 ||
+        cfg.new_protocol_read_channel_1 > cfg.new_protocol_channel_count ||
+        cfg.new_protocol_read_channel_2 < 1 ||
+        cfg.new_protocol_read_channel_2 > cfg.new_protocol_channel_count) {
+        throw std::runtime_error("new_protocol_read_channel_1/2 must be within [1, new_protocol_channel_count]");
+    }
 
     // 解析数字字段并填充到结构体中
     cfg.isPC = parseRequiredInt("isPC");
@@ -514,7 +530,34 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
         parseOptionalBool("motion_comp_analytic_enable", cfg.motion_comp_analytic_enable);
     cfg.motion_comp_use_row_doppler =
         parseOptionalBool("motion_comp_use_row_doppler", cfg.motion_comp_use_row_doppler);
+    {
+        const std::string motion_comp_solver = getOptionalText("motion_comp_solver");
+        if (!motion_comp_solver.empty()) {
+            cfg.motion_comp_solver = motion_comp_solver;
+        } else {
+            cfg.motion_comp_solver = cfg.motion_comp_analytic_enable ? "analytic" : "old";
+        }
+    }
     cfg.motion_comp_iter = parseOptionalInt("motion_comp_iter", cfg.motion_comp_iter);
+    cfg.motion_comp_iter_tol_mps =
+        parseOptionalDouble("motion_comp_iter_tol_mps", cfg.motion_comp_iter_tol_mps);
+    cfg.p38_refit_enable = parseOptionalBool("p38_refit_enable", cfg.p38_refit_enable);
+    cfg.p38_refit_row_guard_bins =
+        parseOptionalInt("p38_refit_row_guard_bins", cfg.p38_refit_row_guard_bins);
+    cfg.p38_refit_range_guard_bins =
+        parseOptionalInt("p38_refit_range_guard_bins", cfg.p38_refit_range_guard_bins);
+    cfg.p38_refit_top_power_frac =
+        parseOptionalDouble("p38_refit_top_power_frac", cfg.p38_refit_top_power_frac);
+    cfg.p38_refit_min_sample_count =
+        parseOptionalInt("p38_refit_min_sample_count", cfg.p38_refit_min_sample_count);
+    cfg.p38_refit_min_inlier_ratio =
+        parseOptionalDouble("p38_refit_min_inlier_ratio", cfg.p38_refit_min_inlier_ratio);
+    cfg.p38_refit_max_rmse_rad =
+        parseOptionalDouble("p38_refit_max_rmse_rad", cfg.p38_refit_max_rmse_rad);
+    cfg.p38_refit_max_delta_k =
+        parseOptionalDouble("p38_refit_max_delta_k", cfg.p38_refit_max_delta_k);
+    cfg.p38_refit_max_delta_b_rad =
+        parseOptionalDouble("p38_refit_max_delta_b_rad", cfg.p38_refit_max_delta_b_rad);
     cfg.ati_velocity_sign = parseOptionalInt("ati_velocity_sign", cfg.ati_velocity_sign);
     cfg.ati_phase_to_velocity_sign = cfg.ati_velocity_sign;
     cfg.ati_phase_to_velocity_sign =
@@ -525,6 +568,10 @@ bool GMTIProcessor::readXmlParam(const std::string &xmlFile, Config &cfg)
     cfg.ati_vmax_mps = parseOptionalDouble("ati_vmax_mps", cfg.ati_vmax_mps);
     cfg.motion_comp_denom_min =
         parseOptionalDouble("motion_comp_denom_min", cfg.motion_comp_denom_min);
+    cfg.motion_comp_root_grid_step_mps =
+        parseOptionalDouble("motion_comp_root_grid_step_mps", cfg.motion_comp_root_grid_step_mps);
+    cfg.motion_comp_root_cost_max =
+        parseOptionalDouble("motion_comp_root_cost_max", cfg.motion_comp_root_cost_max);
     cfg.motion_comp_debug = parseOptionalBool("motion_comp_debug", cfg.motion_comp_debug);
     cfg.runtime_mode = parseOptionalString("runtime_mode", cfg.runtime_mode);
     std::transform(cfg.runtime_mode.begin(), cfg.runtime_mode.end(), cfg.runtime_mode.begin(),

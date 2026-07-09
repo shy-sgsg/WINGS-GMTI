@@ -220,6 +220,7 @@ set(COMMON_CORE_SRC
   src/extractUTC.cpp
   src/makeLists.cpp
   src/pesudoTarget_Gen.cpp
+  simulator/common/SimulationGeometry.cpp
   ${XML_SRC}
   ${GPU_CUDA_SRC}
   ${DBS_FUSION_SRC}

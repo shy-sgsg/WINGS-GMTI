@@ -16,6 +16,10 @@ struct RadarConfig {
     int pulse_len = 11820;
     int pulse_num = 130;
     int beam_count = 61;
+    std::string iq_data_type = "float32";
+    int new_protocol_channel_count = 2;
+    int new_protocol_read_channel_1 = 1;
+    int new_protocol_read_channel_2 = 2;
     int range_fft_len = 12288;
     int range_crop_start = 3864;
     int range_crop_len = 4096;
@@ -29,6 +33,7 @@ struct RadarConfig {
     double prf_hz = 1300.0;
     double sample_delay_sec = 488.0e-6;
     double d_chan_m = 0.17;
+    int motion_doppler_axis_sign = -1;
 };
 
 struct TargetGlobalConfig {
@@ -79,6 +84,8 @@ struct TargetConfig {
     double echo_delay_sample_center_used = 0.0;
     double override_speed_mps = std::numeric_limits<double>::quiet_NaN();
     double override_rcs_db = std::numeric_limits<double>::quiet_NaN();
+    double target_snr_db = std::numeric_limits<double>::quiet_NaN();
+    std::string visibility_mode;
     std::string velocity_mode;
     double target_ve_mps = std::numeric_limits<double>::quiet_NaN();
     double target_vn_mps = std::numeric_limits<double>::quiet_NaN();

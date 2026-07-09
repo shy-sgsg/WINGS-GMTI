@@ -115,6 +115,54 @@ LookVectorEN makeAlgorithmLookVectorEN(double platform_ve,
     return out;
 }
 
+LookVectorEN computeLookFromSinA(double sinA,
+                                 double platform_ve,
+                                 double platform_vn,
+                                 int look_side)
+{
+    LookVectorEN out;
+    if (!std::isfinite(sinA) ||
+        !std::isfinite(platform_ve) ||
+        !std::isfinite(platform_vn)) {
+        out.east = std::numeric_limits<double>::quiet_NaN();
+        out.north = std::numeric_limits<double>::quiet_NaN();
+        return out;
+    }
+
+    const double vnorm = std::sqrt(platform_ve * platform_ve + platform_vn * platform_vn);
+    if (!(vnorm > 1.0e-12)) {
+        out.east = std::numeric_limits<double>::quiet_NaN();
+        out.north = std::numeric_limits<double>::quiet_NaN();
+        return out;
+    }
+
+    const double along_e = platform_ve / vnorm;
+    const double along_n = platform_vn / vnorm;
+    const double left_e = -along_n;
+    const double left_n = along_e;
+    const double right_e = along_n;
+    const double right_n = -along_e;
+    const double cross = std::sqrt(std::max(0.0, 1.0 - sinA * sinA));
+    // Keep the mapping consistent with makeAlgorithmLookVectorEN():
+    // squint_side/look_side == 1 is left-looking, 0 is right-looking.
+    const bool use_left = (look_side == 1);
+    const double side_e = use_left ? left_e : right_e;
+    const double side_n = use_left ? left_n : right_n;
+
+    out.east = cross * side_e + sinA * along_e;
+    out.north = cross * side_n + sinA * along_n;
+
+    const double norm = std::sqrt(out.east * out.east + out.north * out.north);
+    if (norm > 1.0e-12) {
+        out.east /= norm;
+        out.north /= norm;
+    } else {
+        out.east = std::numeric_limits<double>::quiet_NaN();
+        out.north = std::numeric_limits<double>::quiet_NaN();
+    }
+    return out;
+}
+
 double slantRangeToGroundRange(double slant_range_m,
                                double platform_height_m,
                                double target_height_m,

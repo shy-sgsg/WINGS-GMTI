@@ -21,6 +21,18 @@ struct FusionBeamMeta {
     double phase_slope = 0.0;
     double phase_intercept = 0.0;
     int az_center = 0;
+    double p38_pre_k = std::numeric_limits<double>::quiet_NaN();
+    double p38_pre_b = std::numeric_limits<double>::quiet_NaN();
+    double p38_pre_rmse = std::numeric_limits<double>::quiet_NaN();
+    double p38_refit_k = std::numeric_limits<double>::quiet_NaN();
+    double p38_refit_b = std::numeric_limits<double>::quiet_NaN();
+    double p38_refit_rmse = std::numeric_limits<double>::quiet_NaN();
+    int p38_refit_sample_count = 0;
+    double p38_refit_inlier_ratio = std::numeric_limits<double>::quiet_NaN();
+    int p38_refit_valid = 0;
+    double p38_used_k = std::numeric_limits<double>::quiet_NaN();
+    double p38_used_b = std::numeric_limits<double>::quiet_NaN();
+    std::string p38_used_source;
 
     double utc_mid = 0.0;
     GMTIOutput::Plane plane;

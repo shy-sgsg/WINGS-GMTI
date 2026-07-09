@@ -48,10 +48,13 @@ bool writeStage2Report(const std::string &path,
     out << "## 场景配置\n\n";
     out << "- scene_mode: " << opt.scene_mode << "\n";
     out << "- random_seed: " << cfg.sim.random_seed << "\n";
+    out << "- area_model: " << cfg.scene.area.model << "\n";
     out << "- area_scatterers: " << area << "\n";
     out << "- strong_scatterers: " << strong << "\n";
     out << "- line_scatterers: " << line << "\n";
     out << "- single_or_other_scatterers: " << single << "\n";
+    out << "- continuous_area_packets: " << stats.continuous_area_packets << "\n";
+    out << "- continuous_area_samples: " << stats.continuous_area_samples << "\n";
     out << "- thermal_noise_enabled: " << (cfg.scene.noise.enabled ? "true" : "false") << "\n";
     out << "- thermal_noise_power: " << cfg.scene.noise.noise_power << "\n";
     out << "- target_enabled: " << (opt.target_enabled && cfg.target.enabled ? "true" : "false") << "\n\n";

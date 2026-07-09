@@ -1,9 +1,11 @@
 #include "dbs/DbsFusion.hpp"
 #include "dbs/DbsStitcher.hpp"
+#include "../simulator/common/SimulationGeometry.h"
 #include "rotation_xy.hpp"
 #include "unwrap_fd.hpp"
 #include "motion_comp.hpp"
 #include "trig_lut.hpp"
+#include "p38_refit_utils.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -87,6 +89,52 @@ static int flight_flag_by_sign_local(double vE, double vN, double eps = 1e-6)
         return (sE > 0) ? 2 : 1;
     }
     return 0;
+}
+
+static inline double clamp_unit_local(double v)
+{
+    if (!std::isfinite(v)) {
+        return v;
+    }
+    return std::max(-1.0, std::min(1.0, v));
+}
+
+static inline double theta_from_sinA_deg_local(double sinA)
+{
+    if (!std::isfinite(sinA)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return -gmti::trig_lut::asin(clamp_unit_local(sinA)) * 180.0 / M_PI;
+}
+
+static inline void project_position_from_sinA_local(const GMTIOutput::Plane &plane,
+                                                    const Config &cfg,
+                                                    double range_m,
+                                                    double sinA,
+                                                    double &theta_used_deg,
+                                                    double &look_e,
+                                                    double &look_n,
+                                                    double &e,
+                                                    double &n)
+{
+    if (!std::isfinite(sinA) || !std::isfinite(range_m) || !(range_m > 0.0)) {
+        look_e = std::numeric_limits<double>::quiet_NaN();
+        look_n = std::numeric_limits<double>::quiet_NaN();
+        e = std::numeric_limits<double>::quiet_NaN();
+        n = std::numeric_limits<double>::quiet_NaN();
+        theta_used_deg = std::numeric_limits<double>::quiet_NaN();
+        return;
+    }
+
+    const double vE = plane.V * gmti::trig_lut::cos(plane.V_angle * M_PI / 180.0);
+    const double vN = plane.V * gmti::trig_lut::sin(plane.V_angle * M_PI / 180.0);
+    const gmti::sim_geometry::LookVectorEN look =
+        gmti::sim_geometry::computeLookFromSinA(sinA, vE, vN, cfg.squint_side);
+    look_e = look.east;
+    look_n = look.north;
+    theta_used_deg = gmti::trig_lut::atan2(look_n, look_e) * 180.0 / M_PI;
+    e = plane.E + range_m * look_e;
+    n = plane.N + range_m * look_n;
 }
 
 static inline double normalize_azimuth_deg(double angleDeg)
@@ -397,10 +445,12 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
                      "motion_doppler_axis_sign,ati_phase_to_velocity_sign,"
                      "phi_static_total_rad,phi_static_at_zero,phi_res_at_zero,phi_res_rad,"
                      "phi_static_geometry_rad,phi_motion,delta_t_s,denom,"
-                     "denom_without_k,v_from_phase_raw,v_from_phi_res,motion_comp_valid,"
+                     "denom_without_k,v_from_phase_raw,v_from_phi_res,v_old_mps,"
+                     "motion_comp_valid,"
                      "motion_comp_enable,motion_comp_used,motion_comp_fallback,"
                      "sinA_old,sinA_comp,sinA_used,old_valid,comp_valid,"
                      "old_invalid_comp_valid,loc_used_mode,motion_comp_status,motion_comp_solver,"
+                     "af_geometry_old_hz,"
                      "px,py,ground_range_m,"
                      "look_e_used,look_n_used,direct_localized_e,direct_localized_n,"
                      "fused_localized_e,fused_localized_n,final_output_e,final_output_n,"
@@ -465,10 +515,14 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
             const double motionAfTotal = cfg.motion_comp_use_row_doppler
                 ? (d.af_total + faShift)
                 : legacyAf;
+            MotionCompResult motion_pre =
+                solveMotionCompensation(cfg, m.plane, d.phase, motionAfTotal,
+                                        m.p38_pre_k, m.p38_pre_b, lambda, m.theta_true);
+            MotionCompResult motion_refit =
+                solveMotionCompensation(cfg, m.plane, d.phase, motionAfTotal,
+                                        m.p38_refit_k, m.p38_refit_b, lambda, m.theta_true);
             MotionCompResult motion =
-                compensateTargetMotionDoppler(cfg, m.plane, d.phase, motionAfTotal,
-                                              m.phase_slope, m.phase_intercept, lambda,
-                                              m.theta_true);
+                (m.p38_used_source == "refit") ? motion_refit : motion_pre;
             if (!motion.used_motion_comp) {
                 motion.af_phase = afRansac;
                 motion.af_total = motionAfTotal;
@@ -510,11 +564,16 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
             const double af = useCompLoc ? motion.af_geometry : legacyAf;
             const double sinA = useCompLoc ? sinAComp : sinAOld;
             const char *locUsedMode = useCompLoc ? "comp" : "old";
+            const std::string requestedSolver = normalizeMotionCompSolver(cfg.motion_comp_solver);
             const char *motionCompStatus = !cfg.motion_comp_enable
                 ? "disabled"
-                : (compValid ? "analytic_valid"
-                             : (motion.fallback_legacy ? "analytic_fallback_old"
-                                                       : "analytic_invalid"));
+                : (requestedSolver == "debug"
+                       ? (compValid ? "debug_analytic_valid"
+                                    : (motion.fallback_legacy ? "debug_analytic_fallback_old"
+                                                              : "debug_analytic_invalid"))
+                       : (compValid ? "analytic_valid"
+                                    : (motion.fallback_legacy ? "analytic_fallback_old"
+                                                              : "analytic_invalid")));
             const bool usedValid = useCompLoc ? compValid : oldValid;
             if (!usedValid) {
                 if (cfg.runtime_diagnostics_enabled || cfg.motion_comp_debug) {
@@ -540,32 +599,29 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
             }
 
             const double Rg = d.range_m;
-            const double py = Rg * sinA;
             const double dz = m.plane.H - cfg.MT_nowz;
-            const double px2 = Rg * Rg - py * py - dz * dz;
-            if (px2 < 0.0) {
-                ++dropPx;
-                continue;
-            }
-            const double px = (px2 > 0.0) ? std::sqrt(px2) : 0.0;
+            gmti::sim_geometry::Stage2GeometryConfig geom_cfg;
+            geom_cfg.squint_side = cfg.squint_side;
+            const double ground_range = gmti::sim_geometry::slantRangeToGroundRange(Rg, m.plane.H, cfg.MT_nowz, geom_cfg);
 
-            double xP = 0.0;
-            double yP = 0.0;
-            rotation_xy(py, px, flag, cosT, sinT, xP, yP);
-            xP += m.plane.E;
-            yP += m.plane.N;
+            double thetaUsedDeg = std::numeric_limits<double>::quiet_NaN();
+            double lookFromSinAE = std::numeric_limits<double>::quiet_NaN();
+            double lookFromSinAN = std::numeric_limits<double>::quiet_NaN();
+            double xP = std::numeric_limits<double>::quiet_NaN();
+            double yP = std::numeric_limits<double>::quiet_NaN();
+            project_position_from_sinA_local(m.plane, cfg, ground_range, sinA,
+                                             thetaUsedDeg, lookFromSinAE, lookFromSinAN,
+                                             xP, yP);
 
             double oldXP = std::numeric_limits<double>::quiet_NaN();
             double oldYP = std::numeric_limits<double>::quiet_NaN();
+            double thetaOldUsedDeg = std::numeric_limits<double>::quiet_NaN();
+            double lookOldE = std::numeric_limits<double>::quiet_NaN();
+            double lookOldN = std::numeric_limits<double>::quiet_NaN();
             if (std::isfinite(sinAOld) && std::abs(sinAOld) <= 1.0) {
-                const double pyOld = Rg * sinAOld;
-                const double px2Old = Rg * Rg - pyOld * pyOld - dz * dz;
-                if (px2Old >= 0.0) {
-                    const double pxOld = (px2Old > 0.0) ? std::sqrt(px2Old) : 0.0;
-                    rotation_xy(pyOld, pxOld, flag, cosT, sinT, oldXP, oldYP);
-                    oldXP += m.plane.E;
-                    oldYP += m.plane.N;
-                }
+                project_position_from_sinA_local(m.plane, cfg, ground_range, sinAOld,
+                                                 thetaOldUsedDeg, lookOldE, lookOldN,
+                                                 oldXP, oldYP);
             }
 
             double lat = 0.0;
@@ -608,6 +664,13 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
             GMTIOutput::DetectionCsvRecord rec;
             rec.period_id = 0;
             rec.beam_id = m.beam_index;
+            rec.platform_e = m.plane.E;
+            rec.platform_n = m.plane.N;
+            rec.platform_h = m.plane.H;
+            rec.platform_v = m.plane.V;
+            rec.platform_v_angle_deg = m.plane.V_angle;
+            rec.fd_ctr_wrapped = m.fd_ctr_wrapped;
+            rec.fd_ctr_unwrapped = m.fd_ctr_unwrapped;
             rec.range_bin = d.pcol;
             rec.row = d.prow;
             rec.col = d.pcol;
@@ -624,6 +687,10 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
             rec.phase_rad = d.phase;
             rec.p38_k = motion.k;
             rec.p38_b = motion.b;
+            rec.phi_static_model_rad = motion.phi_static_model;
+            rec.phi_static_model_name = motion.phi_static_model_name;
+            rec.C_ati = motion.C_ati;
+            rec.k_eff_static_phase_df = motion.k_eff_static_phase_df;
             rec.phi_static_rad = motion.phi_static;
             rec.phi_static_total_rad = motion.phi_static_total;
             rec.phi_res_rad = motion.phi_res;
@@ -640,9 +707,42 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
             rec.denom_without_k = motion.denom_without_k;
             rec.v_from_phase_raw = motion.v_from_phase_raw;
             rec.v_from_phi_res = motion.v_from_phi_res;
+            rec.v_old_mps = motion.v_old_mps;
+            rec.v_iterative_mps = motion.v_iterative_mps;
+            rec.v_analytic_mps = motion.v_analytic_mps;
+            rec.v_root1d_mps = motion.v_root1d_mps;
+            rec.af_geometry_old_hz = motion.af_geometry_old_hz;
+            rec.af_geometry_iterative_hz = motion.af_geometry_iterative_hz;
+            rec.af_geometry_analytic_hz = motion.af_geometry_analytic_hz;
+            rec.af_geometry_root1d_hz = motion.af_geometry_root1d_hz;
+            rec.root1d_cost = motion.root1d_cost;
+            rec.p38_pre_k = m.p38_pre_k;
+            rec.p38_pre_b = m.p38_pre_b;
+            rec.p38_pre_rmse = m.p38_pre_rmse;
+            rec.p38_refit_k = m.p38_refit_k;
+            rec.p38_refit_b = m.p38_refit_b;
+            rec.p38_refit_rmse = m.p38_refit_rmse;
+            rec.p38_refit_sample_count = m.p38_refit_sample_count;
+            rec.p38_refit_inlier_ratio = m.p38_refit_inlier_ratio;
+            rec.p38_refit_valid = m.p38_refit_valid;
+            rec.p38_used_k = m.p38_used_k;
+            rec.p38_used_b = m.p38_used_b;
+            rec.p38_used_source = m.p38_used_source;
+            rec.phi_static_pre_rad = motion_pre.phi_static_total;
+            rec.phi_res_pre_rad = motion_pre.phi_res;
+            rec.v_pre_mps = motion_pre.v_radial;
+            rec.phi_static_refit_rad = motion_refit.phi_static_total;
+            rec.phi_res_refit_rad = motion_refit.phi_res;
+            rec.v_refit_mps = motion_refit.v_radial;
             rec.sinA_old = sinAOld;
             rec.sinA_comp = sinAComp;
             rec.sinA_used = sinA;
+            rec.angle_from_sinA_deg = gmti::trig_lut::asin(clamp_unit_local(sinA)) * 180.0 / M_PI;
+            rec.theta_used_for_position_deg = thetaUsedDeg;
+            rec.look_from_sinA_e = lookFromSinAE;
+            rec.look_from_sinA_n = lookFromSinAN;
+            rec.look_e_diff = lookFromSinAE - ((ground_range > 1.0e-9) ? (xP - m.plane.E) / ground_range : 0.0);
+            rec.look_n_diff = lookFromSinAN - ((ground_range > 1.0e-9) ? (yP - m.plane.N) / ground_range : 0.0);
             rec.old_e = oldXP;
             rec.old_n = oldYP;
             rec.new_e = xP;
@@ -708,6 +808,7 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
                       << motion.denom_without_k << ','
                       << motion.v_from_phase_raw << ','
                       << motion.v_from_phi_res << ','
+                      << motion.v_old_mps << ','
                       << (motion.ok ? 1 : 0) << ','
                       << (cfg.motion_comp_enable ? 1 : 0) << ','
                       << (motion.used_motion_comp ? 1 : 0) << ','
@@ -721,11 +822,12 @@ bool relocateFusionDetections(const FusionGroupContext &ctx,
                       << locUsedMode << ','
                       << motionCompStatus << ','
                       << motion.solver << ','
-                      << px << ','
-                      << py << ','
+                      << motion.af_geometry_old_hz << ','
+                      << ground_range << ','
+                      << thetaUsedDeg << ','
                       << range << ','
-                      << lookE << ','
-                      << lookN << ','
+                      << lookFromSinAE << ','
+                      << lookFromSinAN << ','
                       << xP << ','
                       << yP << ','
                       << xP << ','

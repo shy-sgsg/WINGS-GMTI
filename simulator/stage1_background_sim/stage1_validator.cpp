@@ -1,7 +1,9 @@
 #include "stage1_validator.h"
+#include "dbs/NewProtocolLayout.hpp"
 
 #include <fstream>
 #include <iomanip>
+#include <algorithm>
 
 namespace gmti {
 namespace sim_stage1 {
@@ -114,9 +116,20 @@ bool writeDataStatsReport(const std::string &output_dir,
     md << "- packet order: period -> beam -> pulse -> range -> ch1 IQ + ch2 IQ\n";
     md << "- packets_written: " << stats.packets_written << "\n";
     md << "- output_bytes: " << stats.output_bytes << "\n";
+    const std::size_t channel_count =
+        static_cast<std::size_t>(std::max(2, new_cfg.new_protocol_channel_count));
+    const std::string iq_type = new_cfg.iq_data_type.empty() ? "float32" : new_cfg.iq_data_type;
+    const std::size_t packet_bytes =
+        gmti::new_protocol::packetBytes(static_cast<std::size_t>(new_cfg.ddc_len_new),
+                                        channel_count,
+                                        iq_type);
     md << "- expected bytes per full period: " << static_cast<uint64_t>(new_cfg.beam_count) *
               static_cast<uint64_t>(new_cfg.pulse_num_new) *
-              static_cast<uint64_t>(256 + new_cfg.ddc_len_new * 16) << "\n";
+              static_cast<uint64_t>(packet_bytes) << "\n";
+    md << "- iq_data_type: " << iq_type << "\n";
+    md << "- new_protocol_channel_count: " << channel_count << "\n";
+    md << "- read channels: " << new_cfg.new_protocol_read_channel_1
+       << ", " << new_cfg.new_protocol_read_channel_2 << "\n";
     md << "- ch1 mean_abs/rms/max_abs: " << stats.mean_abs_ch1 << " / " << stats.rms_ch1 << " / " << stats.max_abs_ch1 << "\n";
     md << "- ch2 mean_abs/rms/max_abs: " << stats.mean_abs_ch2 << " / " << stats.rms_ch2 << " / " << stats.max_abs_ch2 << "\n";
     md << "- has_nan/has_inf: " << boolText(stats.has_nan) << " / " << boolText(stats.has_inf) << "\n";

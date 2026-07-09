@@ -5,6 +5,7 @@
 
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace gmti {
 namespace stage2 {
@@ -85,6 +86,7 @@ struct Stage2Config {
 
 struct Stage2RunOptions {
     std::string stage2_config = "stage2_config.json";
+    std::string run_config = "";
     std::string target_config = "";
     std::string output_dir = "outputs/stage2";
     std::string scene_mode = "full";
@@ -117,6 +119,39 @@ struct Stage2RunOptions {
     int line_points_per_line = -1;
     double line_rcs_db = std::numeric_limits<double>::quiet_NaN();
     double noise_power = std::numeric_limits<double>::quiet_NaN();
+    bool legacy_override_used = false;
+    std::string parse_error;
+};
+
+struct Stage2RunTarget {
+    std::string target_id;
+    bool enabled = true;
+    std::string init_type;
+    std::string motion_type;
+    std::string amplitude_type;
+    std::string visibility_type;
+    int beam_id = -1;
+    int expected_bin = -1;
+    double theta_cmd_deg = std::numeric_limits<double>::quiet_NaN();
+    double azimuth_deg = std::numeric_limits<double>::quiet_NaN();
+    double azimuth_offset_deg = std::numeric_limits<double>::quiet_NaN();
+    double ve_mps = 0.0;
+    double vn_mps = 0.0;
+    double snr_db = std::numeric_limits<double>::quiet_NaN();
+    gmti::target_injection::TargetConfig target;
+};
+
+struct Stage2RunConfig {
+    std::string case_id;
+    std::string output_dir;
+    std::string scene_mode = "full";
+    bool truth_output = true;
+    int beam_index_base = 1;
+    Stage2Config cfg;
+    gmti::target_injection::TargetGlobalConfig global;
+    std::vector<Stage2RunTarget> targets;
+    Stage2RunOptions legacy_scene_options;
+    bool use_legacy_scene_options = false;
 };
 
 bool parseStage2CommandLine(int argc, char **argv, Stage2RunOptions &opt);
@@ -127,6 +162,9 @@ bool writeStage2OutputConfig(const Stage2Config &cfg,
                              const std::string &data_file,
                              std::string &err);
 gmti::target_injection::TargetGlobalConfig makeTargetGlobal(const Stage2Config &cfg);
+bool loadStage2RunConfig(const std::string &path, Stage2RunConfig &run, std::string &err);
+bool validateStage2RunConfig(const Stage2RunConfig &run, std::string &err);
+bool makeLegacyStage2RunConfig(const Stage2RunOptions &opt, Stage2RunConfig &run, std::string &err);
 
 } // namespace stage2
 } // namespace gmti

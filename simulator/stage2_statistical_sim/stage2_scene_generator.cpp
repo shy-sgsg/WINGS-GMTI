@@ -44,6 +44,14 @@ double rayleigh(std::mt19937 &rng, double sigma)
     return sigma * std::sqrt(-2.0 * std::log(d(rng)));
 }
 
+bool isContinuousAreaModel(const std::string &model)
+{
+    return model == "continuous_texture" ||
+           model == "continuous_surface" ||
+           model == "continuous_grid" ||
+           model == "grid_texture";
+}
+
 gmti::sim_geometry::GeoPoint projectLocalPoint(const Stage2Config &cfg, const Vec3 &local)
 {
     const gmti::sim_geometry::ENUPoint enu =
@@ -58,6 +66,11 @@ void appendArea(const Stage2Config &cfg, std::mt19937 &rng, ScattererList &out, 
     if (!cfg.scene.area.enabled) return;
     const double sigma = std::sqrt(std::max(1.0e-12, cfg.scene.area.mean_power) / 2.0);
     std::lognormal_distribution<double> texture(0.0, cfg.scene.area.texture_sigma);
+    if (isContinuousAreaModel(cfg.scene.area.model)) {
+        (void)sigma;
+        (void)texture;
+        return;
+    }
     for (int i = 0; i < cfg.scene.area.scatterer_count; ++i) {
         const double r = uni(rng, cfg.scene.range_min_m, cfg.scene.range_max_m);
         const double az = uni(rng, cfg.scene.azimuth_min_deg, cfg.scene.azimuth_max_deg);

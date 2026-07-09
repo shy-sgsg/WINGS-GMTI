@@ -1,5 +1,6 @@
 #include "stage1_writer.h"
 
+#include "dbs/NewProtocolLayout.hpp"
 #include "tinyxml.h"
 
 #include <algorithm>
@@ -74,6 +75,21 @@ static inline void putF64(std::vector<uint8_t> &b, size_t off, double v)
     uint64_t raw = 0;
     std::memcpy(&raw, &v, sizeof(double));
     putU64(b, off, raw);
+}
+
+static inline void putComplexIq(std::vector<uint8_t> &packet,
+                                size_t sample_idx,
+                                int channel_1based,
+                                int channel_count,
+                                const std::string &iq_type,
+                                const std::complex<float> &z)
+{
+    const size_t iq_bytes = gmti::new_protocol::bytesPerIq(iq_type);
+    const size_t off = gmti::new_protocol::kHeaderBytes +
+                       sample_idx * gmti::new_protocol::sampleBytes(static_cast<size_t>(channel_count), iq_type) +
+                       gmti::new_protocol::channelOffset(static_cast<size_t>(channel_1based), iq_type);
+    gmti::new_protocol::storeIqFromFloat(packet.data() + off, iq_type, z.real());
+    gmti::new_protocol::storeIqFromFloat(packet.data() + off + iq_bytes, iq_type, z.imag());
 }
 
 std::complex<float> lerp(const std::complex<float> &a, const std::complex<float> &b, double w)
@@ -268,7 +284,12 @@ bool generateStage1Data(const Stage1OldSystemConfig &old_cfg,
         err = "failed to open range_resize_stats.csv for real data stats";
         return false;
     }
-    const uint32_t prt_len = static_cast<uint32_t>(256 + new_cfg.ddc_len_new * 16);
+    const std::string iq_type = new_cfg.iq_data_type.empty() ? "float32" : new_cfg.iq_data_type;
+    const int channel_count = std::max(2, new_cfg.new_protocol_channel_count);
+    const uint32_t prt_len = static_cast<uint32_t>(
+        gmti::new_protocol::packetBytes(static_cast<size_t>(new_cfg.ddc_len_new),
+                                        static_cast<size_t>(channel_count),
+                                        iq_type));
     std::vector<uint8_t> packet(prt_len);
     std::vector<std::complex<float> > row_old_ch1(static_cast<size_t>(old_cfg.pulse_len));
     std::vector<std::complex<float> > row_old_ch2(static_cast<size_t>(old_cfg.pulse_len));
@@ -333,13 +354,14 @@ bool generateStage1Data(const Stage1OldSystemConfig &old_cfg,
                 const PosSample pos = interpPosAtUtc(pos_rows, utc);
                 fillHeader(packet, prt_counter, utc, old_cfg.week_offset, pos, bm.theta_new_deg, prt_len);
                 for (int n = 0; n < new_cfg.ddc_len_new; ++n) {
-                    const size_t poff = 256U + static_cast<size_t>(n) * 16U;
                     const std::complex<float> z1 = (opt.channel_mode == "ch2") ? std::complex<float>(0, 0) : row_new_ch1[static_cast<size_t>(n)];
                     const std::complex<float> z2 = (opt.channel_mode == "ch1") ? std::complex<float>(0, 0) : row_new_ch2[static_cast<size_t>(n)];
-                    putF32(packet, poff + 0, z1.real());
-                    putF32(packet, poff + 4, z1.imag());
-                    putF32(packet, poff + 8, z2.real());
-                    putF32(packet, poff + 12, z2.imag());
+                    putComplexIq(packet, static_cast<size_t>(n),
+                                 new_cfg.new_protocol_read_channel_1,
+                                 channel_count, iq_type, z1);
+                    putComplexIq(packet, static_cast<size_t>(n),
+                                 new_cfg.new_protocol_read_channel_2,
+                                 channel_count, iq_type, z2);
                 }
                 out.write(reinterpret_cast<const char *>(packet.data()), static_cast<std::streamsize>(packet.size()));
                 if (!out) {
@@ -410,6 +432,10 @@ bool writeStage1ConfigXml(const Stage1OldSystemConfig &old_cfg,
     setNode("INFO_Type", "1");
     setNode("GMTI_data_new", data_file);
     setNode("isSeparated", "separate");
+    setNode("iq_data_type", new_cfg.iq_data_type);
+    setInt("new_protocol_channel_count", new_cfg.new_protocol_channel_count);
+    setInt("new_protocol_read_channel_1", new_cfg.new_protocol_read_channel_1);
+    setInt("new_protocol_read_channel_2", new_cfg.new_protocol_read_channel_2);
     setInt("info_len", 256);
     setInt("pulse_len", new_cfg.ddc_len_new);
     setInt("rg_len", new_cfg.pc_crop_len);
@@ -441,14 +467,27 @@ bool writeStage1ConfigXml(const Stage1OldSystemConfig &old_cfg,
     setInt("motion_comp_enable", 0);
     setInt("motion_comp_analytic_enable", 1);
     setInt("motion_comp_use_row_doppler", 1);
-    setInt("motion_comp_iter", 3);
+    setNode("motion_comp_solver", "debug");
+    setInt("motion_comp_iter", 8);
+    setDouble("motion_comp_iter_tol_mps", 1.0e-4);
     setInt("ati_velocity_sign", 1);
     setInt("ati_phase_to_velocity_sign", 1);
     setInt("motion_doppler_axis_sign", -1);
     setDouble("ati_phase_bias_rad", 0.0);
-    setDouble("ati_vmax_mps", 60.0);
+    setDouble("ati_vmax_mps", 1.6);
     setDouble("motion_comp_denom_min", 1.0e-6);
+    setDouble("motion_comp_root_grid_step_mps", 0.02);
+    setDouble("motion_comp_root_cost_max", 0.25);
     setInt("motion_comp_debug", 1);
+    setInt("p38_refit_enable", 1);
+    setInt("p38_refit_row_guard_bins", 2);
+    setInt("p38_refit_range_guard_bins", 2);
+    setNode("p38_refit_top_power_frac", "0.01");
+    setInt("p38_refit_min_sample_count", 8);
+    setNode("p38_refit_min_inlier_ratio", "0.60");
+    setNode("p38_refit_max_rmse_rad", "0.60");
+    setNode("p38_refit_max_delta_k", "0.01");
+    setNode("p38_refit_max_delta_b_rad", "1.50");
 
     if (!doc.SaveFile(path.c_str())) {
         err = "failed to save generated XML: " + path;

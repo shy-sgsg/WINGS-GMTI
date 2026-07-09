@@ -13,8 +13,9 @@ bool TruthWriter::open(const std::string &truth_dir, std::string &err)
         return false;
     }
     pulse_.open(joinPath(truth_dir, "truth_pulse.csv").c_str());
-    summary_.open(joinPath(truth_dir, "truth_beam_summary.csv").c_str());
-    if (!pulse_ || !summary_) {
+    summary_.open(joinPath(truth_dir, "truth_targets_by_beam.csv").c_str());
+    moving_.open(joinPath(truth_dir, "moving_target_truth.csv").c_str());
+    if (!pulse_ || !summary_ || !moving_) {
         err = "failed to open truth output";
         return false;
     }
@@ -32,20 +33,22 @@ bool TruthWriter::open(const std::string &truth_dir, std::string &err)
            << "ref_target_e,ref_target_n,ref_target_lat,ref_target_lon,"
            << "echo_delay_sample_center_used,"
            << "ref_platform_ve,ref_platform_vn,look_e,look_n,ground_range_m,slant_range_m,"
-           << "expected_range_bin,geometry_config_name,moving_target_speed_mps,rcs_db,"
-           << "target_ve_mps,target_vn_mps,target_vr_self_mps,target_vt_self_mps,af_motion_truth_hz\n";
-    summary_ << "period_id,beam_id,beam_id_0based,beam_id_1based,target_id,visible_pulse_count,mean_range_m,"
-             << "range_m,range_sample_float,theta_cmd_deg,"
-             << "mean_range_sample,mean_target_azimuth_deg,mean_beam_gain,"
-             << "mean_radial_velocity_mps,mean_target_amplitude,injected_sample_count,"
-             << "ref_pulse_idx,ref_platform_x,ref_platform_y,ref_platform_z,"
-             << "target_x,target_y,target_z,"
-             << "ref_platform_e,ref_platform_n,ref_platform_lat,ref_platform_lon,"
-             << "target_e,target_n,target_lat,target_lon,"
-             << "echo_delay_sample_center_used,"
-             << "ref_platform_ve,ref_platform_vn,look_e,look_n,ground_range_m,slant_range_m,"
-             << "expected_range_bin,geometry_config_name,moving_target_speed_mps,rcs_db,"
-             << "target_ve_mps,target_vn_mps,target_vr_self_mps,target_vt_self_mps,af_motion_truth_hz\n";
+           << "expected_range_bin,geometry_config_name,moving_target_speed_mps,rcs_db,snr_db,"
+           << "target_ve_mps,target_vn_mps,target_vr_self_mps,target_vt_self_mps,af_motion_truth_hz,"
+           << "af_geometry_truth_hz,af_total_truth_hz,row_truth,"
+           << "phi_total_truth_rad,phi_static_truth_rad,phi_motion_truth_rad\n";
+    summary_ << "case_id,target_id,period_id,beam_id,utc_mid,"
+             << "e_mid,n_mid,lat_mid,lon_mid,"
+             << "range_m,range_bin,expected_bin,"
+             << "theta_cmd_deg,azimuth_deg,"
+             << "ve_mps,vn_mps,vr_self_mps,vt_self_mps,"
+             << "visible,snr_db\n";
+    moving_ << "case_id,target_id,period_id,beam_id,pulse_id,utc,"
+            << "e,n,lat,lon,"
+            << "range_m,range_bin,expected_bin,"
+            << "theta_cmd_deg,azimuth_deg,"
+            << "ve_mps,vn_mps,vr_self_mps,vt_self_mps,"
+            << "visible,snr_db,amplitude,phase_rad\n";
     return true;
 }
 
@@ -120,17 +123,51 @@ void TruthWriter::writePulse(const PulseTruth &t)
            << t.geometry_config_name << ","
            << t.moving_target_speed_mps << ","
            << t.rcs_db << ","
+           << t.snr_db << ","
            << t.target_ve_mps << ","
            << t.target_vn_mps << ","
            << t.target_vr_self_mps << ","
            << t.target_vt_self_mps << ","
-           << t.af_motion_truth_hz << "\n";
+           << t.af_motion_truth_hz << ","
+           << t.af_geometry_truth_hz << ","
+           << t.af_total_truth_hz << ","
+           << t.row_truth << ","
+           << t.phi_total_truth_rad << ","
+           << t.phi_static_truth_rad << ","
+           << t.phi_motion_truth_rad << "\n";
 
-    const std::pair<int, int> key(t.period_id, t.beam_id);
-    BeamSummaryAccumulator &a = acc_[key];
+    moving_ << std::setprecision(12)
+            << case_id_ << ","
+            << t.target_name << ","
+            << t.period_id << ","
+            << (t.beam_id + 1) << ","
+            << t.pulse_id << ","
+            << g.time_sec << ","
+            << t.target_e << ","
+            << t.target_n << ","
+            << t.target_lat << ","
+            << t.target_lon << ","
+            << g.range_m << ","
+            << t.expected_range_bin << ","
+            << t.expected_range_bin << ","
+            << g.theta_cmd_deg << ","
+            << g.target_azimuth_deg << ","
+            << t.target_ve_mps << ","
+            << t.target_vn_mps << ","
+            << t.target_vr_self_mps << ","
+            << t.target_vt_self_mps << ","
+            << (t.injection_enabled ? 1 : 0) << ","
+            << t.snr_db << ","
+            << t.target_amplitude << ","
+            << t.phi_total_truth_rad << "\n";
+
+    std::ostringstream key;
+    key << t.period_id << ":" << t.beam_id << ":" << t.target_name;
+    BeamSummaryAccumulator &a = acc_[key.str()];
     a.period_id = t.period_id;
     a.beam_id = t.beam_id;
     a.target_id = t.target_id;
+    a.target_name = t.target_name;
     ++a.rows;
     if (t.visible_by_beam) ++a.visible_pulse_count;
     a.sum_range_m += g.range_m;
@@ -144,6 +181,7 @@ void TruthWriter::writePulse(const PulseTruth &t)
     if (t.has_ref_geometry) {
         a.has_ref_geometry = true;
         a.ref_pulse_idx = t.ref_pulse_idx;
+        a.ref_time_s = t.ref_time_s;
         a.ref_platform = t.ref_platform;
         a.ref_target = t.ref_target;
         a.ref_platform_e = t.ref_platform_e;
@@ -167,68 +205,49 @@ void TruthWriter::writePulse(const PulseTruth &t)
         a.geometry_config_name = t.geometry_config_name;
         a.moving_target_speed_mps = t.moving_target_speed_mps;
         a.rcs_db = t.rcs_db;
+        a.snr_db = t.snr_db;
         a.target_ve_mps = t.target_ve_mps;
         a.target_vn_mps = t.target_vn_mps;
         a.target_vr_self_mps = t.target_vr_self_mps;
         a.target_vt_self_mps = t.target_vt_self_mps;
         a.af_motion_truth_hz = t.af_motion_truth_hz;
+        a.af_geometry_truth_hz = t.af_geometry_truth_hz;
+        a.af_total_truth_hz = t.af_total_truth_hz;
+        a.phi_total_truth_rad = t.phi_total_truth_rad;
+        a.phi_static_truth_rad = t.phi_static_truth_rad;
+        a.phi_motion_truth_rad = t.phi_motion_truth_rad;
+        a.row_truth = t.row_truth;
     }
 }
 
 void TruthWriter::writeSummary()
 {
-    for (std::map<std::pair<int, int>, BeamSummaryAccumulator>::const_iterator it = acc_.begin();
+    for (std::map<std::string, BeamSummaryAccumulator>::const_iterator it = acc_.begin();
          it != acc_.end(); ++it) {
         const BeamSummaryAccumulator &a = it->second;
         const double denom = a.rows > 0 ? static_cast<double>(a.rows) : 1.0;
         summary_ << std::setprecision(12)
+                 << case_id_ << ","
+                 << a.target_name << ","
                  << a.period_id << ","
                  << (a.beam_id + 1) << ","
-                 << a.beam_id << ","
-                 << (a.beam_id + 1) << ","
-                 << a.target_id << ","
-                 << a.visible_pulse_count << ","
-                 << a.sum_range_m / denom << ","
-                 << (a.has_ref_geometry ? a.ref_range_m : a.sum_range_m / denom) << ","
-                 << (a.has_ref_geometry ? a.ref_range_sample_float : a.sum_range_sample / denom) << ","
-                 << a.sum_theta_cmd_deg / denom << ","
-                 << a.sum_range_sample / denom << ","
-                 << a.sum_target_azimuth_deg / denom << ","
-                 << a.sum_beam_gain / denom << ","
-                 << a.sum_radial_velocity_mps / denom << ","
-                 << a.sum_target_amplitude / denom << ","
-                 << a.injected_sample_count << ","
-                 << (a.has_ref_geometry ? a.ref_pulse_idx : -1) << ","
-                 << (a.has_ref_geometry ? a.ref_platform.x : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ref_platform.y : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ref_platform.z : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ref_target.x : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ref_target.y : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ref_target.z : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ref_platform_e : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ref_platform_n : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ref_platform_lat : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ref_platform_lon : 0.0) << ","
+                 << (a.has_ref_geometry ? a.ref_time_s : 0.0) << ","
                  << (a.has_ref_geometry ? a.ref_target_e : 0.0) << ","
                  << (a.has_ref_geometry ? a.ref_target_n : 0.0) << ","
                  << (a.has_ref_geometry ? a.ref_target_lat : 0.0) << ","
                  << (a.has_ref_geometry ? a.ref_target_lon : 0.0) << ","
-                 << (a.has_ref_geometry ? a.echo_delay_sample_center_used : a.sum_range_sample / denom) << ","
-                 << (a.has_ref_geometry ? a.ref_platform_ve : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ref_platform_vn : 0.0) << ","
-                 << (a.has_ref_geometry ? a.look_e : 0.0) << ","
-                 << (a.has_ref_geometry ? a.look_n : 0.0) << ","
-                 << (a.has_ref_geometry ? a.ground_range_m : 0.0) << ","
-                 << (a.has_ref_geometry ? a.slant_range_m : 0.0) << ","
+                 << (a.has_ref_geometry ? a.ref_range_m : a.sum_range_m / denom) << ","
                  << (a.has_ref_geometry ? a.expected_range_bin : -1) << ","
-                 << (a.has_ref_geometry ? a.geometry_config_name : "") << ","
-                 << (a.has_ref_geometry ? a.moving_target_speed_mps : std::numeric_limits<double>::quiet_NaN()) << ","
-                 << (a.has_ref_geometry ? a.rcs_db : std::numeric_limits<double>::quiet_NaN()) << ","
+                 << (a.has_ref_geometry ? a.expected_range_bin : -1) << ","
+                 << a.sum_theta_cmd_deg / denom << ","
+                 << a.sum_target_azimuth_deg / denom << ","
                  << (a.has_ref_geometry ? a.target_ve_mps : std::numeric_limits<double>::quiet_NaN()) << ","
                  << (a.has_ref_geometry ? a.target_vn_mps : std::numeric_limits<double>::quiet_NaN()) << ","
                  << (a.has_ref_geometry ? a.target_vr_self_mps : std::numeric_limits<double>::quiet_NaN()) << ","
                  << (a.has_ref_geometry ? a.target_vt_self_mps : std::numeric_limits<double>::quiet_NaN()) << ","
-                 << (a.has_ref_geometry ? a.af_motion_truth_hz : std::numeric_limits<double>::quiet_NaN()) << "\n";
+                 << (a.visible_pulse_count > 0 ? 1 : 0) << ","
+                 << (a.has_ref_geometry ? a.snr_db : std::numeric_limits<double>::quiet_NaN())
+                 << "\n";
     }
 }
 
@@ -236,6 +255,7 @@ void TruthWriter::close()
 {
     if (pulse_) pulse_.close();
     if (summary_) summary_.close();
+    if (moving_) moving_.close();
 }
 
 bool writeTargetInjectionReport(const std::string &path,

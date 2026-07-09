@@ -1,5 +1,6 @@
 #include "target_config.h"
 #include "truth_writer.h"
+#include "dbs/NewProtocolLayout.hpp"
 
 #include <cmath>
 #include <algorithm>
@@ -54,13 +55,21 @@ std::string chooseInputFile(const RunOptions &run, const RadarConfig &radar)
 
 void updateStatsFromPacket(const std::vector<uint8_t> &packet, const RadarConfig &radar, InjectionStats &stats)
 {
+    const std::string iq_type = radar.iq_data_type.empty() ? "float32" : radar.iq_data_type;
+    const std::size_t channel_count = static_cast<std::size_t>(std::max(2, radar.new_protocol_channel_count));
+    const std::size_t iq_bytes = gmti::new_protocol::bytesPerIq(iq_type);
+    const int ch1 = radar.new_protocol_read_channel_1;
+    const int ch2 = radar.new_protocol_read_channel_2;
     for (int n = 0; n < radar.pulse_len; ++n) {
-        const size_t off = 256U + static_cast<size_t>(n) * 16U;
+        const size_t off = gmti::new_protocol::kHeaderBytes +
+                           static_cast<size_t>(n) * gmti::new_protocol::sampleBytes(channel_count, iq_type);
+        const size_t ch1_off = off + gmti::new_protocol::channelOffset(static_cast<size_t>(ch1), iq_type);
+        const size_t ch2_off = off + gmti::new_protocol::channelOffset(static_cast<size_t>(ch2), iq_type);
         const float v[4] = {
-            loadF32LE(&packet[off]),
-            loadF32LE(&packet[off + 4]),
-            loadF32LE(&packet[off + 8]),
-            loadF32LE(&packet[off + 12])
+            gmti::new_protocol::loadIqAsFloat(&packet[ch1_off], iq_type),
+            gmti::new_protocol::loadIqAsFloat(&packet[ch1_off + iq_bytes], iq_type),
+            gmti::new_protocol::loadIqAsFloat(&packet[ch2_off], iq_type),
+            gmti::new_protocol::loadIqAsFloat(&packet[ch2_off + iq_bytes], iq_type)
         };
         for (int k = 0; k < 4; ++k) {
             if (std::isnan(v[k])) stats.has_nan = true;
@@ -94,7 +103,10 @@ int main(int argc, char **argv)
     applyRunOverrides(run, cfg.global);
     makeOutputDirs(run.output_dir);
 
-    const size_t packet_bytes = 256U + static_cast<size_t>(cfg.radar.pulse_len) * 16U;
+    const size_t packet_bytes = gmti::new_protocol::packetBytes(
+        static_cast<size_t>(cfg.radar.pulse_len),
+        static_cast<size_t>(std::max(2, cfg.radar.new_protocol_channel_count)),
+        cfg.radar.iq_data_type.empty() ? "float32" : cfg.radar.iq_data_type);
     const int prts_per_period = cfg.radar.beam_count * cfg.radar.pulse_num;
     const uint64_t start_prt = static_cast<uint64_t>(run.period_start) * static_cast<uint64_t>(prts_per_period);
     const int beam_end = std::min(cfg.radar.beam_count,

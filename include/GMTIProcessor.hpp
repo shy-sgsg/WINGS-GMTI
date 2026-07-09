@@ -282,39 +282,39 @@ private:
                          std::vector<int> &phi_diss_range);
 
     bool clutter_cancel_38_paper_1(
-        const std::vector<double> &y_faAxis,          // len = cfg.pulse_num
-        const std::vector<std::complex<double>> &F1f, // size = Na*Nr
-        const std::vector<std::complex<double>> &F2f, // size = Na*Nr
+        const std::vector<float> &y_faAxis,
+        const std::vector<std::complex<float>> &F1f,
+        const std::vector<std::complex<float>> &F2f,
         int az_st, int rg_st, int az_ed, int rg_ed,
-        const Config &cfg, // ☆ 新增：显式传入 cfg
-        std::vector<std::complex<double>> &prosig_38,
-        std::array<double, 2> &p_38,
-        std::vector<double> &phase_tra_38_cut,
-        std::vector<double> &row_fa_cut);
+        const Config &cfg,
+        std::vector<std::complex<float>> &prosig_38,
+        std::array<float, 2> &p_38,
+        std::vector<float> &phase_tra_38_cut,
+        std::vector<float> &row_fa_cut);
 
     bool clutter_cancel_38_paper_1_p38(
-        const std::vector<double> &y_faAxis,
-        const std::vector<std::complex<double>> &F1f,
-        const std::vector<std::complex<double>> &F2f,
+        const std::vector<float> &y_faAxis,
+        const std::vector<std::complex<float>> &F1f,
+        const std::vector<std::complex<float>> &F2f,
         int az_st, int rg_st, int az_ed, int rg_ed,
         const Config &cfg,
-        std::array<double, 2> &p_38);
+        std::array<float, 2> &p_38);
 
     bool clutter_cancel_38_paper_1_p38_cuda(
-        const std::vector<double> &y_faAxis,
+        const std::vector<float> &y_faAxis,
         int az_st, int rg_st, int az_ed, int rg_ed,
         const Config &cfg,
-        std::array<double, 2> &p_38,
-        std::vector<double> *phase_tra_38 = nullptr);
+        std::array<float, 2> &p_38,
+        std::vector<float> *phase_tra_38 = nullptr);
 
     bool clutter_cancel_38_paper_1_cuda(
-        const std::vector<double> &y_faAxis,
+        const std::vector<float> &y_faAxis,
         int az_st, int rg_st, int az_ed, int rg_ed,
         const Config &cfg,
-        std::vector<std::complex<double>> &prosig_38,
-        std::array<double, 2> &p_38,
-        std::vector<double> &phase_tra_38_cut,
-        std::vector<double> &row_fa_cut);
+        std::vector<std::complex<float>> &prosig_38,
+        std::array<float, 2> &p_38,
+        std::vector<float> &phase_tra_38_cut,
+        std::vector<float> &row_fa_cut);
 
     bool clutter_cancel_38_paper_2(
         const std::vector<double>& y_faAxis,
@@ -328,32 +328,19 @@ private:
         std::vector<double>& row_fa_cut
     );
 
-    bool clutter_38_V2(
-        const std::vector<std::complex<double>> &data1,
-        const std::vector<std::complex<double>> &data2,
-        const std::vector<std::complex<double>> &rg_phi, // len = cfg.rg_len
-        int skip_num,
-        int az_st, int rg_st,
-        int az_ed, int rg_ed,
-        const std::vector<double> &y_faAxis, // len = cfg.pulse_num
-        double fa2,
-        const Config &cfg, // ☆ 新增：显式传入 cfg
-        std::vector<std::complex<double>> &CSI_result_38paper,
-        std::array<double, 2> &p_38,
-        std::vector<double> &phase_38_phase,
-        std::vector<double> &phase_38_fa);
-
     bool dpca_cfar2_fast(const std::vector<std::complex<double>> &GMTI_new,
                     double pf, int c_num, int b_num, const std::string &type,
                     const Config &cfg,
                     std::vector<double> &mydata,
                     std::vector<int> &prow,
-                    std::vector<int> &pcol);
+                    std::vector<int> &pcol,
+                    std::vector<float> *power_map = nullptr);
     bool dpca_cfar2_fast_cuda(const std::vector<std::complex<float>> &CSI_out,
                               int band_st, int band_ed,
                               float pf, int c_num, int b_num, const std::string &type,
                               const Config &cfg,
-                              std::vector<float> &mydata);
+                              std::vector<float> &mydata,
+                              std::vector<float> *power_map = nullptr);
     bool target_select(const std::vector<std::complex<double>> &GMTI_dataf_1,
                        const std::vector<std::complex<double>> &GMTI_dataf_2,
                        const std::vector<int> &prow,

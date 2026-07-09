@@ -88,6 +88,11 @@ LookVectorEN makeAlgorithmLookVectorEN(double platform_ve,
                                        double theta_deg,
                                        const Stage2GeometryConfig &cfg);
 
+LookVectorEN computeLookFromSinA(double sinA,
+                                 double platform_ve,
+                                 double platform_vn,
+                                 int look_side);
+
 double slantRangeToGroundRange(double slant_range_m,
                                double platform_height_m,
                                double target_height_m,

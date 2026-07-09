@@ -3,12 +3,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
+#include <string>
 
 namespace gmti {
 namespace new_protocol {
 
 static const std::size_t kHeaderBytes = 256;
-static const std::size_t kBytesPerSample = 16;
+static const std::size_t kBytesPerFloatIq = sizeof(float);
+static const std::size_t kBytesPerInt16Iq = sizeof(int16_t);
 
 static const std::size_t kOffMagicHead = 0;
 static const std::size_t kOffVersion = 8;
@@ -26,9 +29,37 @@ static const std::size_t kOffPrtLowByte = 208;
 static const std::size_t kOffThetaDegX100 = 218;
 static const std::size_t kOffMagicTail = 248;
 
-inline std::size_t packetBytes(std::size_t samples_per_prt)
+inline bool isInt16IqType(const std::string &iq_data_type)
 {
-    return kHeaderBytes + samples_per_prt * kBytesPerSample;
+    return iq_data_type == "int16" || iq_data_type == "iq_int16" ||
+           iq_data_type == "short" || iq_data_type == "s16";
+}
+
+inline std::size_t bytesPerIq(const std::string &iq_data_type)
+{
+    return isInt16IqType(iq_data_type) ? kBytesPerInt16Iq : kBytesPerFloatIq;
+}
+
+inline std::size_t bytesPerChannel(const std::string &iq_data_type)
+{
+    return 2U * bytesPerIq(iq_data_type);
+}
+
+inline std::size_t sampleBytes(std::size_t channel_count, const std::string &iq_data_type)
+{
+    return channel_count * bytesPerChannel(iq_data_type);
+}
+
+inline std::size_t packetBytes(std::size_t samples_per_prt,
+                               std::size_t channel_count,
+                               const std::string &iq_data_type)
+{
+    return kHeaderBytes + samples_per_prt * sampleBytes(channel_count, iq_data_type);
+}
+
+inline std::size_t channelOffset(std::size_t channel_index_1based, const std::string &iq_data_type)
+{
+    return (channel_index_1based - 1U) * bytesPerChannel(iq_data_type);
 }
 
 inline uint16_t loadU16LE(const uint8_t *p)
@@ -69,6 +100,20 @@ inline float loadF32LE(const uint8_t *p)
     return v;
 }
 
+inline float loadIqAsFloat(const uint8_t *p, const std::string &iq_data_type)
+{
+    return isInt16IqType(iq_data_type)
+        ? static_cast<float>(loadI16LE(p))
+        : loadF32LE(p);
+}
+
+inline int16_t satI16FromFloat(float x)
+{
+    if (x > 32767.0f) return 32767;
+    if (x < -32768.0f) return -32768;
+    return static_cast<int16_t>(std::floor(x + (x >= 0.0f ? 0.5f : -0.5f)));
+}
+
 inline double loadF64LE(const uint8_t *p)
 {
     const uint64_t raw = loadU64LE(p);
@@ -107,6 +152,15 @@ inline void storeF32LE(uint8_t *p, float v)
     uint32_t raw = 0;
     std::memcpy(&raw, &v, sizeof(float));
     storeU32LE(p, raw);
+}
+
+inline void storeIqFromFloat(uint8_t *p, const std::string &iq_data_type, float v)
+{
+    if (isInt16IqType(iq_data_type)) {
+        storeI16LE(p, satI16FromFloat(v));
+    } else {
+        storeF32LE(p, v);
+    }
 }
 
 inline void storeF64LE(uint8_t *p, double v)

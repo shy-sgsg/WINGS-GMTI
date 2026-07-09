@@ -118,9 +118,13 @@ set_tag("result_add", result_dir)
 set_tag("motion_comp_enable", motion_enable)
 set_tag("motion_comp_use_row_doppler", "1")
 set_tag("motion_comp_debug", "1")
+set_tag("motion_comp_iter", "8")
+set_tag("motion_comp_iter_tol_mps", "1e-4")
+set_tag("motion_comp_root_grid_step_mps", "0.02")
+set_tag("motion_comp_root_cost_max", "0.25")
 
-# 解析解模式，如果你的代码没有这个字段，不影响；如果有则启用
-set_tag("motion_comp_solver", "analytic")
+# debug 模式落盘 old/iterative/analytic/root1d 对照，二进制输出使用 analytic。
+set_tag("motion_comp_solver", "debug")
 
 # 符号：当前正向注入的 angle(F1*conj(F2)) 运动相位随正径向速度为正，
 # 但 Doppler 轴上同一运动量表现为负频移。
@@ -131,7 +135,7 @@ set_tag("motion_doppler_axis_sign", "-1")
 set_tag("ati_velocity_sign", "1")
 
 # 速度限幅，先设成略小于或接近无模糊范围，避免绕相位的目标误导
-set_tag("ati_vmax_mps", "2.0")
+set_tag("ati_vmax_mps", "1.6")
 set_tag("ati_phase_bias_rad", "0.0")
 
 # 融合路径开关
